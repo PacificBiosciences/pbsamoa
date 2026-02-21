@@ -1,3 +1,5 @@
+#include "TestData.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <gtest/gtest.h>
@@ -9,28 +11,19 @@
 #include <span>
 #include <vector>
 
-namespace {
-
-std::filesystem::path TestDataDir()
-{
-    return std::filesystem::path{__FILE__}.parent_path().parent_path() / "data";
-}
-
-}  // namespace
-
 namespace PacBio {
 namespace Samoa {
 
 TEST(BgzfReader, OpenValidBam)
 {
-    const std::filesystem::path path{TestDataDir() / "header_only.bam"};
+    const std::filesystem::path path{tests::DataDir / "header_only.bam"};
     const BgzfReader reader{path};
     EXPECT_TRUE(reader.HasEofMarker());
 }
 
 TEST(BgzfReader, ReadFirstBlock)
 {
-    const std::filesystem::path path{TestDataDir() / "header_only.bam"};
+    const std::filesystem::path path{tests::DataDir / "header_only.bam"};
     BgzfReader reader{path};
 
     std::vector<std::byte> buffer{};
@@ -42,7 +35,7 @@ TEST(BgzfReader, ReadFirstBlock)
 
 TEST(BgzfReader, ReadAllBlocks)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfReader reader{path};
 
     std::size_t totalDecompressed{0};
@@ -65,14 +58,14 @@ TEST(BgzfReader, ReadAllBlocks)
 
 TEST(BgzfReader, EofMarkerDetected)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     const BgzfReader reader{path};
     EXPECT_TRUE(reader.HasEofMarker());
 }
 
 TEST(BgzfReader, SeekToVirtualOffset)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfReader reader{path};
 
     std::vector<std::byte> firstRead{};

@@ -1,3 +1,5 @@
+#include "TestData.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <pbsamoa/io/BamRawReader.hpp>
@@ -13,21 +15,12 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace {
-
-std::filesystem::path TestDataDir()
-{
-    return std::filesystem::path{__FILE__}.parent_path().parent_path() / "data";
-}
-
-}  // namespace
-
 namespace PacBio {
 namespace Samoa {
 
 TEST(BgzfPipeline, OpenValidBam)
 {
-    const std::filesystem::path path{TestDataDir() / "header_only.bam"};
+    const std::filesystem::path path{tests::DataDir / "header_only.bam"};
     const BgzfPipeline pipeline{path, 2};
     EXPECT_TRUE(pipeline.HasEofMarker());
 }
@@ -40,7 +33,7 @@ TEST(BgzfPipeline, ThrowOnNonexistentFile)
 TEST(BgzfPipeline, SyncModeMatchesBgzfReader)
 {
     // numWorkers=0 should produce identical output to BgzfReader(path) sync mode
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfPipeline pipeline{path, 0};
     BgzfReader reader{path};
 
@@ -67,7 +60,7 @@ TEST(BgzfPipeline, SyncModeMatchesBgzfReader)
 TEST(BgzfPipeline, PipelineModeMatchesSyncMode)
 {
     // Pipeline with N workers must produce identical block-by-block output
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfPipeline sync{path, 0};
     BgzfPipeline parallel{path, 4};
 
@@ -98,7 +91,7 @@ TEST(BgzfPipeline, PipelineModeMatchesSyncMode)
 TEST(BgzfPipeline, ManyRecordsBamCorrectness)
 {
     // Larger file with many BGZF blocks
-    const std::filesystem::path path{TestDataDir() / "many_records.bam"};
+    const std::filesystem::path path{tests::DataDir / "many_records.bam"};
     BgzfPipeline sync{path, 0};
     BgzfPipeline parallel{path, 8};
 
@@ -125,7 +118,7 @@ TEST(BgzfPipeline, ManyRecordsBamCorrectness)
 TEST(BgzfPipeline, EofOnSmallFile)
 {
     // header_only.bam has just 1 BGZF block (header) + EOF marker
-    const std::filesystem::path path{TestDataDir() / "header_only.bam"};
+    const std::filesystem::path path{tests::DataDir / "header_only.bam"};
     BgzfPipeline pipeline{path, 2};
 
     std::vector<std::byte> buf(65536);
@@ -140,7 +133,7 @@ TEST(BgzfPipeline, EofOnSmallFile)
 
 TEST(BgzfPipeline, SeekBackToStart)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfPipeline pipeline{path, 4};
 
     std::vector<std::byte> firstBuf(65536);
@@ -161,7 +154,7 @@ TEST(BgzfPipeline, SeekBackToStart)
 
 TEST(BgzfPipeline, TellTracksPosition)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfPipeline pipeline{path, 2};
 
     // Before first read, tell should be 0
@@ -185,7 +178,7 @@ TEST(BgzfPipeline, TellTracksPosition)
 
 TEST(BgzfPipeline, SingleWorkerCorrectness)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
     BgzfPipeline one{path, 1};
     BgzfPipeline many{path, 8};
 
@@ -211,7 +204,7 @@ TEST(BgzfPipeline, SingleWorkerCorrectness)
 TEST(BgzfPipeline, ReadRecordMatchesSyncBamRawReader)
 {
     // Pipeline ReadRecord() must produce identical records to sync BamRawReader
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
     // Reference: sync BamRawReader reads all records
     BamRawReader syncReader{path};
@@ -237,7 +230,7 @@ TEST(BgzfPipeline, ReadRecordMatchesSyncBamRawReader)
 
 TEST(BgzfPipeline, ReadRecordManyRecordsBam)
 {
-    const std::filesystem::path path{TestDataDir() / "many_records.bam"};
+    const std::filesystem::path path{tests::DataDir / "many_records.bam"};
 
     BamRawReader syncReader{path};
     std::vector<std::vector<std::byte>> refRecords;
@@ -261,7 +254,7 @@ TEST(BgzfPipeline, ReadRecordManyRecordsBam)
 
 TEST(BgzfPipeline, ReadRecordSingleWorker)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
     BamRawReader syncReader{path};
     std::vector<std::vector<std::byte>> refRecords;
@@ -285,7 +278,7 @@ TEST(BgzfPipeline, ReadRecordSingleWorker)
 
 TEST(BgzfPipeline, ReadRecordEofOnHeaderOnly)
 {
-    const std::filesystem::path path{TestDataDir() / "header_only.bam"};
+    const std::filesystem::path path{tests::DataDir / "header_only.bam"};
     BgzfPipeline pipeline{path, 2};
     pipeline.ParseHeader();
 
@@ -296,7 +289,7 @@ TEST(BgzfPipeline, ReadRecordEofOnHeaderOnly)
 
 TEST(BgzfPipeline, ParseHeaderMatchesBamRawReader)
 {
-    const std::filesystem::path path{TestDataDir() / "spec_example.bam"};
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
     const BamRawReader syncReader{path};
     BgzfPipeline pipeline{path, 4};
