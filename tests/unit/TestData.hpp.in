@@ -1,0 +1,22 @@
+#ifndef PBSAMOA_TESTDATA_HPP
+#define PBSAMOA_TESTDATA_HPP
+
+#include <filesystem>
+
+namespace tests {
+
+inline const std::filesystem::path DataDir{"@TESTS_DATA_DIR@"};
+
+}  // namespace tests
+
+namespace PacBio {
+namespace Samoa {
+namespace tests {
+
+inline const auto& DataDir = ::tests::DataDir;
+
+}  // namespace tests
+}  // namespace Samoa
+}  // namespace PacBio
+
+#endif  // PBSAMOA_TESTDATA_HPP

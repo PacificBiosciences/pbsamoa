@@ -1,0 +1,4 @@
+[wrap-git]
+directory=pbtestutils
+url=https://github.com/PacificBiosciences/pbtestutils.git
+revision=develop

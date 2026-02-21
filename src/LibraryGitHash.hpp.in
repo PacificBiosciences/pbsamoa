@@ -1,0 +1,14 @@
+#ifndef PBSAMOA_LIBRARYGITHASH_HPP_IN
+#define PBSAMOA_LIBRARYGITHASH_HPP_IN
+
+#include <string_view>
+
+namespace PacBio {
+namespace Samoa {
+
+constexpr std::string_view LIBRARY_GIT_SHA1{"@PBSAMOA_GIT_SHA1@"};
+
+}  // namespace Samoa
+}  // namespace PacBio
+
+#endif  // PBSAMOA_LIBRARYGITHASH_HPP_IN
