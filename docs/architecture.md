@@ -6,12 +6,12 @@ below it.
 ```
 ┌────────────────────────────────────────────────────────┐
 │  API                                                   │
-│  BamRawReader  BamRecordReader  SamReader               │
+│  BamRawReader  BamRecordReader  SamReader              │
 │  BamWriter  SamWriter  BaiIndex                        │
 │  BamZmwReader  ZmiBamWriter                            │
 ├────────────────────────────────────────────────────────┤
 │  Record                                                │
-│  RawRecord  BamRecord  RawRecordBatch                 │
+│  RawRecord  BamRecord  RawRecordBatch                  │
 │  ZmwGroup                                              │
 │  CigarOp  Sequence  Tags  SamHeader                    │
 ├────────────────────────────────────────────────────────┤
@@ -29,13 +29,13 @@ this codebase.
 ```
 ┌─ API ──────────────────────────────────────────────────────────────────┐
 │                                                                        │
-│  BamRawReader ──┬──► BgzfReader (sync) | BgzfPipeline (parallel)      │
+│  BamRawReader ──┬──► BgzfReader (sync) | BgzfPipeline (parallel)       │
 │                 ├──► SamHeader                                         │
 │                 └──► RawRecordBatch                                    │
-│                       └──► RecordData(i) → span<const byte>           │
+│                       └──► RecordData(i) → span<const byte>            │
 │                                                                        │
 │  BamRecordReader ┬──► BamRawReader                                     │
-│                  ├──► SPSCQueue<BamRecord> (pre-decode pipeline)        │
+│                  ├──► SPSCQueue<BamRecord> (pre-decode pipeline)       │
 │                  ├──► std::jthread (background producer)               │
 │                  └──► ThreadPool (optional, for parallel ToOwned)      │
 │                                                                        │
@@ -262,20 +262,20 @@ The three-layer reader stack:
  BamRecordReader::ReadRecord()  (pops from SPSC queue)
       │
       └── BamRecordReader jthread (producer) ───────────────────┐
-                │                                                │
-                ▼                                                │
-          BamRawReader::ReadBatch()                              │
-                │                                                │
-                ▼                                                │
-          BgzfReader (sync) | BgzfPipeline (BgzfWorkers > 0)     │
-                │                                                │
-                ▼                                                │
-          Parallel::Dispatch (optional ThreadPool)               │
-                │  ┌── ToOwned() per view ───────────┐           │
-                │  │  decode views to BamRecord      │           │
-                │  └─────────────────────────────────┘           │
-                │                                                │
-                └──────── push BamRecord → SPSC queue ───────────┘
+                │                                               │
+                ▼                                               │
+          BamRawReader::ReadBatch()                             │
+                │                                               │
+                ▼                                               │
+          BgzfReader (sync) | BgzfPipeline (BgzfWorkers > 0)    │
+                │                                               │
+                ▼                                               │
+          Parallel::Dispatch (optional ThreadPool)              │
+                │  ┌── ToOwned() per view ───────────┐          │
+                │  │  decode views to BamRecord      │          │
+                │  └─────────────────────────────────┘          │
+                │                                               │
+                └──────── push BamRecord → SPSC queue ──────────┘
 ```
 
 **BamZmwReader** is synchronous — it calls `BamRecordReader::ReadRecord()`
