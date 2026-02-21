@@ -53,6 +53,7 @@ meson setup "${MESON_BUILD_DIR}" \
   --unity "${ENABLED_UNITY_BUILD:-off}" \
   --wrap-mode forcefallback \
   -Dlibdeflate:warning_level=0 \
+  -Dlibdeflate:unity=off \
   -Db_sanitize="${ENABLED_SANITIZERS:-none}" \
   -Dcpp_debugstl="${ENABLED_DEBUGSTL:-false}" \
   -Dtests=true
