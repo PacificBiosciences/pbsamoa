@@ -1,0 +1,105 @@
+project(
+    'PBSAMOA',
+    ['cpp', 'c'],
+    default_options: [
+        'b_ndebug=if-release',
+        'buildtype=release',
+        'c_std=c23',
+        'cpp_std=c++23',
+        'warning_level=3',
+    ],
+    license: 'BSD-3',
+    meson_version: '>= 1.1.0',
+    version: '0.1.0',
+)
+
+############
+# CXXFLAGS #
+############
+
+cpp = meson.get_compiler('cpp')
+cpp_flags = cpp.get_supported_arguments(
+    # stupid warning https://gcc.gnu.org/bugzilla/show_bug.cgi?id=96868#c3
+    '-Wno-missing-field-initializers',
+    # currently broken upstream https://gcc.gnu.org/bugzilla/show_bug.cgi?id=61596
+    '-Wno-unused-local-typedefs',
+    '-Wdouble-promotion',
+    '-Wduplicated-cond',
+    '-Wformat=1',
+    '-Wlogical-op',
+    '-Wold-style-cast',
+    '-Wrestrict',
+    '-Wshadow',
+    '-Wsuggest-override',
+    '-Wunused-local-typedef',
+    '-Wunused-parameter',
+    '-Wuseless-cast',
+)
+
+################
+# dependencies #
+################
+
+# libdeflate
+libdeflate_dep = dependency(
+    'libdeflate',
+    fallback: ['libdeflate', 'libdeflate_dep'],
+    include_type: 'system',
+)
+
+# pbcopper
+pbcopper_dep = dependency(
+    'pbcopper',
+    fallback: ['pbcopper', 'pbcopper_dep'],
+)
+
+deps = [libdeflate_dep, pbcopper_dep]
+
+###########
+# headers #
+###########
+
+subdir('include')
+
+##########################
+# libraries & executable #
+##########################
+
+subdir('src')
+
+#########
+# tests #
+#########
+
+if (not meson.is_subproject()) and get_option('tests')
+    pbtestutils_dep = dependency(
+        'pbtestutils',
+        fallback: ['pbtestutils', 'pbtestutils_dep'],
+    )
+    cram_script = subproject('pbtestutils').get_variable('cram_script')
+    subdir('tests')
+endif
+
+###################
+# dependency info #
+###################
+
+if not meson.is_subproject()
+    import('pkgconfig').generate(
+        lib,
+        description: 'PacBio SAM/BAM/BAI C++23 library',
+        filebase: 'pbsamoa',
+        name: 'pbsamoa',
+        requires: ['pbcopper'],
+        version: meson.project_version(),
+    )
+endif
+
+pbsamoa_dep = declare_dependency(
+    dependencies: deps,
+    include_directories: inc_dir,
+    link_with: lib,
+    version: meson.project_version(),
+)
+
+meson.override_dependency('pbsamoa', pbsamoa_dep)

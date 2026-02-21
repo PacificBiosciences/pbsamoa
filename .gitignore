@@ -1,0 +1,16 @@
+reference/htslib
+
+.DS_Store
+/.cache/
+/build*
+
+# bundled cram script bytecode
+*.pyc
+
+# Meson WrapDB stuff
+/subprojects/*
+!/subprojects/*.wrap
+!/subprojects/packagefiles/
+
+# Git worktrees
+/.worktrees/

@@ -1,0 +1,332 @@
+#ifndef PBSAMOA_CORE_RAWRECORD_HPP
+#define PBSAMOA_CORE_RAWRECORD_HPP
+
+#include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/CigarOp.hpp>
+#include <pbsamoa/core/Sequence.hpp>
+#include <pbsamoa/core/Tags.hpp>
+
+#include <algorithm>
+#include <ranges>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <cstddef>
+#include <cstdint>
+
+namespace PacBio {
+namespace Samoa {
+
+namespace detail {
+
+template <typename T>
+inline T ReadLength(const std::byte* p)
+{
+    T value{};
+    std::ranges::copy_n(p, sizeof(T), reinterpret_cast<std::byte*>(&value));
+    return value;
+}
+
+}  // namespace detail
+
+/// \brief Owning byte view into raw BAM record bytes with decode-on-demand.
+///
+/// Copies raw record bytes on construction. All accessors decode on-the-fly
+/// from the owned buffer. The view owns its data and has independent lifetime
+/// — safe to pass across thread boundaries.
+///
+/// The span covers the record bytes after block_size (starts at refID).
+class RawRecord
+{
+public:
+    explicit RawRecord(std::span<const std::byte> data);
+
+    RawRecord(const RawRecord&) = default;
+    RawRecord& operator=(const RawRecord&) = default;
+    RawRecord(RawRecord&&) noexcept = default;
+    RawRecord& operator=(RawRecord&&) noexcept = default;
+    ~RawRecord() = default;
+
+    // --- fixed fields ---
+    std::int32_t RefId() const;
+    std::int32_t Pos() const;
+    std::uint8_t NameLength() const;
+    std::uint8_t MapQ() const;
+    std::uint16_t Bin() const;
+    std::uint16_t CigarOpCount() const;
+    std::uint16_t Flag() const;
+    std::uint32_t SeqLength() const;
+    std::int32_t NextRefId() const;
+    std::int32_t NextPos() const;
+    std::int32_t Tlen() const;
+
+    // --- variable-length fields ---
+    std::string_view Name() const;
+    CigarView CigarOps() const;
+    SequenceView Seq() const;
+    std::span<const std::uint8_t> Qual() const;
+    std::span<const std::byte> AuxData() const;
+
+    // --- derived ---
+    bool IsMapped() const;
+    bool IsReverseStrand() const;
+    bool IsPrimary() const;
+    std::int64_t ReferenceLength() const;
+    std::int64_t QueryLength() const;
+
+    TagMap ParseTags() const;
+    BamRecord ToOwned() const;
+    BamRecord ToOwned(const DropTags& filter) const;
+    BamRecord ToOwned(const KeepTags& filter) const;
+    std::span<const std::byte> RawData() const;
+
+private:
+    std::vector<std::byte> data_;
+
+    std::size_t CigarOffset() const;
+    std::size_t SeqOffset() const;
+    std::size_t QualOffset() const;
+    std::size_t AuxOffset() const;
+};
+
+// --- inline implementations ---
+
+inline RawRecord::RawRecord(std::span<const std::byte> data)
+    : data_{std::ranges::begin(data), std::ranges::end(data)}
+{
+    // Validate minimum size for fixed fields (32 bytes)
+    if (std::size(data_) < 32) {
+        throw std::invalid_argument{
+            "RawRecord: data too small for BAM fixed fields (need >= 32 bytes)"};
+    }
+
+    // Validate name length (l_read_name includes NUL, must be >= 1)
+    const std::uint8_t nameLen{NameLength()};
+    if (nameLen == 0) {
+        throw std::invalid_argument{"RawRecord: l_read_name is 0 (must be >= 1)"};
+    }
+
+    // Validate that all variable-length fields fit within the buffer
+    const std::size_t auxOffset{AuxOffset()};
+    if (auxOffset > std::size(data_)) {
+        throw std::invalid_argument{
+            "RawRecord: truncated record — variable-length fields exceed buffer size"};
+    }
+}
+
+// --- fixed fields ---
+
+inline std::int32_t RawRecord::RefId() const
+{
+    return detail::ReadLength<std::int32_t>(std::data(data_));
+}
+
+inline std::int32_t RawRecord::Pos() const
+{
+    return detail::ReadLength<std::int32_t>(std::data(data_) + 4);
+}
+
+inline std::uint8_t RawRecord::NameLength() const { return static_cast<std::uint8_t>(data_[8]); }
+
+inline std::uint8_t RawRecord::MapQ() const { return static_cast<std::uint8_t>(data_[9]); }
+
+inline std::uint16_t RawRecord::Bin() const
+{
+    return detail::ReadLength<std::uint16_t>(std::data(data_) + 10);
+}
+
+inline std::uint16_t RawRecord::CigarOpCount() const
+{
+    return detail::ReadLength<std::uint16_t>(std::data(data_) + 12);
+}
+
+inline std::uint16_t RawRecord::Flag() const
+{
+    return detail::ReadLength<std::uint16_t>(std::data(data_) + 14);
+}
+
+inline std::uint32_t RawRecord::SeqLength() const
+{
+    return detail::ReadLength<std::uint32_t>(std::data(data_) + 16);
+}
+
+inline std::int32_t RawRecord::NextRefId() const
+{
+    return detail::ReadLength<std::int32_t>(std::data(data_) + 20);
+}
+
+inline std::int32_t RawRecord::NextPos() const
+{
+    return detail::ReadLength<std::int32_t>(std::data(data_) + 24);
+}
+
+inline std::int32_t RawRecord::Tlen() const
+{
+    return detail::ReadLength<std::int32_t>(std::data(data_) + 28);
+}
+
+// --- variable-length field offsets ---
+
+inline std::size_t RawRecord::CigarOffset() const { return 32U + NameLength(); }
+
+inline std::size_t RawRecord::SeqOffset() const { return CigarOffset() + 4U * CigarOpCount(); }
+
+inline std::size_t RawRecord::QualOffset() const { return SeqOffset() + (SeqLength() + 1) / 2; }
+
+inline std::size_t RawRecord::AuxOffset() const { return QualOffset() + SeqLength(); }
+
+// --- variable-length fields ---
+
+inline std::string_view RawRecord::Name() const
+{
+    return {
+        reinterpret_cast<const char*>(std::data(data_) + 32),
+        static_cast<std::size_t>(NameLength() - 1),
+    };
+}
+
+inline CigarView RawRecord::CigarOps() const
+{
+    const std::size_t offset{CigarOffset()};
+    const std::uint16_t count{CigarOpCount()};
+    return {reinterpret_cast<const CigarOp*>(std::data(data_) + offset), count};
+}
+
+inline SequenceView RawRecord::Seq() const
+{
+    const std::size_t offset{SeqOffset()};
+    const std::uint32_t seqLength{SeqLength()};
+    const std::size_t packedLength{(seqLength + 1) / 2};
+    return {std::span<const std::byte>{data_}.subspan(offset, packedLength), seqLength};
+}
+
+inline std::span<const std::uint8_t> RawRecord::Qual() const
+{
+    const std::size_t offset{QualOffset()};
+    return {reinterpret_cast<const std::uint8_t*>(std::data(data_) + offset), SeqLength()};
+}
+
+inline std::span<const std::byte> RawRecord::AuxData() const
+{
+    const std::size_t offset{AuxOffset()};
+    return std::span<const std::byte>{data_}.subspan(offset);
+}
+
+// --- derived ---
+
+inline bool RawRecord::IsMapped() const { return (Flag() & 0x4) == 0; }
+
+inline bool RawRecord::IsReverseStrand() const { return (Flag() & 0x10) != 0; }
+
+inline bool RawRecord::IsPrimary() const { return (Flag() & 0x900) == 0; }
+
+inline std::int64_t RawRecord::ReferenceLength() const
+{
+    return ::PacBio::Samoa::ReferenceLength(CigarOps());
+}
+
+inline std::int64_t RawRecord::QueryLength() const
+{
+    return ::PacBio::Samoa::QueryLength(CigarOps());
+}
+
+inline TagMap RawRecord::ParseTags() const { return ParseTagsFromBam(AuxData()); }
+
+inline std::span<const std::byte> RawRecord::RawData() const { return data_; }
+
+// --- ToOwned ---
+
+inline BamRecord RawRecord::ToOwned() const
+{
+    BamRecord record;
+    record.Name(std::string{Name()})
+        .Flag(Flag())
+        .RefId(RefId())
+        .Pos(Pos())
+        .MapQ(MapQ())
+        .Cigar(std::vector<CigarOp>{std::ranges::begin(CigarOps()), std::ranges::end(CigarOps())})
+        .NextRefId(NextRefId())
+        .NextPos(NextPos())
+        .Tlen(Tlen())
+        .Sequence(Seq().ToString());
+
+    const std::span<const std::uint8_t> qualities{Qual()};
+    bool allMissing{true};
+    for (const std::uint8_t q : qualities) {
+        if (q != 0xFF) {
+            allMissing = false;
+            break;
+        }
+    }
+
+    if ((!allMissing) && (SeqLength() > 0)) {
+        record.Qualities(
+            std::vector<std::uint8_t>{std::ranges::begin(qualities), std::ranges::end(qualities)});
+    }
+
+    record.Tags(ParseTags());
+    return record;
+}
+
+inline BamRecord RawRecord::ToOwned(const DropTags& filter) const
+{
+    BamRecord record{ToOwned()};
+    TagMap filtered;
+    for (const auto& [key, value] : record.Tags().Entries()) {
+        if (!filter.ShouldDrop(key)) {
+            filtered.Append(key, value);
+        }
+    }
+    record.Tags(std::move(filtered));
+    return record;
+}
+
+inline BamRecord RawRecord::ToOwned(const KeepTags& filter) const
+{
+    BamRecord record{ToOwned()};
+    TagMap filtered;
+    for (const auto& [key, value] : record.Tags().Entries()) {
+        if (filter.ShouldKeep(key)) {
+            filtered.Append(key, value);
+        }
+    }
+    record.Tags(std::move(filtered));
+    return record;
+}
+
+/// \brief Owns decompressed buffer(s) and provides access to raw record data.
+///
+/// The batch is the unit of parallel processing. Users access raw record
+/// bytes via RecordData(), constructing RawRecord on demand for
+/// decode access. The batch is invalidated when destroyed.
+class RawRecordBatch
+{
+public:
+    /// \brief Describes where a record lives within the buffer.
+    struct RecordExtent
+    {
+        std::uint32_t offset;  // byte offset of record data within buffer
+        std::uint32_t size;    // byte size of record data (block_size value)
+    };
+
+    /// \brief Construct from a buffer and record extents.
+    RawRecordBatch(std::vector<std::byte> buffer, std::vector<RecordExtent> extents);
+
+    /// \brief Raw bytes for record at index \p i.
+    std::span<const std::byte> RecordData(std::size_t i) const;
+
+    std::size_t RecordCount() const;
+    std::size_t BufferSize() const;
+
+private:
+    std::vector<std::byte> buffer_;
+    std::vector<RecordExtent> extents_;
+};
+
+}  // namespace Samoa
+}  // namespace PacBio
+
+#endif  // PBSAMOA_CORE_RAWRECORD_HPP

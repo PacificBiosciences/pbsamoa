@@ -1,0 +1,12 @@
+#ifndef PBSAMOA_TESTDATA_HPP
+#define PBSAMOA_TESTDATA_HPP
+
+#include <filesystem>
+
+namespace tests {
+
+inline const std::filesystem::path DataDir{"@TESTS_DATA_DIR@"};
+
+}  // namespace tests
+
+#endif  // PBSAMOA_TESTDATA_HPP

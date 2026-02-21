@@ -1,0 +1,346 @@
+# Architecture
+
+pbsamoa is organized in four layers. Each layer depends only on the layers
+below it.
+
+```
+┌────────────────────────────────────────────────────────┐
+│  API                                                   │
+│  BamRawReader  BamRecordReader  SamReader               │
+│  BamWriter  SamWriter  BaiIndex                        │
+│  BamZmwReader  ZmiBamWriter                            │
+├────────────────────────────────────────────────────────┤
+│  Record                                                │
+│  RawRecord  BamRecord  RawRecordBatch                 │
+│  ZmwGroup                                              │
+│  CigarOp  Sequence  Tags  SamHeader                    │
+├────────────────────────────────────────────────────────┤
+│  Compression                                           │
+│  BgzfReader  BgzfPipeline  BgzfWriter  VirtualOffset   │
+└────────────────────────────────────────────────────────┘
+```
+
+## Class Dependencies
+
+Arrows show composition ("owns") or required dependencies ("uses"). Dotted
+arrows show decode-on-demand relationships. No class inheritance exists in
+this codebase.
+
+```
+┌─ API ──────────────────────────────────────────────────────────────────┐
+│                                                                        │
+│  BamRawReader ──┬──► BgzfReader (sync) | BgzfPipeline (parallel)      │
+│                 ├──► SamHeader                                         │
+│                 └──► RawRecordBatch                                    │
+│                       └──► RecordData(i) → span<const byte>           │
+│                                                                        │
+│  BamRecordReader ┬──► BamRawReader                                     │
+│                  ├──► SPSCQueue<BamRecord> (pre-decode pipeline)        │
+│                  ├──► std::jthread (background producer)               │
+│                  └──► ThreadPool (optional, for parallel ToOwned)      │
+│                                                                        │
+│  BamZmwReader ───► BamRecordReader (synchronous ZMW grouping)          │
+│                                                                        │
+│  BamWriter ──┬──► BgzfWriter                                           │
+│              └──► SamHeader                                            │
+│                                                                        │
+│  SamReader ──┬──► SamHeader                                            │
+│              └──► BamRecord (produces per record)                      │
+│                                                                        │
+│  SamWriter ─────► SamHeader                                            │
+│                                                                        │
+│  BaiIndex ──────► Chunk ──► VirtualOffset                              │
+│                                                                        │
+│  ZmiBamWriter ┬──► BamWriter                                           │
+│               └──► ZmiWriter ──► BgzfWriter                            │
+│                                                                        │
+├─ Record ───────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  RawRecord ─────···► CigarOp, SequenceView, TagMap (decode on demand)  │
+│                                                                        │
+│  BamRecord ──┬──► std::vector<CigarOp>                                 │
+│              └──► TagMap ──► TagKey + TagValue                         │
+│                                                                        │
+│  RawRecordBatch ────► buffer + RecordExtent vector                     │
+│                                                                        │
+│  ZmwGroup ───┬──► ZmwIdentity                                          │
+│              └──► std::vector<BamRecord>                               │
+│                                                                        │
+│  SamHeader ──┬──► ReferenceSequence (vector)                           │
+│              ├──► ReadGroup (vector)                                   │
+│              └──► ProgramRecord (vector)                               │
+│                                                                        │
+├─ Compression ──────────────────────────────────────────────────────────┤
+│                                                                        │
+│  BgzfReader ─────► VirtualOffset (current position)                    │
+│                                                                        │
+│  BgzfWriter ─────► VirtualOffset (current position)                    │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+Key relationships:
+
+- **BamRawReader** owns either a `BgzfReader` (synchronous) or a
+  `BgzfPipeline` (parallel, when `BgzfWorkers > 0`) for decompression, and a
+  `SamHeader` parsed from the BAM header block. It produces `RawRecordBatch`
+  objects that own their backing buffers and provide indexed access to raw
+  record spans via `RecordData(i)`. Supports chunked reading via
+  `ChunkNum`/`TotalChunks` in config.
+
+- **BamRecordReader** wraps a `BamRawReader` and pre-decodes views into
+  owned `BamRecord` objects in a background `std::jthread`. Records are
+  pushed through an SPSC queue for consumption. Optional `ThreadPool`
+  parallelizes the `ToOwned()` decode step across batch views.
+
+- **BamZmwReader** wraps a `BamRecordReader` and groups consecutive records
+  by ZMW hole number, parsed from the read name (`movie/zmw/…`). Grouping is
+  synchronous — no background threads. `CurrentZmw()` returns the current
+  group's `ZmwIdentity` with `rgId` always set to 0.
+
+- **BamWriter** owns a `BgzfWriter` for compression and a `SamHeader` for
+  the output file header. Accepts `BamRecord`, `RawRecord`, and raw
+  `span<const byte>`.
+
+- **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
+  written is simultaneously indexed.
+
+- **RawRecord** owns a copy of raw BAM bytes and decodes `CigarOp`,
+  `SequenceView`, and `TagMap` on demand. All decode logic is inline in the
+  header for maximum performance.
+
+## Compression
+
+BAM files use BGZF (Blocked GZip Format) — a series of independently
+compressed gzip blocks, each at most 64 KiB decompressed. This enables
+random access via virtual offsets.
+
+### BgzfReader
+
+Reads BGZF blocks sequentially, decompressing each with libdeflate.
+Supports `Seek()` to any `VirtualOffset`.
+
+### BgzfWriter
+
+Accumulates data into 64 KiB blocks and compresses each with libdeflate.
+Compression level 1–12 (default 6). Appends the standard 28-byte EOF marker
+on close.
+
+### VirtualOffset
+
+A 64-bit value encoding position within a BGZF file: upper 48 bits are the
+compressed block offset, lower 16 bits are the offset within the
+decompressed block. Supports comparison via `<=>` but not arithmetic — this
+is intentional per the BAM spec.
+
+## Record
+
+Two representations for alignment records, chosen by use case:
+
+### RawRecord — fast, read-only
+
+An owning type that copies raw BAM bytes into a `vector<byte>`. Accessors
+decode fields on demand directly from the binary layout. All decode logic is
+inline in the header for maximum inlining.
+
+Use raw records when you're reading records and don't need to modify them —
+this is the common case.
+
+### BamRecord — owned, mutable
+
+Stores fields as structured C++ types (strings, vectors). Mutations are
+plain field assignments with a fluent interface:
+
+```cpp
+record.Name("read1").MapQ(60).Pos(1000);
+```
+
+Serialization to BAM binary happens once, in the writer, via
+`SerializeToBam()`.
+
+### Conversion between views and records
+
+`RawRecord::ToOwned()` produces a `BamRecord`. Optional tag filters
+(`DropTags`, `KeepTags`) let you skip large tags during conversion. This
+matters for PacBio BAM files where kinetics arrays can be megabytes per
+record.
+
+Both `BamWriter` and `SamWriter` accept either type. Writing a view is
+zero-copy; writing a record serializes it.
+
+### RawRecordBatch
+
+A batch owns the decompressed buffer and provides indexed access to raw
+record spans via `RecordData(i)`. Batches are sized by memory budget
+(`ByteLimit`), not record count. The default budget is 256 MiB.
+
+```cpp
+using namespace PacBio::Samoa::Literals;
+while (auto batch = reader.ReadBatch(128_MiB)) {
+    for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
+        const RawRecord view{batch->RecordData(i)};
+    }
+}
+```
+
+Views within a batch are invalidated when the batch is destroyed.
+
+### Supporting types
+
+**CigarOp** — 32-bit value matching BAM binary layout (`op_len << 4 | op`).
+Constexpr operations for reference/query length, string conversion, and bin
+calculation.
+
+**SequenceView** — Decodes 4-bit packed sequence on demand. Supports
+indexing and iteration without unpacking the whole sequence.
+
+**TagMap** — Ordered key-value collection for auxiliary tags. Linear-scan
+lookup (records rarely exceed ~30 tags, so this beats a hash map on cache
+effects). `TagKey` stores two characters as a `uint16_t`.
+
+**SamHeader** — Parsed SAM header with `@HD`, `@SQ`, `@RG`, `@PG`, `@CO`
+sections. Provides `ReferenceId(name)` and `ReferenceName(id)` lookups.
+Round-trips between SAM text and BAM binary.
+
+## API
+
+### Readers
+
+**BamRawReader** provides zero-copy view-based iteration:
+
+1. **Range** — `for (const auto& view : reader.Records())` — wraps batch
+   reading internally, simplest to use.
+
+2. **Batch** — `reader.ReadBatch(limit)` — returns `RawRecordBatch` for
+   explicit parallel processing control.
+
+Region queries via `reader.Query(index, refId, beg, end)` return a filtered
+range using a BAI index.
+
+**BamRecordReader** wraps `BamRawReader` and delivers pre-decoded owned
+`BamRecord` objects. A background producer thread reads batches, decodes
+views to records (optionally in parallel), and pushes them through an SPSC
+queue. Supports range-based iteration via `reader.Records()`.
+
+**SamReader** reads text SAM files, producing owned `BamRecord` objects (not
+views, since there's no persistent binary buffer to view into).
+
+### Writers
+
+**BamWriter** writes BGZF-compressed BAM. Accepts `BamRecord` (serializes),
+`RawRecord`, and raw `span<const byte>`. An optional `IndexCallback`
+is invoked after each record write for downstream index building.
+
+**SamWriter** writes text SAM. Accepts `BamRecord` and `RawRecord`.
+
+### Indexing
+
+**BaiIndex** reads, writes, builds, and queries BAM index files (`.bai`).
+`Build()` scans a coordinate-sorted BAM to create an index.
+`Query(refId, beg, end)` returns merged, sorted chunks of virtual offsets
+for records overlapping a genomic region.
+
+### PacBio extensions
+
+**ZmwIndex** — In-memory index mapping ZMW hole numbers to virtual offsets.
+Reads `.zmi` (native format) or `.pbi` (legacy PacBio index).
+
+**BamZmwReader** — Groups consecutive records by ZMW identity, producing
+groups of `BamRecord` objects (one group per ZMW). Wraps a `BamRecordReader`
+and does synchronous grouping.
+
+**ZmiBamWriter** — Writes a BAM and its `.zmi` index simultaneously.
+
+## Reader Pipeline
+
+The three-layer reader stack:
+
+```
+ BamZmwReader::GetNext()        (synchronous ZMW grouping)
+      │
+      ▼
+ BamRecordReader::ReadRecord()  (pops from SPSC queue)
+      │
+      └── BamRecordReader jthread (producer) ───────────────────┐
+                │                                                │
+                ▼                                                │
+          BamRawReader::ReadBatch()                              │
+                │                                                │
+                ▼                                                │
+          BgzfReader (sync) | BgzfPipeline (BgzfWorkers > 0)     │
+                │                                                │
+                ▼                                                │
+          Parallel::Dispatch (optional ThreadPool)               │
+                │  ┌── ToOwned() per view ───────────┐           │
+                │  │  decode views to BamRecord      │           │
+                │  └─────────────────────────────────┘           │
+                │                                                │
+                └──────── push BamRecord → SPSC queue ───────────┘
+```
+
+**BamZmwReader** is synchronous — it calls `BamRecordReader::ReadRecord()`
+in a loop, accumulating records with the same ZMW hole number parsed from
+the read name (`movie/zmw/start_end`). When a different ZMW is encountered,
+the accumulated group is returned and the new record is stashed as
+`pending_` for the next call.
+
+---
+
+### Chunking
+
+Chunking is built into `BamRawReader` via `BamRawReaderConfig::ChunkNum`
+and `TotalChunks`. When set, the reader automatically partitions the file by
+ZMW identities using the `.zmi` or `.pbi` index alongside the BAM:
+
+```cpp
+// Read chunk 2 of 4 — reader resolves boundaries automatically
+BamRawReader reader{bamPath, BamRawReaderConfig{.ChunkNum = 2, .TotalChunks = 4}};
+while (auto view = reader.ReadRecord()) { /* … */ }
+```
+
+`ChunkNum` is 1-based (1 through `TotalChunks`). Internally the reader calls
+`ZmwIndex::UniqueZmws()` to get sorted ZMW identities, partitions them
+proportionally, then seeks to `ZmwIndex::FirstOffset()` and sets an internal
+`RecordLimit`.
+
+`RecordLimit` is also available directly to stop after an exact record count
+at a specific file position:
+
+```cpp
+BamRawReader reader{bamPath, BamRawReaderConfig{.RecordLimit = 1000}};
+reader.Seek(startOffset);
+while (auto view = reader.ReadRecord()) { /* exactly 1000 records */ }
+```
+
+Both limits are enforced in `ReadRecord()` and `ReadBatch()`.
+
+## Error Handling
+
+Two error policy types are defined in `<pbsamoa/io/BamRawReader.hpp>`:
+
+- **ThrowPolicy** — `OnCorruptRecord()` is `[[noreturn]]`; throws
+  `std::runtime_error` on corrupt records.
+- **SkipPolicy** — `OnCorruptRecord()` silently skips; `SkippedCount()`
+  returns the total number of records skipped.
+
+## Data Flow
+
+A typical read pipeline:
+
+```
+file on disk
+  → BgzfReader (decompress BGZF blocks, optionally parallel)
+    → BamRawReader (parse record boundaries from decompressed bytes)
+      → RawRecordBatch (owns buffer, provides RecordData(i) spans)
+        → RawRecord (decode-on-demand from raw bytes)
+          → BamRecord (optional: ToOwned() for mutation)
+```
+
+A typical write pipeline:
+
+```
+BamRecord or RawRecord or raw span<const byte>
+  → BamWriter (serialize record if needed, accumulate into BGZF blocks)
+    → BgzfWriter (compress blocks with libdeflate)
+      → file on disk
+```

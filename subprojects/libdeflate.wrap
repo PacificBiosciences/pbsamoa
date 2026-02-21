@@ -1,0 +1,9 @@
+[wrap-file]
+directory = libdeflate-1.22
+source_url = https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.22.tar.gz
+source_filename = libdeflate-1.22.tar.gz
+source_hash = 7f343c7bf2ba46e774d8a632bf073235e1fd27723ef0a12a90f8947b7fe851d6
+patch_directory = libdeflate
+
+[provide]
+libdeflate = libdeflate_dep

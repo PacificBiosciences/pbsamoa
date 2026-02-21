@@ -1,0 +1,4 @@
+[wrap-git]
+directory=pbcopper
+url=http://bitbucket.pacificbiosciences.com:7990/scm/sl/pbcopper.git
+revision=develop

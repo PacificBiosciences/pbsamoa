@@ -1,0 +1,14 @@
+#ifndef PBSAMOA_LIBRARYVERSION_HPP_IN
+#define PBSAMOA_LIBRARYVERSION_HPP_IN
+
+#include <string_view>
+
+namespace PacBio {
+namespace Samoa {
+
+constexpr std::string_view RELEASE_VERSION{"@PBSAMOA_VERSION@"};
+
+}  // namespace Samoa
+}  // namespace PacBio
+
+#endif  // PBSAMOA_LIBRARYVERSION_HPP_IN
