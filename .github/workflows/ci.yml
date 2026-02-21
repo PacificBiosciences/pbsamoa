@@ -19,23 +19,32 @@ jobs:
       matrix:
         include:
           - compiler: gcc
-            cc: gcc-14
-            cxx: g++-14
+            cc: gcc
+            cxx: g++
             buildtype: release
+            toolchain_script: /app/toolchain/gcc-14/env.sh
           - compiler: gcc
-            cc: gcc-14
-            cxx: g++-14
+            cc: gcc
+            cxx: g++
             buildtype: debug
+            toolchain_script: /app/toolchain/gcc-14/env.sh
           - compiler: clang
-            cc: clang-18
-            cxx: clang++-18
+            cc: clang
+            cxx: clang++
             buildtype: release
+            toolchain_script: /app/toolchain/gcc-14/env.sh
 
     container:
       image: armintoepfer/navalia:20260212
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        run: |
+          source ${{ matrix.toolchain_script }}
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
