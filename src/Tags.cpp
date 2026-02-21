@@ -332,7 +332,8 @@ void TagMap::Append(TagKey key, TagValue value) { entries_.emplace_back(key, std
 
 DropTags::DropTags(std::initializer_list<TagKey> keys) : keys_{keys}
 {
-    std::ranges::sort(keys_, {}, &TagKey::Value);
+    std::ranges::sort(keys_,
+                      [](const TagKey& a, const TagKey& b) { return a.Value() < b.Value(); });
 }
 
 bool DropTags::ShouldDrop(TagKey key) const
@@ -342,7 +343,8 @@ bool DropTags::ShouldDrop(TagKey key) const
 
 KeepTags::KeepTags(std::initializer_list<TagKey> keys) : keys_{keys}
 {
-    std::ranges::sort(keys_, {}, &TagKey::Value);
+    std::ranges::sort(keys_,
+                      [](const TagKey& a, const TagKey& b) { return a.Value() < b.Value(); });
 }
 
 bool KeepTags::ShouldKeep(TagKey key) const

@@ -198,10 +198,7 @@ inline std::string_view RawRecord::Name() const
     };
 }
 
-inline CigarView RawRecord::CigarOps() const
-{
-    return cigar_;
-}
+inline CigarView RawRecord::CigarOps() const { return cigar_; }
 
 inline SequenceView RawRecord::Seq() const
 {

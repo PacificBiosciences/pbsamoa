@@ -34,6 +34,9 @@ cpp_flags = cpp.get_supported_arguments(
     '-Wunused-local-typedef',
     '-Wunused-parameter',
     '-Wuseless-cast',
+    # GCC 14 false positive: std::expected<T,E> move with T containing std::string
+    # triggers spurious -Wstringop-overflow from standard library internals at -O3
+    '-Wno-stringop-overflow',
 )
 
 ################
@@ -47,7 +50,7 @@ libdeflate_dep = dependency(
     include_type: 'system',
 )
 
-deps = [libdeflate_dep]
+deps = [libdeflate_dep, dependency('threads')]
 
 ###########
 # headers #
