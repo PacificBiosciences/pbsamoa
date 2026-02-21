@@ -11,28 +11,31 @@ permissions:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.compiler }} / ${{ matrix.buildtype }}
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - compiler: gcc
-            cc: gcc
-            cxx: g++
-            buildtype: release
-            toolchain_script: /app/toolchain/gcc-14/env.sh
-          - compiler: gcc
-            cc: gcc
-            cxx: g++
-            buildtype: debug
-            toolchain_script: /app/toolchain/gcc-14/env.sh
-          - compiler: clang
-            cc: clang
-            cxx: clang++
-            buildtype: release
-            toolchain_script: /app/toolchain/gcc-14/env.sh
+          - name: clang-debopt
+            BUILDTYPE: debugoptimized
+            COMPILER: clang
+          - name: gcc-debopt-asan-ubsan
+            BUILDTYPE: debugoptimized
+            ENABLED_SANITIZERS: address,undefined
+            WERROR: OFF
+          - name: gcc-debopt-glibcxx_debug
+            BUILDTYPE: debugoptimized
+            ENABLED_DEBUGSTL: "true"
+          - name: gcc-debopt-tsan
+            BUILDTYPE: debugoptimized
+            ENABLED_SANITIZERS: thread
+          - name: gcc-debopt-unity
+            BUILDTYPE: debugoptimized
+            ENABLED_UNITY_BUILD: "on"
+          - name: gcc-release
+            BUILDTYPE: release
 
     container:
       image: armintoepfer/navalia:20260212
@@ -40,24 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up toolchain
-        run: |
-          source ${{ matrix.toolchain_script }}
-          echo "PATH=$PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-
-      - name: Configure
+      - name: Build and test
         env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
-        run: |
-          meson setup build \
-            --buildtype=${{ matrix.buildtype }} \
-            --wrap-mode=forcefallback \
-            -Dtests=true
-
-      - name: Build
-        run: meson compile -C build
-
-      - name: Test
-        run: meson test -C build --print-errorlogs
+          BUILDTYPE: ${{ matrix.BUILDTYPE }}
+          COMPILER: ${{ matrix.COMPILER }}
+          ENABLED_DEBUGSTL: ${{ matrix.ENABLED_DEBUGSTL }}
+          ENABLED_SANITIZERS: ${{ matrix.ENABLED_SANITIZERS }}
+          ENABLED_UNITY_BUILD: ${{ matrix.ENABLED_UNITY_BUILD }}
+          WERROR: ${{ matrix.WERROR }}
+        run: docker/ci.sh .
