@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -85,6 +86,7 @@ public:
 
 private:
     std::vector<std::byte> data_;
+    std::vector<CigarOp> cigar_;
 
     std::size_t CigarOffset() const;
     std::size_t SeqOffset() const;
@@ -114,6 +116,14 @@ inline RawRecord::RawRecord(std::span<const std::byte> data)
     if (auxOffset > std::size(data_)) {
         throw std::invalid_argument{
             "RawRecord: truncated record — variable-length fields exceed buffer size"};
+    }
+
+    // Copy cigar ops into an aligned buffer (BAM does not guarantee 4-byte alignment
+    // for the cigar data, so direct pointer aliasing would be UB for misaligned names).
+    const std::uint16_t count{CigarOpCount()};
+    if (count > 0) {
+        cigar_.resize(count);
+        std::memcpy(cigar_.data(), std::data(data_) + CigarOffset(), count * sizeof(CigarOp));
     }
 }
 
@@ -190,9 +200,7 @@ inline std::string_view RawRecord::Name() const
 
 inline CigarView RawRecord::CigarOps() const
 {
-    const std::size_t offset{CigarOffset()};
-    const std::uint16_t count{CigarOpCount()};
-    return {reinterpret_cast<const CigarOp*>(std::data(data_) + offset), count};
+    return cigar_;
 }
 
 inline SequenceView RawRecord::Seq() const

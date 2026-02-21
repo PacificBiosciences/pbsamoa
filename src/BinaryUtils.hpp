@@ -33,6 +33,8 @@ inline std::int32_t ReadI32LE(const std::byte* p)
     return v;
 }
 
+inline constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
+
 /// \brief Compute total BAM header size from binary data.
 ///
 /// Returns the total number of bytes from BAM magic through end of reference

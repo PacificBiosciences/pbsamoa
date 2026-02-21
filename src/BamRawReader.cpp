@@ -25,7 +25,6 @@ namespace Samoa {
 
 namespace {
 
-constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t INITIAL_HEADER_BUF_SIZE{MAX_DECOMPRESSED_BLOCK_SIZE * 4};
 
