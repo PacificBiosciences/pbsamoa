@@ -49,6 +49,21 @@ struct LibdeflateCompressorDeleter
 
 using CompressorPtr = std::unique_ptr<libdeflate_compressor, LibdeflateCompressorDeleter>;
 
+/// \brief Entry describing one compressed BGZF payload within a batch buffer.
+struct CompressedEntry
+{
+    std::size_t offset;        // offset into batch's contiguous compressed buffer
+    std::size_t size;          // DEFLATE payload size (no BGZF framing)
+    std::uint32_t isize;       // expected decompressed size from BGZF trailer
+    std::uint64_t fileOffset;  // original file position for VirtualOffset tracking
+};
+
+/// \brief Batch of decompressed BGZF blocks for producer-consumer pipeline.
+struct DecompressedBatch
+{
+    std::vector<std::byte> data;  // contiguous decompressed output (all blocks concatenated)
+};
+
 }  // namespace detail
 
 namespace {
@@ -81,26 +96,11 @@ constexpr std::size_t OUTPUT_QUEUE_CAPACITY{4096};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t BLOCKS_PER_BATCH{32};
 
-// --- Pipeline helpers ---
-
-/// \brief Entry describing one compressed BGZF payload within a batch buffer.
-struct CompressedEntry
-{
-    std::size_t offset;        // offset into batch's contiguous compressed buffer
-    std::size_t size;          // DEFLATE payload size (no BGZF framing)
-    std::uint32_t isize;       // expected decompressed size from BGZF trailer
-    std::uint64_t fileOffset;  // original file position for VirtualOffset tracking
-};
-
-/// \brief Batch of decompressed BGZF blocks for producer-consumer pipeline.
-struct DecompressedBatch
-{
-    std::vector<std::byte> data;  // contiguous decompressed output (all blocks concatenated)
-};
-
 }  // namespace
 
+using detail::CompressedEntry;
 using detail::CompressorPtr;
+using detail::DecompressedBatch;
 using detail::DecompressorPtr;
 
 // =============================================================================

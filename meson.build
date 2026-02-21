@@ -35,8 +35,8 @@ cpp_flags = cpp.get_supported_arguments(
     '-Wunused-parameter',
     '-Wuseless-cast',
     # GCC 14 false positive: std::expected<T,E> move with T containing std::string
-    # triggers spurious -Wstringop-overflow from standard library internals at -O3
-    '-Wno-stringop-overflow',
+    # triggers spurious -Wmaybe-uninitialized from standard library internals
+    '-Wno-maybe-uninitialized',
 )
 
 ################

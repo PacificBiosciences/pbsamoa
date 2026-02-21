@@ -1,5 +1,7 @@
 #include <pbsamoa/index/ZmwIndex.hpp>
 
+#include "ZmiInternal.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <algorithm>
@@ -16,6 +18,9 @@
 
 namespace PacBio {
 namespace Samoa {
+
+using detail::ZMI_HEADER_SIZE;
+using detail::ZMI_MAGIC;
 
 ZmwIndex::ZmwIndex(ZmwIndex&& other) noexcept
     : rgIds_{std::move(other.rgIds_)}
@@ -47,12 +52,8 @@ ZmwIndex& ZmwIndex::operator=(ZmwIndex&& other) noexcept
 
 namespace {
 
-constexpr std::size_t ZMI_HEADER_SIZE{64};
 constexpr std::size_t ZMI_ENTRY_MIN_SIZE{16};  // rgId(4) + zmw(4) + virtualOffset(8)
 constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536};
-
-// Magic bytes: "ZMI\1"
-constexpr std::array<char, 4> ZMI_MAGIC{'Z', 'M', 'I', '\1'};
 
 // PBI format constants
 constexpr std::size_t PBI_HEADER_SIZE{32};
