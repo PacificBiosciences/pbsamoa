@@ -31,17 +31,11 @@ jobs:
             cxx: clang++-18
             buildtype: release
 
+    container:
+      image: armintoepfer/navalia:20260212
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build \
-            python3-pip \
-            samtools
-          pip install meson
 
       - name: Configure
         env:
