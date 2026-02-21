@@ -72,12 +72,11 @@ struct BamRawReader::Impl
 
         // Apply chunking if requested
         if ((config.ChunkNum > 0) && (config.TotalChunks > 0)) {
-            ApplyChunkConfig(path, config.ChunkNum, config.TotalChunks);
+            ApplyChunkConfig(config.ChunkNum, config.TotalChunks);
         }
     }
 
-    void ApplyChunkConfig(const std::filesystem::path& path, std::int32_t chunkNum,
-                          std::int32_t totalChunks)
+    void ApplyChunkConfig(std::int32_t chunkNum, std::int32_t totalChunks)
     {
         if (totalChunks < 1) {
             throw std::invalid_argument{

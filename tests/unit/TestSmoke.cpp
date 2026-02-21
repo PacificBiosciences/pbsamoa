@@ -7,7 +7,7 @@ namespace Samoa {
 
 TEST(Smoke, LibraryInfoDefined)
 {
-    const auto info = LibraryInfo();
+    const auto info = GetLibraryInfo();
     EXPECT_EQ(info.Name, "pbsamoa");
     EXPECT_FALSE(info.Release.empty());
     EXPECT_FALSE(info.GitSha1.empty());

@@ -4,8 +4,7 @@ A C++23 library for reading and writing SAM/BAM files, with BAI index
 support. Built for throughput: parallel BGZF decompression, zero-copy record
 views, and batch processing with memory budgets.
 
-External dependencies: [libdeflate](https://github.com/ebiggers/libdeflate) and
-[pbcopper](https://github.com/PacificBiosciences/pbcopper).
+External dependencies: [libdeflate](https://github.com/ebiggers/libdeflate).
 
 ## Building
 
@@ -131,4 +130,4 @@ auto record = view.ToOwned(KeepTags{TagKey{'R', 'G'}, TagKey{'N', 'M'}});
 | ------------------------------- | ------------------------------------------ |
 | [Architecture](architecture.md) | Layer diagram, design decisions, data flow |
 | [API Reference](api.md)         | All public types and functions             |
-| [CLI Tools](cli.md)             | The `pbsamoa` command-line tool             |
+| [CLI Tools](cli.md)             | The `pbsamoa` command-line tool            |

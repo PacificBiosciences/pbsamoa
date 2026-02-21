@@ -47,19 +47,19 @@ libdeflate_dep = dependency(
     include_type: 'system',
 )
 
-# pbcopper
-pbcopper_dep = dependency(
-    'pbcopper',
-    fallback: ['pbcopper', 'pbcopper_dep'],
-)
-
-deps = [libdeflate_dep, pbcopper_dep]
+deps = [libdeflate_dep]
 
 ###########
 # headers #
 ###########
 
 subdir('include')
+
+###############
+# third-party #
+###############
+
+subdir('third-party')
 
 ##########################
 # libraries & executable #
@@ -90,14 +90,13 @@ if not meson.is_subproject()
         description: 'PacBio SAM/BAM/BAI C++23 library',
         filebase: 'pbsamoa',
         name: 'pbsamoa',
-        requires: ['pbcopper'],
         version: meson.project_version(),
     )
 endif
 
 pbsamoa_dep = declare_dependency(
     dependencies: deps,
-    include_directories: inc_dir,
+    include_directories: [inc_dir, thirdparty_dir],
     link_with: lib,
     version: meson.project_version(),
 )

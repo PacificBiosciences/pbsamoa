@@ -47,7 +47,7 @@ test_exe = executable(
     ),
     cpp_args: cpp_flags,
     dependencies: [gtest_dep, deps],
-    include_directories: inc_dir,
+    include_directories: [inc_dir, thirdparty_dir],
     link_with: lib,
 )
 

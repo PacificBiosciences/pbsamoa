@@ -6,10 +6,11 @@
 #include <pbsamoa/index/ZmwIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-
+#include <charconv>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <cstdint>
@@ -19,39 +20,24 @@
 namespace PacBio {
 namespace Samoa {
 namespace ZmiQuery {
-namespace {
 
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument ZmiQueryInput{
-R"({
-    "name" : "IN.bam",
-    "description" : "Input BAM file (requires .zmi index alongside).",
-    "type" : "file"
-})"};
-
-const PacBio::CLI_v2::PositionalArgument ZmiQueryZmw{
-R"({
-    "name" : "ZMW",
-    "description" : "ZMW hole number to query.",
-    "type" : "integer"
-})"};
-// clang-format on
-
-}  // namespace
-
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"zmi-query", "Query BAM records by ZMW hole number", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.DisableNumThreadsOption();
-    iface.AddPositionalArguments({ZmiQueryInput, ZmiQueryZmw});
-    return iface;
-}
+    if (argc < 2) {
+        std::fprintf(stderr, "Usage: pbsamoa zmi-query IN.bam ZMW\n");
+        return EXIT_FAILURE;
+    }
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path bamPath{results[ZmiQueryInput]};
-    const std::int32_t zmw{std::stoi(std::string{results[ZmiQueryZmw]})};
+    const std::filesystem::path bamPath{argv[0]};
+
+    std::int32_t zmw{0};
+    {
+        const std::string_view zmwStr{argv[1]};
+        auto r{std::from_chars(std::data(zmwStr), std::data(zmwStr) + std::size(zmwStr), zmw)};
+        if (r.ec != std::errc{}) {
+            throw std::runtime_error{"invalid ZMW: " + std::string{zmwStr}};
+        }
+    }
 
     const ZmwIndex index{ZmwIndex::Open(bamPath)};
     const std::vector<std::int64_t> offsets{index.Find(zmw)};

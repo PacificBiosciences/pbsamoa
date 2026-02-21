@@ -9,9 +9,7 @@
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/SamReader.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-#include <pbcopper/cli2/internal/BuiltinOptions.h>
-#include <pbcopper/parallel/ThreadPool.h>
+#include <parallel/ThreadPool.h>
 
 #include <algorithm>
 #include <array>
@@ -35,18 +33,18 @@ namespace Samoa {
 namespace Dump {
 namespace {
 
-std::size_t ResolveNumWorkers(const PacBio::CLI_v2::Results& results)
+std::size_t ResolveNumWorkers(std::int32_t requested)
 {
     constexpr std::int32_t MAX_AUTO_WORKERS{8};
     constexpr std::int32_t MAX_PARSE_WORKERS{10};
 
-    const std::int32_t requestedNumThreads{results[PacBio::CLI_v2::Builtin::NumThreads]};
-    const std::int32_t normalizedNumThreads{results.NumThreads()};
+    const std::int32_t hwThreads{
+        static_cast<std::int32_t>(std::ranges::max(std::thread::hardware_concurrency(), 1U))};
 
-    if (requestedNumThreads == 0) {
-        return static_cast<std::size_t>(std::ranges::min(normalizedNumThreads, MAX_AUTO_WORKERS));
+    if (requested < 0) {
+        return static_cast<std::size_t>(std::ranges::min(hwThreads, MAX_AUTO_WORKERS));
     }
-    return static_cast<std::size_t>(std::ranges::min(normalizedNumThreads, MAX_PARSE_WORKERS));
+    return static_cast<std::size_t>(std::ranges::min(requested, MAX_PARSE_WORKERS));
 }
 
 void AppendInt(std::string& out, std::int64_t v)
@@ -383,60 +381,45 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
     }
 }
 
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument DumpInput{
-R"({
-    "name" : "input",
-    "description" : "Input BAM file.",
-    "type" : "file"
-})"};
-
-const PacBio::CLI_v2::Option BgzfThreads{
-R"({
-    "names" : ["bgzf-threads"],
-    "description" : "Number of BGZF decompression threads. 0 = synchronous.",
-    "type" : "integer",
-    "default" : -1
-})"};
-
-const PacBio::CLI_v2::Option FormatThreads{
-R"({
-    "names" : ["format-threads"],
-    "description" : "Number of SAM formatting threads. 0 = use hardware concurrency.",
-    "type" : "integer",
-    "default" : 0
-})"};
-// clang-format on
-
 }  // namespace
 
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"dump", "Convert BAM to SAM text on stdout", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.AddPositionalArgument(DumpInput);
-    iface.AddOptionGroup("Threading", {BgzfThreads, FormatThreads});
-    return iface;
-}
+    // Parse options
+    std::int32_t bgzfOpt{-1};
+    std::int32_t formatOpt{0};
+    const char* inputFile{nullptr};
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path path{results[DumpInput]};
+    for (int i{0}; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if ((arg == "--bgzf-threads") && (i + 1 < argc)) {
+            bgzfOpt = std::stoi(std::string{argv[++i]});
+        } else if ((arg == "--format-threads") && (i + 1 < argc)) {
+            formatOpt = std::stoi(std::string{argv[++i]});
+        } else if ((arg == "-j") && (i + 1 < argc)) {
+            bgzfOpt = std::stoi(std::string{argv[++i]});
+        } else if (arg[0] != '-') {
+            inputFile = argv[i];
+        }
+    }
+
+    if (inputFile == nullptr) {
+        std::fprintf(stderr, "Usage: pbsamoa dump [--bgzf-threads N] [--format-threads N] INPUT\n");
+        return EXIT_FAILURE;
+    }
+
+    const std::filesystem::path path{inputFile};
     if (path.extension() == ".sam") {
         DumpSam(path);
         return EXIT_SUCCESS;
     }
 
-    // Resolve BGZF threads: --bgzf-threads overrides -j
-    const std::int32_t bgzfOpt{results[BgzfThreads]};
-    const std::size_t bgzfWorkers{(bgzfOpt >= 0) ? static_cast<std::size_t>(bgzfOpt)
-                                                 : ResolveNumWorkers(results)};
+    const std::size_t bgzfWorkers{ResolveNumWorkers(bgzfOpt)};
 
-    // Resolve format threads: 0 = auto
-    const std::int32_t fmtOpt{results[FormatThreads]};
-    const std::size_t formatThreads{(fmtOpt > 0) ? static_cast<std::size_t>(fmtOpt)
-                                                 : static_cast<std::size_t>(std::ranges::max(
-                                                       std::thread::hardware_concurrency(), 4U))};
+    const std::size_t formatThreads{
+        (formatOpt > 0)
+            ? static_cast<std::size_t>(formatOpt)
+            : static_cast<std::size_t>(std::ranges::max(std::thread::hardware_concurrency(), 4U))};
 
     DumpBam(path, bgzfWorkers, formatThreads);
     return EXIT_SUCCESS;

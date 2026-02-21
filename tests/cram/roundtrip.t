@@ -9,7 +9,7 @@ Full round-trip: BAM -> SAM -> BAM -> SAM should produce identical non-PG output
 
 Copy via pbsamoa zmi-build preserves all records:
 
-  $ "${PBSAMOA}" zmi-build "${TESTDIR}"/../data/diverse.bam copy.bam
+  $ "${PBSAMOA}" zmi-build "${TESTDIR}"/../data/diverse.bam copy.bam 2>/dev/null
   $ "${PBSAMOA}" dump copy.bam > copy.sam
   $ "${PBSAMOA}" dump "${TESTDIR}"/../data/diverse.bam > original.sam
   $ diff copy.sam original.sam

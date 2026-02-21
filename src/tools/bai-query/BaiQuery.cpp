@@ -5,8 +5,6 @@
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-
 #include <charconv>
 #include <filesystem>
 #include <optional>
@@ -15,6 +13,7 @@
 #include <string_view>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 
 namespace PacBio {
@@ -66,37 +65,17 @@ std::optional<Region> ParseRegion(std::string_view text)
     return Region{refName, start - 1, end};
 }
 
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument BaiQueryInput{
-R"({
-    "name" : "INPUT",
-    "description" : "Input BAM file.",
-    "type" : "file"
-})"};
-
-const PacBio::CLI_v2::PositionalArgument BaiQueryRegion{
-R"({
-    "name" : "REGION",
-    "description" : "Genomic region (ref:start-end, 1-based inclusive).",
-    "type" : "string"
-})"};
-// clang-format on
-
 }  // namespace
 
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"bai-query", "Query BAM records by genomic region", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.DisableNumThreadsOption();
-    iface.AddPositionalArguments({BaiQueryInput, BaiQueryRegion});
-    return iface;
-}
+    if (argc < 2) {
+        std::fprintf(stderr, "Usage: pbsamoa bai-query INPUT REGION\n");
+        return EXIT_FAILURE;
+    }
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path bamPath{std::string{results[BaiQueryInput]}};
-    const std::string regionStr{results[BaiQueryRegion]};
+    const std::filesystem::path bamPath{argv[0]};
+    const std::string regionStr{argv[1]};
     const std::optional<Region> region{ParseRegion(regionStr)};
     if (!region.has_value()) {
         throw std::runtime_error{"invalid region format '" + regionStr +

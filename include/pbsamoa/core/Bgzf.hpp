@@ -188,7 +188,7 @@ private:
 ///
 /// Three-stage architecture:
 /// - IO thread reads compressed blocks and submits to ThreadPool
-/// - N worker threads decompress blocks (via pbcopper ThreadPool<DecompressedBlock>)
+/// - N worker threads decompress blocks (via ThreadPool<DecompressedBlock>)
 /// - Consumer thread runs ConsumeWith() to receive blocks in order,
 ///   parses record boundaries, creates RawRecords, pushes to SPSC
 /// - Caller pops records from the SPSC via ReadRecord()

@@ -5,8 +5,8 @@
 #include <pbsamoa/core/Tags.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <pbcopper/parallel/ThreadPool.h>
-#include <pbcopper/third-party/rigtorp/SPSCQueue.hpp>
+#include <parallel/ThreadPool.h>
+#include <rigtorp/SPSCQueue.hpp>
 
 #include <atomic>
 #include <chrono>

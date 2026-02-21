@@ -2,46 +2,28 @@
 
 #include <pbsamoa/index/BaiIndex.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-#include <pbcopper/logging/Logging.h>
-
 #include <filesystem>
-#include <string>
+#include <string_view>
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace PacBio {
 namespace Samoa {
 namespace BaiBuild {
-namespace {
 
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument BaiBuildInput{
-R"({
-    "name" : "IN.bam",
-    "description" : "Input BAM file to index.",
-    "type" : "file"
-})"};
-// clang-format on
-
-}  // namespace
-
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"bai-build", "Build BAI index for a BAM file", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.DisableNumThreadsOption();
-    iface.AddPositionalArgument(BaiBuildInput);
-    return iface;
-}
+    if (argc < 1) {
+        std::fprintf(stderr, "Usage: pbsamoa bai-build IN.bam\n");
+        return EXIT_FAILURE;
+    }
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path bamPath{results[BaiBuildInput]};
+    const std::filesystem::path bamPath{argv[0]};
     const auto index{BaiIndex::Build(bamPath)};
     const std::filesystem::path outPath{bamPath.string() + ".bai"};
     index.ToFile(outPath);
-    PBLOG_INFO << "Index written to " << outPath.string();
+    std::fprintf(stderr, "Index written to %s\n", outPath.c_str());
     return EXIT_SUCCESS;
 }
 

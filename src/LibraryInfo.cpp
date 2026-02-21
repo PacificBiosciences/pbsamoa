@@ -3,24 +3,24 @@
 #include "LibraryGitHash.hpp"
 #include "LibraryVersion.hpp"
 
-#include <pbcopper/LibraryInfo.h>
+#include <string>
 
 namespace PacBio {
 namespace Samoa {
 
-Library::Info LibraryInfo()
+LibraryInfo GetLibraryInfo()
 {
     return {
         .Name = "pbsamoa",
-        .Release = std::string{RELEASE_VERSION},
-        .GitSha1 = std::string{LIBRARY_GIT_SHA1},
+        .Release = RELEASE_VERSION,
+        .GitSha1 = LIBRARY_GIT_SHA1,
     };
 }
 
 std::string LibraryFormattedVersion()
 {
-    const Library::Info info{LibraryInfo()};
-    return info.Release + " (commit " + info.GitSha1 + ')';
+    const LibraryInfo info{GetLibraryInfo()};
+    return std::string{info.Release} + " (commit " + std::string{info.GitSha1} + ')';
 }
 
 }  // namespace Samoa

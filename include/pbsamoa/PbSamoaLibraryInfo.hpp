@@ -1,14 +1,20 @@
 #ifndef PBSAMOA_PBSAMOALIBRARYINFO_HPP
 #define PBSAMOA_PBSAMOALIBRARYINFO_HPP
 
-#include <pbcopper/LibraryInfo.h>
-
 #include <string>
+#include <string_view>
 
 namespace PacBio {
 namespace Samoa {
 
-Library::Info LibraryInfo();
+struct LibraryInfo
+{
+    std::string_view Name;
+    std::string_view Release;
+    std::string_view GitSha1;
+};
+
+LibraryInfo GetLibraryInfo();
 std::string LibraryFormattedVersion();
 
 }  // namespace Samoa

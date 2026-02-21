@@ -51,7 +51,7 @@ lib = library(
     ) + gen_headers,
     cpp_args: cpp_flags,
     dependencies: deps,
-    include_directories: inc_dir,
+    include_directories: [inc_dir, thirdparty_dir],
     install: lib_install,
     soversion: meson.project_version(),
     version: meson.project_version(),

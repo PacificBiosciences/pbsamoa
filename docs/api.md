@@ -33,12 +33,12 @@ BamRawReader reader{"input.bam", BamRawReaderConfig{.ChunkNum = 2, .TotalChunks 
 
 `BamRawReaderConfig` fields:
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `BgzfWorkers` | `0` | BGZF decompression threads (0 = synchronous) |
-| `RecordLimit` | `0` | Stop after N records (0 = unlimited) |
-| `ChunkNum` | `0` | 1-based chunk number (0 = no chunking) |
-| `TotalChunks` | `0` | Total chunk count (0 = no chunking) |
+|     Field     | Default |                 Description                  |
+| ------------- | ------- | -------------------------------------------- |
+| `BgzfWorkers` | `0`     | BGZF decompression threads (0 = synchronous) |
+| `RecordLimit` | `0`     | Stop after N records (0 = unlimited)         |
+| `ChunkNum`    | `0`     | 1-based chunk number (0 = no chunking)       |
+| `TotalChunks` | `0`     | Total chunk count (0 = no chunking)          |
 
 ### Header access
 
@@ -127,13 +127,13 @@ BamRecordReader reader{"input.bam", BamRecordReaderConfig{
 
 ### Configuration
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `ViewConfig` | `BamRawReaderConfig` | `{}` | Config for underlying `BamRawReader` |
-| `DecodeWorkers` | `size_t` | `4` | Threads for parallel `ToOwned()` decode (0 = serial) |
-| `BatchBudget` | `ByteLimit` | `4_MiB` | Memory budget per batch read from view reader |
-| `OutputCapacity` | `size_t` | `4096` | SPSC queue capacity (records) |
-| `TagFilter` | `variant<monostate, DropTags, KeepTags>` | `{}` | Tag filter applied during `ToOwned()` |
+|      Field       |                   Type                   | Default |                     Description                      |
+| ---------------- | ---------------------------------------- | ------- | ---------------------------------------------------- |
+| `ViewConfig`     | `BamRawReaderConfig`                     | `{}`    | Config for underlying `BamRawReader`                 |
+| `DecodeWorkers`  | `size_t`                                 | `4`     | Threads for parallel `ToOwned()` decode (0 = serial) |
+| `BatchBudget`    | `ByteLimit`                              | `4_MiB` | Memory budget per batch read from view reader        |
+| `OutputCapacity` | `size_t`                                 | `4096`  | SPSC queue capacity (records)                        |
+| `TagFilter`      | `variant<monostate, DropTags, KeepTags>` | `{}`    | Tag filter applied during `ToOwned()`                |
 
 ### Reading records
 
@@ -235,39 +235,39 @@ logic is inline in the header.
 
 ### Fixed fields
 
-| Method | Return type | Description |
-|--------|-------------|-------------|
-| `RefId()` | `int32_t` | Reference sequence ID (-1 = unmapped) |
-| `Pos()` | `int32_t` | 0-based leftmost position (-1 = unmapped) |
-| `MapQ()` | `uint8_t` | Mapping quality |
-| `Flag()` | `uint16_t` | Bitwise flag |
-| `NextRefId()` | `int32_t` | Mate reference ID |
-| `NextPos()` | `int32_t` | Mate 0-based position |
-| `Tlen()` | `int32_t` | Template length |
-| `Bin()` | `uint16_t` | BAI bin |
-| `NameLength()` | `uint8_t` | Length of read name (incl. NUL) |
-| `CigarOpCount()` | `uint16_t` | Number of CIGAR operations |
-| `SeqLength()` | `uint32_t` | Sequence length |
+|      Method      | Return type |                Description                |
+| ---------------- | ----------- | ----------------------------------------- |
+| `RefId()`        | `int32_t`   | Reference sequence ID (-1 = unmapped)     |
+| `Pos()`          | `int32_t`   | 0-based leftmost position (-1 = unmapped) |
+| `MapQ()`         | `uint8_t`   | Mapping quality                           |
+| `Flag()`         | `uint16_t`  | Bitwise flag                              |
+| `NextRefId()`    | `int32_t`   | Mate reference ID                         |
+| `NextPos()`      | `int32_t`   | Mate 0-based position                     |
+| `Tlen()`         | `int32_t`   | Template length                           |
+| `Bin()`          | `uint16_t`  | BAI bin                                   |
+| `NameLength()`   | `uint8_t`   | Length of read name (incl. NUL)           |
+| `CigarOpCount()` | `uint16_t`  | Number of CIGAR operations                |
+| `SeqLength()`    | `uint32_t`  | Sequence length                           |
 
 ### Variable-length fields
 
-| Method | Return type | Description |
-|--------|-------------|-------------|
-| `Name()` | `string_view` | Read name (NUL-terminated in buffer) |
-| `CigarOps()` | `CigarView` | Span of CIGAR operations |
-| `Seq()` | `SequenceView` | 4-bit packed sequence (decode on access) |
-| `Qual()` | `span<const uint8_t>` | Base qualities |
-| `AuxData()` | `span<const byte>` | Raw auxiliary tag bytes |
+|    Method    |      Return type      |               Description                |
+| ------------ | --------------------- | ---------------------------------------- |
+| `Name()`     | `string_view`         | Read name (NUL-terminated in buffer)     |
+| `CigarOps()` | `CigarView`           | Span of CIGAR operations                 |
+| `Seq()`      | `SequenceView`        | 4-bit packed sequence (decode on access) |
+| `Qual()`     | `span<const uint8_t>` | Base qualities                           |
+| `AuxData()`  | `span<const byte>`    | Raw auxiliary tag bytes                  |
 
 ### Derived fields
 
-| Method | Return type | Description |
-|--------|-------------|-------------|
-| `IsMapped()` | `bool` | `(Flag() & 4) == 0` |
-| `IsReverseStrand()` | `bool` | `(Flag() & 16) != 0` |
-| `IsPrimary()` | `bool` | Not secondary and not supplementary |
-| `ReferenceLength()` | `int64_t` | Consumed reference bases (from CIGAR) |
-| `QueryLength()` | `int64_t` | Consumed query bases (from CIGAR) |
+|       Method        | Return type |              Description              |
+| ------------------- | ----------- | ------------------------------------- |
+| `IsMapped()`        | `bool`      | `(Flag() & 4) == 0`                   |
+| `IsReverseStrand()` | `bool`      | `(Flag() & 16) != 0`                  |
+| `IsPrimary()`       | `bool`      | Not secondary and not supplementary   |
+| `ReferenceLength()` | `int64_t`   | Consumed reference bases (from CIGAR) |
+| `QueryLength()`     | `int64_t`   | Consumed query bases (from CIGAR)     |
 
 ### Conversion
 
@@ -295,11 +295,11 @@ assignments; serialization happens once in the writer.
 `NextPos()`, `Tlen()`, `Tags()` have the same names as `RawRecord`. Three
 accessors differ:
 
-| `BamRecord` | `RawRecord` |
-|-------------|-------------|
-| `Cigar()` | `CigarOps()` |
-| `Sequence()` | `Seq()` |
-| `Qualities()` | `Qual()` |
+|  `BamRecord`  | `RawRecord`  |
+| ------------- | ------------ |
+| `Cigar()`     | `CigarOps()` |
+| `Sequence()`  | `Seq()`      |
+| `Qualities()` | `Qual()`     |
 
 ### Fluent mutators
 
@@ -335,11 +335,11 @@ it.
 
 Owns a decompressed buffer and provides views into it.
 
-| Method | Return type | Description |
-|--------|-------------|-------------|
-| `RecordData(i)` | `span<const byte>` | Raw data for record `i` |
-| `RecordCount()` | `size_t` | Number of records |
-| `BufferSize()` | `size_t` | Decompressed buffer size in bytes |
+|     Method      |    Return type     |            Description            |
+| --------------- | ------------------ | --------------------------------- |
+| `RecordData(i)` | `span<const byte>` | Raw data for record `i`           |
+| `RecordCount()` | `size_t`           | Number of records                 |
+| `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes |
 
 Views are invalidated when the batch is destroyed.
 
@@ -369,12 +369,12 @@ std::vector<std::byte> bytes = header.ToBamHeaderBlock();
 
 ### Header fields (`@HD`)
 
-| Method | Description |
-|--------|-------------|
-| `Version()` | Format version (e.g. "1.6") |
-| `SortOrder()` | "coordinate", "queryname", "unsorted", "unknown" |
-| `GroupOrder()` | Grouping of alignments |
-| `SubSort()` | Sub-sorting order within groups |
+|     Method     |                   Description                    |
+| -------------- | ------------------------------------------------ |
+| `Version()`    | Format version (e.g. "1.6")                      |
+| `SortOrder()`  | "coordinate", "queryname", "unsorted", "unknown" |
+| `GroupOrder()` | Grouping of alignments                           |
+| `SubSort()`    | Sub-sorting order within groups                  |
 
 ### Reference sequences (`@SQ`)
 
@@ -420,11 +420,11 @@ index.ToFile("sorted.bam.bai");
 
 ### Statistics
 
-| Method | Description |
-|--------|-------------|
+|      Method       |                Description                 |
+| ----------------- | ------------------------------------------ |
 | `NumReferences()` | Number of reference sequences in the index |
-| `MappedCount()` | Total mapped reads (from metadata bin) |
-| `UnmappedCount()` | Total unmapped reads (from metadata bin) |
+| `MappedCount()`   | Total mapped reads (from metadata bin)     |
+| `UnmappedCount()` | Total unmapped reads (from metadata bin)   |
 
 ---
 
@@ -442,17 +442,17 @@ CigarOp op{CigarOpType::M, 100};  // 100M
 
 ### Operations
 
-| Enum value | SAM char | Description | Consumes query | Consumes ref |
-|------------|----------|-------------|:-:|:-:|
-| `M` | `M` | Alignment match (match or mismatch) | yes | yes |
-| `I` | `I` | Insertion to the reference | yes | |
-| `D` | `D` | Deletion from the reference | | yes |
-| `N` | `N` | Skipped region from the reference | | yes |
-| `S` | `S` | Soft clipping | yes | |
-| `H` | `H` | Hard clipping | | |
-| `P` | `P` | Padding | | |
-| `EQ` | `=` | Sequence match | yes | yes |
-| `X` | `X` | Sequence mismatch | yes | yes |
+| Enum value | SAM char |             Description             | Consumes query | Consumes ref |
+| ---------- | -------- | ----------------------------------- | :------------: | :----------: |
+| `M`        | `M`      | Alignment match (match or mismatch) |      yes       |     yes      |
+| `I`        | `I`      | Insertion to the reference          |      yes       |              |
+| `D`        | `D`      | Deletion from the reference         |                |     yes      |
+| `N`        | `N`      | Skipped region from the reference   |                |     yes      |
+| `S`        | `S`      | Soft clipping                       |      yes       |              |
+| `H`        | `H`      | Hard clipping                       |                |              |
+| `P`        | `P`      | Padding                             |                |              |
+| `EQ`       | `=`      | Sequence match                      |      yes       |     yes      |
+| `X`        | `X`      | Sequence mismatch                   |      yes       |     yes      |
 
 ### Functions
 
@@ -601,10 +601,10 @@ ByteLimit precise{1024 * 1024 * 64};  // 64 MiB
 #include <pbsamoa/io/BamRawReader.hpp>
 ```
 
-| Policy | Behavior |
-|--------|----------|
-| `ThrowPolicy` | Throws `std::runtime_error` on corrupt records |
-| `SkipPolicy` | Logs and skips. `SkippedCount()` returns total skipped. |
+|    Policy     |                        Behavior                         |
+| ------------- | ------------------------------------------------------- |
+| `ThrowPolicy` | Throws `std::runtime_error` on corrupt records          |
+| `SkipPolicy`  | Logs and skips. `SkippedCount()` returns total skipped. |
 
 ---
 

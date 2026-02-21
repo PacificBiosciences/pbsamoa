@@ -4,10 +4,11 @@
 
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-
+#include <charconv>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <cstdint>
 #include <cstdio>
@@ -16,47 +17,34 @@
 namespace PacBio {
 namespace Samoa {
 namespace ChunkTool {
-namespace {
 
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument ChunkInput{
-R"({
-    "name" : "IN.bam",
-    "description" : "Input BAM file (requires .zmi index alongside).",
-    "type" : "file"
-})"};
-
-const PacBio::CLI_v2::PositionalArgument ChunkNum{
-R"({
-    "name" : "CHUNK",
-    "description" : "Chunk number (1-based).",
-    "type" : "integer"
-})"};
-
-const PacBio::CLI_v2::PositionalArgument ChunkTotal{
-R"({
-    "name" : "TOTAL",
-    "description" : "Total number of chunks.",
-    "type" : "integer"
-})"};
-// clang-format on
-
-}  // namespace
-
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"chunk", "Dump a chunk of BAM records as SAM text", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.DisableNumThreadsOption();
-    iface.AddPositionalArguments({ChunkInput, ChunkNum, ChunkTotal});
-    return iface;
-}
+    if (argc < 3) {
+        std::fprintf(stderr, "Usage: pbsamoa chunk IN.bam CHUNK TOTAL\n");
+        return EXIT_FAILURE;
+    }
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path bamPath{results[ChunkInput]};
-    const std::int32_t chunkNum{std::stoi(std::string{results[ChunkNum]})};
-    const std::int32_t totalChunks{std::stoi(std::string{results[ChunkTotal]})};
+    const std::filesystem::path bamPath{argv[0]};
+
+    std::int32_t chunkNum{0};
+    std::int32_t totalChunks{0};
+
+    {
+        const std::string_view chunkStr{argv[1]};
+        auto r1{std::from_chars(std::data(chunkStr), std::data(chunkStr) + std::size(chunkStr),
+                                chunkNum)};
+        if (r1.ec != std::errc{}) {
+            throw std::runtime_error{"invalid CHUNK: " + std::string{chunkStr}};
+        }
+
+        const std::string_view totalStr{argv[2]};
+        auto r2{std::from_chars(std::data(totalStr), std::data(totalStr) + std::size(totalStr),
+                                totalChunks)};
+        if (r2.ec != std::errc{}) {
+            throw std::runtime_error{"invalid TOTAL: " + std::string{totalStr}};
+        }
+    }
 
     BamRawReader reader{bamPath,
                         BamRawReaderConfig{.ChunkNum = chunkNum, .TotalChunks = totalChunks}};

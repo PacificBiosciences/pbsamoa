@@ -6,13 +6,13 @@
 #include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
 
-#include <pbcopper/cli2/CLI.h>
-#include <pbcopper/cli2/internal/BuiltinOptions.h>
-#include <pbcopper/utility/Stopwatch.h>
-
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <span>
+#include <string>
+#include <string_view>
+#include <thread>
 
 #include <cstdint>
 #include <cstdio>
@@ -23,14 +23,15 @@ namespace Samoa {
 namespace Bench {
 namespace {
 
-double ElapsedSecs(const PacBio::Utility::Stopwatch& timer)
+double ElapsedSecs(std::chrono::steady_clock::time_point start)
 {
-    return timer.ElapsedNanoseconds() / 1.0e9;
+    const auto elapsed{std::chrono::steady_clock::now() - start};
+    return std::chrono::duration<double>(elapsed).count();
 }
 
 void BenchSequentialRead(const std::filesystem::path& path)
 {
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     BamRawReader reader{path};
     std::size_t records{0};
     std::size_t bytes{0};
@@ -40,7 +41,7 @@ void BenchSequentialRead(const std::filesystem::path& path)
         bytes += std::size(view.RawData());
     }
 
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
     const double mbPerSec{bytes / (1024.0 * 1024.0) / secs};
 
     std::fprintf(stdout,
@@ -51,7 +52,7 @@ void BenchSequentialRead(const std::filesystem::path& path)
 
 void BenchBatchRead(const std::filesystem::path& path, ByteLimit limit)
 {
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     BamRawReader reader{path};
     std::size_t records{0};
     std::size_t batches{0};
@@ -61,7 +62,7 @@ void BenchBatchRead(const std::filesystem::path& path, ByteLimit limit)
         ++batches;
     }
 
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
 
     std::fprintf(stdout,
                  "batch_read(%zu KiB): %zu records, %zu batches, "
@@ -82,14 +83,14 @@ void BenchWrite(const std::filesystem::path& srcPath)
     }
     const std::size_t numRecords{batch->RecordCount()};
 
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     {
         BamWriter writer{tmpPath, srcReader.Header()};
         for (std::size_t i{0}; i < numRecords; ++i) {
             writer.Write(batch->RecordData(i));
         }
     }
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
 
     const auto fileSize{std::filesystem::file_size(tmpPath)};
 
@@ -142,7 +143,7 @@ void PrintDecodeMetrics(const DecodeMetrics& m)
 
 void BenchPipelineRead(const std::filesystem::path& path, std::size_t bgzfThreads)
 {
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     BamRawReader reader{path, BamRawReaderConfig{.BgzfWorkers = bgzfThreads}};
     std::size_t records{0};
     std::size_t bytes{0};
@@ -152,7 +153,7 @@ void BenchPipelineRead(const std::filesystem::path& path, std::size_t bgzfThread
         bytes += std::size(view.RawData());
     }
 
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
     const double mbPerSec{bytes / (1024.0 * 1024.0) / secs};
 
     std::fprintf(stdout,
@@ -167,7 +168,7 @@ void BenchPipelineRead(const std::filesystem::path& path, std::size_t bgzfThread
 void BenchRecordReader(const std::filesystem::path& path, std::size_t bgzfThreads,
                        std::size_t decodeThreads)
 {
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     BamRecordReader reader{path, BamRecordReaderConfig{
                                      .ViewConfig = {.BgzfWorkers = bgzfThreads},
                                      .DecodeWorkers = decodeThreads,
@@ -179,7 +180,7 @@ void BenchRecordReader(const std::filesystem::path& path, std::size_t bgzfThread
         (void)rec.Name();
     }
 
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
 
     std::fprintf(stdout,
                  "record_reader(bgzf=%zu, decode=%zu): %zu records, %.3f sec, "
@@ -215,7 +216,7 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
     const std::int32_t refLen{header.ReferenceSequences()[0].Length()};
     const std::int32_t queryLen{std::ranges::min(refLen, std::int32_t{100000})};
 
-    const PacBio::Utility::Stopwatch timer;
+    const auto start{std::chrono::steady_clock::now()};
     std::size_t records{0};
     const std::int32_t step{std::ranges::max(queryLen / 10, std::int32_t{1})};
 
@@ -227,7 +228,7 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
         }
     }
 
-    const double secs{ElapsedSecs(timer)};
+    const double secs{ElapsedSecs(start)};
 
     std::fprintf(stdout,
                  "region_query: %zu records from sliding window, "
@@ -235,66 +236,51 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
                  records, secs, 1.0 * records / secs);
 }
 
-std::size_t ResolveNumWorkers(const PacBio::CLI_v2::Results& results)
+std::size_t ResolveNumWorkers(std::int32_t requested)
 {
     constexpr std::int32_t MAX_AUTO_WORKERS{8};
     constexpr std::int32_t MAX_PARSE_WORKERS{10};
 
-    const std::int32_t requestedNumThreads{results[PacBio::CLI_v2::Builtin::NumThreads]};
-    const std::int32_t normalizedNumThreads{results.NumThreads()};
+    const std::int32_t hwThreads{
+        static_cast<std::int32_t>(std::ranges::max(std::thread::hardware_concurrency(), 1U))};
 
-    if (requestedNumThreads == 0) {
-        return static_cast<std::size_t>(std::ranges::min(normalizedNumThreads, MAX_AUTO_WORKERS));
+    if (requested < 0) {
+        return static_cast<std::size_t>(std::ranges::min(hwThreads, MAX_AUTO_WORKERS));
     }
-    return static_cast<std::size_t>(std::ranges::min(normalizedNumThreads, MAX_PARSE_WORKERS));
+    return static_cast<std::size_t>(std::ranges::min(requested, MAX_PARSE_WORKERS));
 }
-
-// clang-format off
-const PacBio::CLI_v2::PositionalArgument BenchInput{
-R"({
-    "name"        : "input",
-    "description" : "Input BAM file.",
-    "type"        : "file"
-})"};
-
-const PacBio::CLI_v2::Option BgzfThreads{
-R"({
-    "names" : ["bgzf-threads"],
-    "description" : "Number of BGZF decompression threads. 0 = synchronous.",
-    "type" : "integer",
-    "default" : -1
-})"};
-
-const PacBio::CLI_v2::Option DecodeThreads{
-R"({
-    "names" : ["decode-threads"],
-    "description" : "Number of BamRecord decode threads for record_reader bench. 0 = serial.",
-    "type" : "integer",
-    "default" : 4
-})"};
-// clang-format on
 
 }  // namespace
 
-PacBio::CLI_v2::Interface CreateInterface()
+int Runner(int argc, char* argv[])
 {
-    PacBio::CLI_v2::Interface iface{"bench", "Benchmark pbsamoa read/write performance", "0.1.0"};
-    iface.DisableLogFileOption();
-    iface.AddPositionalArgument(BenchInput);
-    iface.AddOptionGroup("Threading", {BgzfThreads, DecodeThreads});
-    return iface;
-}
+    // Parse options
+    std::int32_t bgzfOpt{-1};
+    std::int32_t decodeOpt{4};
+    const char* inputFile{nullptr};
 
-int Runner(const PacBio::CLI_v2::Results& results)
-{
-    const std::filesystem::path path{results[BenchInput]};
+    for (int i{0}; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if ((arg == "--bgzf-threads") && (i + 1 < argc)) {
+            bgzfOpt = std::stoi(std::string{argv[++i]});
+        } else if ((arg == "--decode-threads") && (i + 1 < argc)) {
+            decodeOpt = std::stoi(std::string{argv[++i]});
+        } else if ((arg == "-j") && (i + 1 < argc)) {
+            bgzfOpt = std::stoi(std::string{argv[++i]});
+        } else if (arg[0] != '-') {
+            inputFile = argv[i];
+        }
+    }
 
-    // Resolve BGZF threads: --bgzf-threads overrides -j
-    const std::int32_t bgzfOpt{results[BgzfThreads]};
-    const std::size_t bgzfWorkers{(bgzfOpt >= 0) ? static_cast<std::size_t>(bgzfOpt)
-                                                 : ResolveNumWorkers(results)};
+    if (inputFile == nullptr) {
+        std::fprintf(stderr,
+                     "Usage: pbsamoa bench [--bgzf-threads N] [--decode-threads N] INPUT\n");
+        return EXIT_FAILURE;
+    }
 
-    const std::int32_t decodeOpt{results[DecodeThreads]};
+    const std::filesystem::path path{inputFile};
+
+    const std::size_t bgzfWorkers{ResolveNumWorkers(bgzfOpt)};
     const std::size_t decodeWorkers{(decodeOpt >= 0) ? static_cast<std::size_t>(decodeOpt) : 4};
 
     std::fprintf(stdout, "=== pbsamoa benchmark: %s ===\n", path.filename().c_str());
@@ -304,8 +290,6 @@ int Runner(const PacBio::CLI_v2::Results& results)
     // --- BamRawReader benchmarks ---
     std::fprintf(stdout, "--- BamRawReader (sync) ---\n");
     BenchSequentialRead(path);
-    // BenchBatchRead(path, ByteLimit{64U * 1024U});
-    // BenchBatchRead(path, ByteLimit{1024U * 1024U});
     BenchBatchRead(path, ByteLimit{64U * 1024U * 1024U});
 
     if (bgzfWorkers > 0) {
