@@ -151,8 +151,7 @@ TEST(Metrics, LivePollingDuringRead)
     EXPECT_GE(mid.Decode.RecordsDecoded, 10U);
 
     // Finish reading
-    while (reader.ReadRecord().has_value()) {
-    }
+    while (reader.ReadRecord().has_value()) {}
 
     const ReaderMetrics finalMetrics{reader.GetMetrics()};
     EXPECT_GT(finalMetrics.TotalRecordsRead, mid.TotalRecordsRead);

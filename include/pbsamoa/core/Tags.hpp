@@ -90,7 +90,8 @@ public:
     void Set(TagKey key, TagValue value);
     bool Remove(TagKey key);
     bool Contains(TagKey key) const;
-    /// \brief Append a key-value pair without checking for duplicates. Caller must guarantee the key does not already exist.
+    /// \brief Append a key-value pair without checking for duplicates. Caller must guarantee the
+    /// key does not already exist.
     void Append(TagKey key, TagValue value);
 
     std::span<const Entry> Entries() const;

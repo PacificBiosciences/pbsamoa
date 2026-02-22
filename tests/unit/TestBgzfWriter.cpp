@@ -3,13 +3,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <optional>
 #include <span>
 #include <thread>
 #include <vector>
+#include <cstddef>
 
 namespace PacBio {
 namespace Samoa {
