@@ -26,7 +26,7 @@ std::int32_t BamRecord::Pos() const { return pos_; }
 
 std::uint8_t BamRecord::MapQ() const { return mapQ_; }
 
-const std::vector<CigarOp>& BamRecord::Cigar() const { return cigar_; }
+CigarView BamRecord::Cigar() const { return cigar_; }
 
 std::int32_t BamRecord::NextRefId() const { return nextRefId_; }
 
@@ -36,7 +36,7 @@ std::int32_t BamRecord::Tlen() const { return tlen_; }
 
 std::string_view BamRecord::Sequence() const { return sequence_; }
 
-const std::vector<std::uint8_t>& BamRecord::Qualities() const { return qualities_; }
+std::span<const std::uint8_t> BamRecord::Qualities() const { return qualities_; }
 
 const TagMap& BamRecord::Tags() const { return tags_; }
 
@@ -213,7 +213,7 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
                             p + offset);
     } else if (seqLen > 0) {
         // Missing quality: fill with 0xFF
-        std::fill_n(p + offset, seqLen, std::byte{0xFF});
+        std::ranges::fill_n(p + offset, seqLen, std::byte{0xFF});
     }
     offset += seqLen;
 

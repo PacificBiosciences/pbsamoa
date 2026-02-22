@@ -4,6 +4,7 @@
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,12 +38,12 @@ public:
     std::int32_t RefId() const;
     std::int32_t Pos() const;
     std::uint8_t MapQ() const;
-    const std::vector<CigarOp>& Cigar() const;
+    CigarView Cigar() const;
     std::int32_t NextRefId() const;
     std::int32_t NextPos() const;
     std::int32_t Tlen() const;
     std::string_view Sequence() const;
-    const std::vector<std::uint8_t>& Qualities() const;
+    std::span<const std::uint8_t> Qualities() const;
     const TagMap& Tags() const;
 
     // --- mutators (fluent interface) ---

@@ -7,6 +7,12 @@ reference/htslib
 # bundled cram script bytecode
 *.pyc
 
+# cram test error output
+tests/cram/*.err
+
+# CodeQL
+_codeql_detected_source_root
+
 # Meson WrapDB stuff
 /subprojects/*
 !/subprojects/*.wrap
