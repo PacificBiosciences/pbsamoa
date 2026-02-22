@@ -397,12 +397,12 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
         numRuns - static_cast<std::size_t>(std::ranges::distance(suffixSum.begin(), suffixIt))};
 
     // Compute how many bases from the first retained run are clipped off the front
-    const std::size_t lostPrefixBases{
-        prefixSize - ((prefixIt != prefixSum.begin()) ? *std::prev(prefixIt) : 0)};
+    const std::size_t lostPrefixBases{prefixSize -
+                                      ((prefixIt != prefixSum.begin()) ? *std::prev(prefixIt) : 0)};
 
     // Compute how many bases from the last retained run are clipped off the back
-    const std::size_t lostSuffixBases{
-        suffixSize - ((suffixIt != suffixSum.begin()) ? *std::prev(suffixIt) : 0)};
+    const std::size_t lostSuffixBases{suffixSize -
+                                      ((suffixIt != suffixSum.begin()) ? *std::prev(suffixIt) : 0)};
 
     // Build the new RLE pairs
     TagArray result{'C'};

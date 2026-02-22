@@ -5,8 +5,8 @@
 #include <pbsamoa/core/TagClipping.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
-#include <span>
 #include <ranges>
+#include <span>
 
 #include <gtest/gtest.h>
 
