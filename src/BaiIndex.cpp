@@ -334,8 +334,7 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     // let's process records from the decompressed data we already have.
 
     // We'll process BGZF blocks and track records within them.
-    // We need to know: for each record, its virtual offset (block_offset << 16 |
-    // within_block_offset)
+    // We need to know: for each record, its virtual offset (block_offset << 16 | within_block_offset)
 
     // Re-use the data we already have: the last block read during header parsing
     // may contain record data starting at firstRecordWithinBlock
@@ -526,9 +525,9 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
                 }
                 segments.erase(std::ranges::begin(segments), std::ranges::begin(segments) + segIdx);
             }
-            recordAccum.erase(std::ranges::begin(recordAccum),
-                              std::ranges::begin(recordAccum) +
-                                  static_cast<std::ptrdiff_t>(accumPos));
+            recordAccum.erase(
+                std::ranges::begin(recordAccum),
+                std::ranges::begin(recordAccum) + static_cast<std::ptrdiff_t>(accumPos));
             accumPos = 0;
         }
     }

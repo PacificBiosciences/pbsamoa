@@ -193,8 +193,7 @@ TEST_F(ZmiBamWriterTest, WritesBamAndZmi)
 TEST_F(ZmiWriterTest, FromPbiRoundTrip)
 {
     // Construct a minimal synthetic PBI file with 3 records.
-    // PBI layout: BGZF([32-byte
-    // header][rgId*3][qStart*3][qEnd*3][holeNumber*3][readQual*3][ctxtFlag*3][fileOffset*3])
+    // PBI layout: BGZF([32-byte header][rgId*3][qStart*3][qEnd*3][holeNumber*3][readQual*3][ctxtFlag*3][fileOffset*3])
 
     const std::filesystem::path pbiPath{
         std::filesystem::temp_directory_path() /
@@ -256,9 +255,9 @@ TEST_F(ZmiWriterTest, FromPbiRoundTrip)
 
         // fileOffset: [1000, 2000, 3000]
         const std::array<std::int64_t, 3> offsets{1000, 2000, 3000};
-        raw.insert(std::end(raw), reinterpret_cast<const std::byte*>(std::data(offsets)),
-                   reinterpret_cast<const std::byte*>(std::data(offsets)) +
-                       3 * sizeof(std::int64_t));
+        raw.insert(
+            std::end(raw), reinterpret_cast<const std::byte*>(std::data(offsets)),
+            reinterpret_cast<const std::byte*>(std::data(offsets)) + 3 * sizeof(std::int64_t));
 
         // Write as BGZF
         BgzfWriter bgzf{pbiPath};

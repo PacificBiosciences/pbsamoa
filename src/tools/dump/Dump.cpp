@@ -321,7 +321,8 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
         try {
             while (formatPool.ConsumeWith([](std::string output) {
                 std::fwrite(std::data(output), 1, std::size(output), stdout);
-            })) {}
+            })) {
+            }
         } catch (...) {
             consumerException = std::current_exception();
         }

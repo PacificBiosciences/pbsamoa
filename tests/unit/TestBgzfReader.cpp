@@ -5,11 +5,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <vector>
-#include <cstddef>
 
 namespace PacBio {
 namespace Samoa {

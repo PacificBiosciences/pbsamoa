@@ -166,9 +166,10 @@ protected:
 
 TEST_F(SamReaderTempFile, StarSequenceAndQuality)
 {
-    const auto path = WriteTempSam("star.sam", "@HD\tVN:1.6\n"
-                                               "@SQ\tSN:ref\tLN:100\n"
-                                               "read1\t4\t*\t0\t0\t*\t*\t0\t0\t*\t*\n");
+    const auto path = WriteTempSam("star.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t4\t*\t0\t0\t*\t*\t0\t0\t*\t*\n");
     SamReader reader{path};
     const auto record = reader.ReadRecord();
     ASSERT_TRUE(record.has_value());
@@ -205,8 +206,9 @@ TEST_F(SamReaderTempFile, EmptyFile)
 
 TEST_F(SamReaderTempFile, HeaderOnlyFile)
 {
-    const auto path = WriteTempSam("header_only.sam", "@HD\tVN:1.6\n"
-                                                      "@SQ\tSN:ref\tLN:100\n");
+    const auto path = WriteTempSam("header_only.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n");
     SamReader reader{path};
     EXPECT_EQ(reader.Header().Version(), "1.6");
     EXPECT_FALSE(reader.ReadRecord().has_value());
@@ -214,10 +216,11 @@ TEST_F(SamReaderTempFile, HeaderOnlyFile)
 
 TEST_F(SamReaderTempFile, MultipleTagsParsed)
 {
-    const auto path = WriteTempSam(
-        "multitag.sam", "@HD\tVN:1.6\n"
-                        "@SQ\tSN:ref\tLN:100\n"
-                        "read1\t0\tref\t10\t30\t5M\t*\t0\t0\tACGTA\t*\tNM:i:2\tRG:Z:group1\n");
+    const auto path =
+        WriteTempSam("multitag.sam",
+                     "@HD\tVN:1.6\n"
+                     "@SQ\tSN:ref\tLN:100\n"
+                     "read1\t0\tref\t10\t30\t5M\t*\t0\t0\tACGTA\t*\tNM:i:2\tRG:Z:group1\n");
     SamReader reader{path};
     const auto record = reader.ReadRecord();
     ASSERT_TRUE(record.has_value());
@@ -240,9 +243,10 @@ TEST_F(SamReaderTempFile, MultipleTagsParsed)
 TEST_F(SamReaderTempFile, QualitiesDecoded)
 {
     // '!' = 33, so qual should be 0; 'I' = 73, so qual should be 40
-    const auto path = WriteTempSam("qual.sam", "@HD\tVN:1.6\n"
-                                               "@SQ\tSN:ref\tLN:100\n"
-                                               "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t!5I\n");
+    const auto path = WriteTempSam("qual.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t!5I\n");
     SamReader reader{path};
     const auto record = reader.ReadRecord();
     ASSERT_TRUE(record.has_value());
@@ -255,10 +259,10 @@ TEST_F(SamReaderTempFile, QualitiesDecoded)
 
 TEST_F(SamReaderTempFile, NegativeTlen)
 {
-    const auto path =
-        WriteTempSam("neg_tlen.sam", "@HD\tVN:1.6\n"
-                                     "@SQ\tSN:ref\tLN:100\n"
-                                     "read1\t147\tref\t37\t30\t9M\t=\t7\t-39\tCCCCCCCCC\t*\n");
+    const auto path = WriteTempSam("neg_tlen.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t147\tref\t37\t30\t9M\t=\t7\t-39\tCCCCCCCCC\t*\n");
     SamReader reader{path};
     const auto record = reader.ReadRecord();
     ASSERT_TRUE(record.has_value());

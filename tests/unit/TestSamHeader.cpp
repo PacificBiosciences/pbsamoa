@@ -110,8 +110,9 @@ TEST(SamHeader, ParseMinimalHeader)
 
 TEST(SamHeader, ParseSpecExample)
 {
-    const std::string text = "@HD\tVN:1.6\tSO:coordinate\n"
-                             "@SQ\tSN:ref\tLN:45\n";
+    const std::string text =
+        "@HD\tVN:1.6\tSO:coordinate\n"
+        "@SQ\tSN:ref\tLN:45\n";
     const SamHeader header = SamHeader::FromText(text);
 
     EXPECT_EQ(header.Version(), "1.6");
@@ -124,10 +125,11 @@ TEST(SamHeader, ParseSpecExample)
 
 TEST(SamHeader, ParseMultipleReferenceSequences)
 {
-    const std::string text = "@HD\tVN:1.6\tSO:coordinate\n"
-                             "@SQ\tSN:chr1\tLN:248956422\n"
-                             "@SQ\tSN:chr2\tLN:242193529\n"
-                             "@SQ\tSN:chrM\tLN:16569\tTP:circular\tSP:Homo sapiens\n";
+    const std::string text =
+        "@HD\tVN:1.6\tSO:coordinate\n"
+        "@SQ\tSN:chr1\tLN:248956422\n"
+        "@SQ\tSN:chr2\tLN:242193529\n"
+        "@SQ\tSN:chrM\tLN:16569\tTP:circular\tSP:Homo sapiens\n";
     const SamHeader header = SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReferenceSequences()), 3U);
@@ -144,9 +146,10 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
 
 TEST(SamHeader, ParseReadGroups)
 {
-    const std::string text = "@HD\tVN:1.6\n"
-                             "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n"
-                             "@RG\tID:rg2\tSM:sample2\tPL:PACBIO\tLB:lib2\n";
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n"
+        "@RG\tID:rg2\tSM:sample2\tPL:PACBIO\tLB:lib2\n";
     const SamHeader header = SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReadGroups()), 2U);
@@ -163,9 +166,10 @@ TEST(SamHeader, ParseReadGroups)
 
 TEST(SamHeader, ParseProgramRecords)
 {
-    const std::string text = "@HD\tVN:1.6\n"
-                             "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\tCL:bwa mem ref.fa reads.fq\n"
-                             "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\tCL:samtools sort\n";
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\tCL:bwa mem ref.fa reads.fq\n"
+        "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\tCL:samtools sort\n";
     const SamHeader header = SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ProgramRecords()), 2U);
@@ -182,9 +186,10 @@ TEST(SamHeader, ParseProgramRecords)
 
 TEST(SamHeader, ParseComments)
 {
-    const std::string text = "@HD\tVN:1.6\n"
-                             "@CO\tThis is a comment\n"
-                             "@CO\tAnother comment line\n";
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@CO\tThis is a comment\n"
+        "@CO\tAnother comment line\n";
     const SamHeader header = SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.Comments()), 2U);
@@ -310,9 +315,10 @@ TEST(SamHeader, SerializeReferenceSequences)
     chrM.SetTag("TP", "circular");
     header.AddReferenceSequence(std::move(chrM));
     const std::string text = header.ToText();
-    const std::string expected = "@HD\tVN:1.6\n"
-                                 "@SQ\tSN:chr1\tLN:248956422\n"
-                                 "@SQ\tSN:chrM\tLN:16569\tTP:circular\n";
+    const std::string expected =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:chr1\tLN:248956422\n"
+        "@SQ\tSN:chrM\tLN:16569\tTP:circular\n";
     EXPECT_EQ(text, expected);
 }
 
@@ -326,8 +332,9 @@ TEST(SamHeader, SerializeReadGroups)
     rg.SetTag("PL", "ILLUMINA");
     header.AddReadGroup(std::move(rg));
     const std::string text = header.ToText();
-    const std::string expected = "@HD\tVN:1.6\n"
-                                 "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n";
+    const std::string expected =
+        "@HD\tVN:1.6\n"
+        "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n";
     EXPECT_EQ(text, expected);
 }
 
@@ -341,8 +348,9 @@ TEST(SamHeader, SerializeProgramRecords)
     pg.SetTag("VN", "0.7.17");
     header.AddProgramRecord(std::move(pg));
     const std::string text = header.ToText();
-    const std::string expected = "@HD\tVN:1.6\n"
-                                 "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
+    const std::string expected =
+        "@HD\tVN:1.6\n"
+        "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n";
     EXPECT_EQ(text, expected);
 }
 
@@ -352,8 +360,9 @@ TEST(SamHeader, SerializeComments)
     header.SetVersion("1.6");
     header.AddComment("This is a comment");
     const std::string text = header.ToText();
-    const std::string expected = "@HD\tVN:1.6\n"
-                                 "@CO\tThis is a comment\n";
+    const std::string expected =
+        "@HD\tVN:1.6\n"
+        "@CO\tThis is a comment\n";
     EXPECT_EQ(text, expected);
 }
 
@@ -368,18 +377,20 @@ TEST(SamHeader, SerializeLineOrder)
     header.AddReferenceSequence(ReferenceSequence{"ref", 100});
     const std::string text = header.ToText();
     // @HD always first, then @SQ, @RG, @PG, @CO
-    const std::string expected = "@HD\tVN:1.6\n"
-                                 "@SQ\tSN:ref\tLN:100\n"
-                                 "@RG\tID:rg1\n"
-                                 "@PG\tID:tool\n"
-                                 "@CO\ta comment\n";
+    const std::string expected =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:ref\tLN:100\n"
+        "@RG\tID:rg1\n"
+        "@PG\tID:tool\n"
+        "@CO\ta comment\n";
     EXPECT_EQ(text, expected);
 }
 
 TEST(SamHeader, RoundTripSpecExample)
 {
-    const std::string original = "@HD\tVN:1.6\tSO:coordinate\n"
-                                 "@SQ\tSN:ref\tLN:45\n";
+    const std::string original =
+        "@HD\tVN:1.6\tSO:coordinate\n"
+        "@SQ\tSN:ref\tLN:45\n";
     const SamHeader header = SamHeader::FromText(original);
     const std::string serialized = header.ToText();
     EXPECT_EQ(serialized, original);
@@ -387,13 +398,14 @@ TEST(SamHeader, RoundTripSpecExample)
 
 TEST(SamHeader, RoundTripFullHeader)
 {
-    const std::string original = "@HD\tVN:1.6\tSO:coordinate\n"
-                                 "@SQ\tSN:chr1\tLN:248956422\n"
-                                 "@SQ\tSN:chrM\tLN:16569\tTP:circular\n"
-                                 "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n"
-                                 "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n"
-                                 "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\n"
-                                 "@CO\tGenerated by test\n";
+    const std::string original =
+        "@HD\tVN:1.6\tSO:coordinate\n"
+        "@SQ\tSN:chr1\tLN:248956422\n"
+        "@SQ\tSN:chrM\tLN:16569\tTP:circular\n"
+        "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n"
+        "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n"
+        "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\n"
+        "@CO\tGenerated by test\n";
     const SamHeader header = SamHeader::FromText(original);
     const std::string serialized = header.ToText();
     EXPECT_EQ(serialized, original);
@@ -423,10 +435,11 @@ TEST(SamHeader, SerializeSubSort)
 
 TEST(SamHeader, ReferenceNameToId)
 {
-    const std::string text = "@HD\tVN:1.6\n"
-                             "@SQ\tSN:chr1\tLN:248956422\n"
-                             "@SQ\tSN:chr2\tLN:242193529\n"
-                             "@SQ\tSN:chrM\tLN:16569\n";
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:chr1\tLN:248956422\n"
+        "@SQ\tSN:chr2\tLN:242193529\n"
+        "@SQ\tSN:chrM\tLN:16569\n";
     const SamHeader header = SamHeader::FromText(text);
 
     EXPECT_EQ(header.ReferenceId("chr1"), 0);
@@ -438,9 +451,10 @@ TEST(SamHeader, ReferenceNameToId)
 
 TEST(SamHeader, ReferenceIdToName)
 {
-    const std::string text = "@HD\tVN:1.6\n"
-                             "@SQ\tSN:chr1\tLN:248956422\n"
-                             "@SQ\tSN:chr2\tLN:242193529\n";
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:chr1\tLN:248956422\n"
+        "@SQ\tSN:chr2\tLN:242193529\n";
     const SamHeader header = SamHeader::FromText(text);
 
     EXPECT_EQ(header.ReferenceName(0), "chr1");
@@ -460,8 +474,9 @@ TEST(SamHeader, ReferenceIdToNameBoundsCheck)
 
 TEST(SamHeader, ReferenceCount)
 {
-    const std::string text = "@SQ\tSN:chr1\tLN:100\n"
-                             "@SQ\tSN:chr2\tLN:200\n";
+    const std::string text =
+        "@SQ\tSN:chr1\tLN:100\n"
+        "@SQ\tSN:chr2\tLN:200\n";
     const SamHeader header = SamHeader::FromText(text);
     EXPECT_EQ(header.NumReferences(), 2);
 }
@@ -557,9 +572,10 @@ TEST(SamHeader, ParseBamHeaderBlock)
 
 TEST(SamHeader, ParseBamHeaderBlockMultipleRefs)
 {
-    const std::string headerText = "@HD\tVN:1.6\n"
-                                   "@SQ\tSN:chr1\tLN:1000\n"
-                                   "@SQ\tSN:chr2\tLN:2000\n";
+    const std::string headerText =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:chr1\tLN:1000\n"
+        "@SQ\tSN:chr2\tLN:2000\n";
     const std::vector<std::pair<std::string, std::int32_t>> refs = {
         {"chr1", 1000},
         {"chr2", 2000},

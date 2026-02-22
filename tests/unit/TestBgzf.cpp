@@ -6,14 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <cstddef>
-#include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
