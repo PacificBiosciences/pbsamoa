@@ -6,6 +6,7 @@
 #include <pbsamoa/core/Tags.hpp>
 
 #include <span>
+#include <ranges>
 
 #include <gtest/gtest.h>
 
@@ -1166,7 +1167,7 @@ TEST(BamRecordClipping, RoundTrip_SimpleForwardClip)
     EXPECT_EQ(rt.MapQ(), rec.MapQ());
     EXPECT_EQ(CigarToString(rt.Cigar()), CigarToString(rec.Cigar()));
     EXPECT_EQ(rt.Sequence(), rec.Sequence());
-    EXPECT_EQ(rt.Qualities(), rec.Qualities());
+    EXPECT_TRUE(std::ranges::equal(rt.Qualities(), rec.Qualities()));
 
     // Tags: qs/qe int64
     const auto* rtQs{rt.Tags().Get(TagKey{'q', 's'})};
@@ -1234,7 +1235,7 @@ TEST(BamRecordClipping, RoundTrip_ReferenceClipWithDeletion)
     EXPECT_EQ(rt.MapQ(), rec.MapQ());
     EXPECT_EQ(CigarToString(rt.Cigar()), "1D3M");
     EXPECT_EQ(rt.Sequence(), "TAG");
-    EXPECT_EQ(rt.Qualities(), rec.Qualities());
+    EXPECT_TRUE(std::ranges::equal(rt.Qualities(), rec.Qualities()));
 
     // String tag survives round-trip
     const auto* rtRg{rt.Tags().Get(TagKey{'R', 'G'})};
@@ -1290,7 +1291,7 @@ TEST(BamRecordClipping, RoundTrip_CCSKinetics)
     EXPECT_EQ(rt.Pos(), rec.Pos());
     EXPECT_EQ(CigarToString(rt.Cigar()), "5=");
     EXPECT_EQ(rt.Sequence(), "CCGTT");
-    EXPECT_EQ(rt.Qualities(), rec.Qualities());
+    EXPECT_TRUE(std::ranges::equal(rt.Qualities(), rec.Qualities()));
 
     // fi: SubstringClip [2..7) = {20, 30, 40, 50, 60}
     const auto* rtFi{rt.Tags().Get(TagKey{'f', 'i'})};
@@ -1360,7 +1361,7 @@ TEST(BamRecordClipping, RoundTrip_BasemodsMMML)
     EXPECT_EQ(rt.Pos(), rec.Pos());
     EXPECT_EQ(CigarToString(rt.Cigar()), "21=");
     EXPECT_EQ(rt.Sequence(), "CCACGACTCGTCACACTCACG");
-    EXPECT_EQ(rt.Qualities(), rec.Qualities());
+    EXPECT_TRUE(std::ranges::equal(rt.Qualities(), rec.Qualities()));
 
     // MM string tag survives round-trip
     const auto* rtMm{rt.Tags().Get(TagKey{'M', 'M'})};

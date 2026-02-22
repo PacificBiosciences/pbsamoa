@@ -44,12 +44,16 @@ public:
     std::optional<BamRecord> ReadRecord();
 
     /// \brief Range interface: for (const auto& rec : reader.Records()) { ... }
-    class RecordRange
+    class RecordRange : public std::ranges::view_interface<RecordRange>
     {
     public:
         class Iterator
         {
         public:
+            using difference_type = std::ptrdiff_t;
+            using value_type = BamRecord;
+            using iterator_concept = std::input_iterator_tag;
+
             Iterator();
             explicit Iterator(BamRecordReader* reader);
 

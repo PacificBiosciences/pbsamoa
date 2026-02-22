@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string_view>
 
 #include <cstddef>
@@ -98,12 +99,16 @@ public:
     VirtualOffset Tell() const;
 
     /// Range interface: for (const auto& view : reader.Records()) { ... }
-    class RecordRange
+    class RecordRange : public std::ranges::view_interface<RecordRange>
     {
     public:
         class Iterator
         {
         public:
+            using difference_type = std::ptrdiff_t;
+            using value_type = RawRecord;
+            using iterator_concept = std::input_iterator_tag;
+
             Iterator();
             explicit Iterator(BamRawReader* reader);
 
@@ -129,12 +134,16 @@ public:
     RecordRange Records();
 
     /// Range over records matching a BAI region query.
-    class QueryRange
+    class QueryRange : public std::ranges::view_interface<QueryRange>
     {
     public:
         class Iterator
         {
         public:
+            using difference_type = std::ptrdiff_t;
+            using value_type = RawRecord;
+            using iterator_concept = std::input_iterator_tag;
+
             Iterator();
             Iterator(BamRawReader* reader, std::vector<Chunk> chunks, std::int32_t refId,
                      std::int32_t beg, std::int32_t end);
@@ -174,12 +183,16 @@ public:
 
     /// Range over records matching a ZMW whitelist (seek-per-record via index).
     /// Owns a dedicated sync reader (pipeline mode would restart per seek).
-    class WhitelistRange
+    class WhitelistRange : public std::ranges::view_interface<WhitelistRange>
     {
     public:
         class Iterator
         {
         public:
+            using difference_type = std::ptrdiff_t;
+            using value_type = RawRecord;
+            using iterator_concept = std::input_iterator_tag;
+
             Iterator();
             Iterator(BamRawReader* reader, std::vector<std::int64_t> offsets);
 
