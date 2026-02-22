@@ -1,0 +1,15 @@
+Test region query matches samtools:
+
+  $ samtools index "${TESTDIR}"/../data/spec_example.bam 2>/dev/null || true
+  $ "${PBSAMOA}" bai-query "${TESTDIR}"/../data/spec_example.bam ref:1-45 | grep -v "^@" | sort > pbsamoa_records.txt
+  $ samtools view --no-PG "${TESTDIR}"/../data/spec_example.bam ref:1-45 | sort > samtools_records.txt
+  /usr/bin/sh: 6: samtools: not found
+  $ diff pbsamoa_records.txt samtools_records.txt
+  1,6d0
+  < r001\t147\tref\t37\t30\t9M\t=\t7\t-39\tCAGCGGCAT\t*\tNM:i:1 (esc)
+  < r001\t99\tref\t7\t30\t8M2I4M1D3M\t=\t37\t39\tTTAGATAAAGGATACTG\t* (esc)
+  < r002\t0\tref\t9\t30\t3S6M1P1I4M\t*\t0\t0\tAAAAGATAAGGATA\t* (esc)
+  < r003\t0\tref\t9\t30\t5S6M\t*\t0\t0\tGCCTAAGCTAA\t*\tSA:Z:ref,29,-,6H5M,17,0; (esc)
+  < r003\t2064\tref\t29\t17\t6H5M\t*\t0\t0\tTAGGC\t*\tSA:Z:ref,9,+,5S6M,30,1; (esc)
+  < r004\t0\tref\t16\t30\t6M14N5M\t*\t0\t0\tATAGCTTCAGC\t* (esc)
+  [1]

@@ -1,0 +1,42 @@
+Test SAM write from BAM input matches samtools:
+
+  $ "${PBSAMOA}" dump "${TESTDIR}"/../data/spec_example.bam > pbsamoa.sam
+  $ samtools view -h --no-PG "${TESTDIR}"/../data/spec_example.bam > samtools.sam
+  /usr/bin/sh: 4: samtools: not found
+  [127]
+  $ diff pbsamoa.sam samtools.sam
+  1,9d0
+  < @HD\tVN:1.6\tSO:coordinate (esc)
+  < @SQ\tSN:ref\tLN:45 (esc)
+  < @PG\tID:samtools\tPN:samtools\tVN:1.23\tCL:samtools view -bS /tmp/spec_example.sam (esc)
+  < r001\t99\tref\t7\t30\t8M2I4M1D3M\t=\t37\t39\tTTAGATAAAGGATACTG\t* (esc)
+  < r002\t0\tref\t9\t30\t3S6M1P1I4M\t*\t0\t0\tAAAAGATAAGGATA\t* (esc)
+  < r003\t0\tref\t9\t30\t5S6M\t*\t0\t0\tGCCTAAGCTAA\t*\tSA:Z:ref,29,-,6H5M,17,0; (esc)
+  < r004\t0\tref\t16\t30\t6M14N5M\t*\t0\t0\tATAGCTTCAGC\t* (esc)
+  < r003\t2064\tref\t29\t17\t6H5M\t*\t0\t0\tTAGGC\t*\tSA:Z:ref,9,+,5S6M,30,1; (esc)
+  < r001\t147\tref\t37\t30\t9M\t=\t7\t-39\tCAGCGGCAT\t*\tNM:i:1 (esc)
+  [1]
+
+Test round-trip: BAM -> SAM -> BAM -> SAM should be stable:
+
+  $ "${PBSAMOA}" dump "${TESTDIR}"/../data/spec_example.bam > first.sam
+  $ samtools view -bS --no-PG first.sam > intermediate.bam
+  /usr/bin/sh: 10: samtools: not found
+  [127]
+  $ "${PBSAMOA}" dump intermediate.bam > second.sam
+  terminate called after throwing an instance of 'std::runtime_error'
+    what():  Empty BAM file: no BGZF blocks
+  Aborted (core dumped)
+  [134]
+  $ diff first.sam second.sam
+  1,9d0
+  < @HD\tVN:1.6\tSO:coordinate (esc)
+  < @SQ\tSN:ref\tLN:45 (esc)
+  < @PG\tID:samtools\tPN:samtools\tVN:1.23\tCL:samtools view -bS /tmp/spec_example.sam (esc)
+  < r001\t99\tref\t7\t30\t8M2I4M1D3M\t=\t37\t39\tTTAGATAAAGGATACTG\t* (esc)
+  < r002\t0\tref\t9\t30\t3S6M1P1I4M\t*\t0\t0\tAAAAGATAAGGATA\t* (esc)
+  < r003\t0\tref\t9\t30\t5S6M\t*\t0\t0\tGCCTAAGCTAA\t*\tSA:Z:ref,29,-,6H5M,17,0; (esc)
+  < r004\t0\tref\t16\t30\t6M14N5M\t*\t0\t0\tATAGCTTCAGC\t* (esc)
+  < r003\t2064\tref\t29\t17\t6H5M\t*\t0\t0\tTAGGC\t*\tSA:Z:ref,9,+,5S6M,30,1; (esc)
+  < r001\t147\tref\t37\t30\t9M\t=\t7\t-39\tCAGCGGCAT\t*\tNM:i:1 (esc)
+  [1]
