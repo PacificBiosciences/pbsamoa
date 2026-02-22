@@ -259,15 +259,9 @@ inline BamRecord RawRecord::ToOwned() const
         .Sequence(Seq().ToString());
 
     const std::span<const std::uint8_t> qualities{Qual()};
-    bool allMissing{true};
-    for (const std::uint8_t q : qualities) {
-        if (q != 0xFF) {
-            allMissing = false;
-            break;
-        }
-    }
 
-    if ((!allMissing) && (SeqLength() > 0)) {
+    if (!std::ranges::all_of(qualities, [](std::uint8_t q) { return q == 0xFF; }) &&
+        (SeqLength() > 0)) {
         record.Qualities(
             std::vector<std::uint8_t>{std::ranges::begin(qualities), std::ranges::end(qualities)});
     }

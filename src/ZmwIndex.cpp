@@ -4,11 +4,11 @@
 
 #include <pbsamoa/core/Bgzf.hpp>
 
-#include <algorithm>
 #include <array>
 #include <format>
 #include <limits>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <vector>
 
@@ -64,7 +64,7 @@ T ReadLE(const std::byte* src)
 {
     T value{};
     std::byte* dst{reinterpret_cast<std::byte*>(&value)};
-    std::copy_n(src, sizeof(value), dst);
+    std::ranges::copy_n(src, sizeof(value), dst);
     return value;
 }
 

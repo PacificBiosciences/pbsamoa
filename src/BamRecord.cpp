@@ -213,7 +213,7 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
                             p + offset);
     } else if (seqLen > 0) {
         // Missing quality: fill with 0xFF
-        std::fill_n(p + offset, seqLen, std::byte{0xFF});
+        std::ranges::fill_n(p + offset, seqLen, std::byte{0xFF});
     }
     offset += seqLen;
 

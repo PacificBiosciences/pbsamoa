@@ -4,8 +4,8 @@
 
 #include <pbsamoa/core/Bgzf.hpp>
 
-#include <algorithm>
 #include <array>
+#include <ranges>
 
 #include <cstdint>
 
@@ -24,7 +24,7 @@ template <typename T>
 void WriteLE(std::byte* dst, T value)
 {
     const std::byte* src{reinterpret_cast<const std::byte*>(&value)};
-    std::copy_n(src, sizeof(value), dst);
+    std::ranges::copy_n(src, sizeof(value), dst);
 }
 
 }  // namespace
@@ -49,7 +49,7 @@ struct ZmiWriter::Impl
         std::array<std::byte, ZMI_HEADER_SIZE> header{};
 
         // Offset 0: magic "ZMI\1" (4 bytes)
-        std::copy_n(std::begin(ZMI_MAGIC), std::size(ZMI_MAGIC), std::begin(header));
+        std::ranges::copy_n(std::begin(ZMI_MAGIC), std::size(ZMI_MAGIC), std::begin(header));
 
         // Offset 4: version 0x010000 (4 bytes LE)
         WriteLE(std::data(header) + 4, ZMI_VERSION);

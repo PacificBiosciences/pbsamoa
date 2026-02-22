@@ -9,10 +9,10 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <format>
+#include <ranges>
 #include <span>
 #include <thread>
 #include <vector>
@@ -28,7 +28,7 @@ void WriteAt(std::span<std::byte> dst, std::size_t offset, T value)
 {
     std::span<std::byte> field{dst.subspan(offset, sizeof(value))};
     const std::byte* src{reinterpret_cast<const std::byte*>(&value)};
-    std::copy_n(src, sizeof(value), std::begin(field));
+    std::ranges::copy_n(src, sizeof(value), std::begin(field));
 }
 
 }  // namespace

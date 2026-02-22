@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <functional>
 #include <memory>
 #include <numeric>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -129,10 +131,9 @@ void ClipSingleModType(char canonicalBase, std::span<const std::int32_t> skips,
 {
     // Count canonical bases before and within the clip window
     const std::int32_t basesBeforeClip{static_cast<std::int32_t>(
-        std::count(std::cbegin(sequence), std::cbegin(sequence) + clipOffset, canonicalBase))};
+        std::ranges::count(sequence.substr(0, clipOffset), canonicalBase))};
     const std::int32_t basesInClip{static_cast<std::int32_t>(
-        std::count(std::cbegin(sequence) + clipOffset,
-                   std::cbegin(sequence) + clipOffset + clipLength, canonicalBase))};
+        std::ranges::count(sequence.substr(clipOffset, clipLength), canonicalBase))};
 
     // Build prefix sums: prefixSum[i] = total canonical bases seen up to
     // and including modification site i.
@@ -148,15 +149,13 @@ void ClipSingleModType(char canonicalBase, std::span<const std::int32_t> skips,
     // Find the range of modification sites within the clip window.
     // A mod site at prefixSum[i] is "in" the clip if:
     //   basesBeforeClip < prefixSum[i] <= basesBeforeClip + basesInClip
-    const auto startIt{
-        std::lower_bound(std::cbegin(prefixSum), std::cend(prefixSum), basesBeforeClip + 1)};
-    const auto endIt{std::upper_bound(std::cbegin(prefixSum), std::cend(prefixSum),
-                                      basesBeforeClip + basesInClip)};
+    const auto startIt{std::ranges::lower_bound(prefixSum, basesBeforeClip + 1)};
+    const auto endIt{std::ranges::upper_bound(prefixSum, basesBeforeClip + basesInClip)};
 
     const std::size_t startIdx{
-        static_cast<std::size_t>(std::distance(std::cbegin(prefixSum), startIt))};
+        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), startIt))};
     const std::size_t endIdx{
-        static_cast<std::size_t>(std::distance(std::cbegin(prefixSum), endIt))};
+        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), endIt))};
 
     frontRemoved = startIdx;
     retained = endIdx - startIdx;
@@ -318,8 +317,8 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         // Write retained bytes back
         const std::size_t totalRetained{std::size(retainedBytes) / elemSize};
         if (totalRetained > 0) {
-            std::copy_n(std::data(retainedBytes), std::size(retainedBytes),
-                        std::data(arr->MutableData()));
+            std::ranges::copy_n(std::data(retainedBytes), std::size(retainedBytes),
+                                std::data(arr->MutableData()));
         }
         arr->Resize(static_cast<std::uint32_t>(totalRetained));
         return true;
@@ -367,7 +366,7 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
     }
 
     // Validate invariants — corrupt tags get removed rather than causing OOB access
-    if (std::accumulate(std::cbegin(lengths), std::cend(lengths), std::size_t{0}) != seqLength) {
+    if (std::ranges::fold_left(lengths, std::size_t{0}, std::plus{}) != seqLength) {
         return false;
     }
     if ((clipOffset > seqLength) || ((clipOffset + clipLength) > seqLength)) {
@@ -387,23 +386,23 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
     const std::size_t suffixSize{seqLength - clipEnd};
 
     // Find the first run that extends past the prefix (i.e., into the clip window)
-    const auto prefixIt{std::upper_bound(std::cbegin(prefixSum), std::cend(prefixSum), prefixSize)};
+    const auto prefixIt{std::ranges::upper_bound(prefixSum, prefixSize)};
     // Find the first suffix run that extends past the suffix
-    const auto suffixIt{std::upper_bound(std::cbegin(suffixSum), std::cend(suffixSum), suffixSize)};
+    const auto suffixIt{std::ranges::upper_bound(suffixSum, suffixSize)};
 
     // Convert to pair indices in the original array
     const std::size_t beginRun{
-        static_cast<std::size_t>(std::distance(std::cbegin(prefixSum), prefixIt))};
+        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), prefixIt))};
     const std::size_t endRun{
-        numRuns - static_cast<std::size_t>(std::distance(std::cbegin(suffixSum), suffixIt))};
+        numRuns - static_cast<std::size_t>(std::ranges::distance(suffixSum.begin(), suffixIt))};
 
     // Compute how many bases from the first retained run are clipped off the front
     const std::size_t lostPrefixBases{
-        prefixSize - ((prefixIt != std::cbegin(prefixSum)) ? *std::prev(prefixIt) : 0)};
+        prefixSize - ((prefixIt != prefixSum.begin()) ? *std::prev(prefixIt) : 0)};
 
     // Compute how many bases from the last retained run are clipped off the back
     const std::size_t lostSuffixBases{
-        suffixSize - ((suffixIt != std::cbegin(suffixSum)) ? *std::prev(suffixIt) : 0)};
+        suffixSize - ((suffixIt != suffixSum.begin()) ? *std::prev(suffixIt) : 0)};
 
     // Build the new RLE pairs
     TagArray result{'C'};
