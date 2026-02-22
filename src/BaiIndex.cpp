@@ -19,7 +19,6 @@ namespace Samoa {
 
 namespace {
 
-constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536};
 constexpr std::size_t BAI_LINEAR_INDEX_WINDOW{16384};  // 2^14 = 16 kbp
 
 void WriteU32LE(std::ofstream& out, std::uint32_t v)

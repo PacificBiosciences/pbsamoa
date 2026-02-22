@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: clang-debopt
+            BUILDTYPE: debugoptimized
+            COMPILER: clang
+          - name: gcc-debopt-asan-ubsan
+            BUILDTYPE: debugoptimized
+            ENABLED_SANITIZERS: address,undefined
+            WERROR: OFF
+          - name: gcc-debopt-glibcxx_debug
+            BUILDTYPE: debugoptimized
+            ENABLED_DEBUGSTL: "true"
+          - name: gcc-debopt-tsan
+            BUILDTYPE: debugoptimized
+            ENABLED_SANITIZERS: thread
+          - name: gcc-debopt-unity
+            BUILDTYPE: debugoptimized
+            ENABLED_UNITY_BUILD: "on"
+          - name: gcc-release
+            BUILDTYPE: release
+
+    container:
+      image: armintoepfer/navalia:20260212
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        env:
+          BUILDTYPE: ${{ matrix.BUILDTYPE }}
+          COMPILER: ${{ matrix.COMPILER }}
+          ENABLED_DEBUGSTL: ${{ matrix.ENABLED_DEBUGSTL }}
+          ENABLED_SANITIZERS: ${{ matrix.ENABLED_SANITIZERS }}
+          ENABLED_UNITY_BUILD: ${{ matrix.ENABLED_UNITY_BUILD }}
+          WERROR: ${{ matrix.WERROR }}
+        run: docker/ci.sh .

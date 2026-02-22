@@ -1,5 +1,7 @@
 #include <pbsamoa/io/ZmiWriter.hpp>
 
+#include "ZmiInternal.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <algorithm>
@@ -9,18 +11,14 @@
 
 namespace PacBio {
 namespace Samoa {
+
+using detail::ZMI_ENTRY_SIZE;
+using detail::ZMI_ENTRY_SIZE_FIELD;
+using detail::ZMI_HEADER_SIZE;
+using detail::ZMI_MAGIC;
+using detail::ZMI_VERSION;
+
 namespace {
-
-constexpr std::size_t ZMI_HEADER_SIZE{64};
-constexpr std::size_t ZMI_ENTRY_SIZE{16};  // rgId(4) + zmw(4) + virtualOffset(8)
-constexpr std::uint16_t ZMI_ENTRY_SIZE_FIELD{16};
-
-// Magic bytes: "ZMI\1"
-constexpr std::array<std::byte, 4> ZMI_MAGIC{std::byte{'Z'}, std::byte{'M'}, std::byte{'I'},
-                                             std::byte{'\1'}};
-
-// Version 1.0.0 encoded as 0x010000 (major=1, minor=0, patch=0)
-constexpr std::uint32_t ZMI_VERSION{0x010000};
 
 template <typename T>
 void WriteLE(std::byte* dst, T value)

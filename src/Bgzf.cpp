@@ -24,6 +24,48 @@
 
 namespace PacBio {
 namespace Samoa {
+
+namespace detail {
+
+// --- libdeflate RAII wrappers (named linkage required for struct fields) ---
+
+struct LibdeflateDecompressorDeleter
+{
+    void operator()(libdeflate_decompressor* decompressor) const
+    {
+        libdeflate_free_decompressor(decompressor);
+    }
+};
+
+using DecompressorPtr = std::unique_ptr<libdeflate_decompressor, LibdeflateDecompressorDeleter>;
+
+struct LibdeflateCompressorDeleter
+{
+    void operator()(libdeflate_compressor* compressor) const
+    {
+        libdeflate_free_compressor(compressor);
+    }
+};
+
+using CompressorPtr = std::unique_ptr<libdeflate_compressor, LibdeflateCompressorDeleter>;
+
+/// \brief Entry describing one compressed BGZF payload within a batch buffer.
+struct CompressedEntry
+{
+    std::size_t offset;        // offset into batch's contiguous compressed buffer
+    std::size_t size;          // DEFLATE payload size (no BGZF framing)
+    std::uint32_t isize;       // expected decompressed size from BGZF trailer
+    std::uint64_t fileOffset;  // original file position for VirtualOffset tracking
+};
+
+/// \brief Batch of decompressed BGZF blocks for producer-consumer pipeline.
+struct DecompressedBatch
+{
+    std::vector<std::byte> data;  // contiguous decompressed output (all blocks concatenated)
+};
+
+}  // namespace detail
+
 namespace {
 
 // --- Common BGZF constants ---
@@ -50,51 +92,16 @@ constexpr std::size_t MAX_UNCOMPRESSED_SIZE{0xFF00U};  // 65280
 
 // Pipeline constants
 constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U + 256U};
-constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
 constexpr std::size_t OUTPUT_QUEUE_CAPACITY{4096};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t BLOCKS_PER_BATCH{32};
 
-// --- Shared helpers ---
-
-struct LibdeflateDecompressorDeleter
-{
-    void operator()(libdeflate_decompressor* decompressor) const
-    {
-        libdeflate_free_decompressor(decompressor);
-    }
-};
-
-using DecompressorPtr = std::unique_ptr<libdeflate_decompressor, LibdeflateDecompressorDeleter>;
-
-struct LibdeflateCompressorDeleter
-{
-    void operator()(libdeflate_compressor* compressor) const
-    {
-        libdeflate_free_compressor(compressor);
-    }
-};
-
-using CompressorPtr = std::unique_ptr<libdeflate_compressor, LibdeflateCompressorDeleter>;
-
-// --- Pipeline helpers ---
-
-/// \brief Entry describing one compressed BGZF payload within a batch buffer.
-struct CompressedEntry
-{
-    std::size_t offset;        // offset into batch's contiguous compressed buffer
-    std::size_t size;          // DEFLATE payload size (no BGZF framing)
-    std::uint32_t isize;       // expected decompressed size from BGZF trailer
-    std::uint64_t fileOffset;  // original file position for VirtualOffset tracking
-};
-
-/// \brief Batch of decompressed BGZF blocks for producer-consumer pipeline.
-struct DecompressedBatch
-{
-    std::vector<std::byte> data;  // contiguous decompressed output (all blocks concatenated)
-};
-
 }  // namespace
+
+using detail::CompressedEntry;
+using detail::CompressorPtr;
+using detail::DecompressedBatch;
+using detail::DecompressorPtr;
 
 // =============================================================================
 // ParseBgzfBlockHeader / DecompressBgzfBlock / IsBgzfEofMarker
