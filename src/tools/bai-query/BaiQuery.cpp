@@ -1,19 +1,20 @@
 #include "BaiQuery.hpp"
+#include "../ParseUtils.hpp"
 
 #include "../SamOutput.hpp"
 
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <charconv>
+#include <expected>
 #include <filesystem>
-#include <optional>
+#include <format>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 
 namespace PacBio {
@@ -28,11 +29,12 @@ struct Region
     std::int32_t end;
 };
 
-std::optional<Region> ParseRegion(std::string_view text)
+std::expected<Region, std::string> ParseRegion(std::string_view text)
 {
     const std::size_t colonPos{text.find(':')};
     if (colonPos == std::string_view::npos) {
-        return std::nullopt;
+        return std::unexpected{
+            std::format("invalid region format '{}' (expected ref:start-end)", text)};
     }
 
     const std::string refName{text.substr(0, colonPos)};
@@ -40,29 +42,20 @@ std::optional<Region> ParseRegion(std::string_view text)
 
     const std::size_t dashPos{rest.find('-')};
     if (dashPos == std::string_view::npos) {
-        return std::nullopt;
+        return std::unexpected{
+            std::format("invalid region format '{}' (expected ref:start-end)", text)};
     }
 
-    std::int32_t start{0};
-    std::int32_t end{0};
-
-    auto result1 = std::from_chars(std::data(rest), std::data(rest) + dashPos, start);
-    if (result1.ec != std::errc{}) {
-        return std::nullopt;
-    }
-
-    auto result2 =
-        std::from_chars(std::data(rest) + dashPos + 1, std::data(rest) + std::size(rest), end);
-    if (result2.ec != std::errc{}) {
-        return std::nullopt;
-    }
-
-    // Validate 1-based coordinates
-    if ((start < 1) || (end < start)) {
-        return std::nullopt;
-    }
-
-    return Region{refName, start - 1, end};
+    return Tools::ParseInteger<std::int32_t>(rest.substr(0, dashPos), "region start")
+        .and_then([&](std::int32_t start) {
+            return Tools::ParseInteger<std::int32_t>(rest.substr(dashPos + 1), "region end")
+                .and_then([&](std::int32_t end) -> std::expected<Region, std::string> {
+                    if ((start < 1) || (end < start)) {
+                        return std::unexpected{"region must satisfy start >= 1 and end >= start"};
+                    }
+                    return Region{refName, start - 1, end};
+                });
+        });
 }
 
 }  // namespace
@@ -70,16 +63,15 @@ std::optional<Region> ParseRegion(std::string_view text)
 int Runner(int argc, char* argv[])
 {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: pbsamoa bai-query INPUT REGION\n");
+        std::println(stderr, "Usage: pbsamoa bai-query INPUT REGION");
         return EXIT_FAILURE;
     }
 
     const std::filesystem::path bamPath{argv[0]};
     const std::string regionStr{argv[1]};
-    const std::optional<Region> region{ParseRegion(regionStr)};
-    if (!region.has_value()) {
-        throw std::runtime_error{"invalid region format '" + regionStr +
-                                 "' (expected ref:start-end)"};
+    const auto region{ParseRegion(regionStr)};
+    if (!region) {
+        throw std::runtime_error{region.error()};
     }
 
     const std::filesystem::path baiPath{bamPath.string() + ".bai"};
@@ -91,7 +83,7 @@ int Runner(int argc, char* argv[])
     BamRawReader reader{bamPath};
     const SamHeader& header{reader.Header()};
 
-    std::fputs(header.ToText().c_str(), stdout);
+    std::print("{}", header.ToText());
 
     const std::int32_t refId{header.ReferenceId(region->refName)};
     if (refId < 0) {

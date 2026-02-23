@@ -1,4 +1,5 @@
 #include "Dump.hpp"
+#include "../ParseUtils.hpp"
 
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
@@ -8,6 +9,7 @@
 #include <pbsamoa/core/Tags.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/SamReader.hpp>
+#include <print>
 
 #include <parallel/ThreadPool.h>
 
@@ -20,6 +22,7 @@
 #include <future>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -208,17 +211,12 @@ void PrintMetricsLine(const BgzfMetrics& m, const BgzfMetrics& prev, double elap
     const double mbPerSec{(elapsedSec > 0) ? (deltaMbDecomp / elapsedSec) : 0.0};
     const std::uint64_t queueDepth{m.RecordsProduced - m.RecordsConsumed};
 
-    std::fprintf(stderr,
-                 "[metrics] %.1f MB in, %.1f MB out | "
-                 "%.0f rec/s, %.1f MB/s | "
-                 "pool: %zu active, queue %zu | "
-                 "spsc: depth %llu | "
-                 "stalls: io=%llu cons=%llu read=%llu\n",
-                 mbRead, mbDecomp, recPerSec, mbPerSec, m.PoolActiveWorkers, m.PoolQueueDepth,
-                 static_cast<unsigned long long>(queueDepth),
-                 static_cast<unsigned long long>(m.IoStalls),
-                 static_cast<unsigned long long>(m.ConsumerStalls),
-                 static_cast<unsigned long long>(m.ReaderStalls));
+    std::println(
+        stderr,
+        "[metrics] {:.1f} MB in, {:.1f} MB out | {:.0f} rec/s, {:.1f} MB/s | pool: {} active, "
+        "queue {} | spsc: depth {} | stalls: io={} cons={} read={}",
+        mbRead, mbDecomp, recPerSec, mbPerSec, m.PoolActiveWorkers, m.PoolQueueDepth, queueDepth,
+        m.IoStalls, m.ConsumerStalls, m.ReaderStalls);
 }
 
 void PrintMetricsSummary(const BgzfMetrics& m)
@@ -229,21 +227,17 @@ void PrintMetricsSummary(const BgzfMetrics& m)
     const double decompMs{static_cast<double>(m.DecompressNs) / 1e6};
     const double parseMs{static_cast<double>(m.RecordParseNs) / 1e6};
 
-    std::fprintf(stderr, "\n--- Final Pipeline Metrics ---\n");
-    std::fprintf(stderr, "BGZF IO:       %.1f MB read, %llu blocks\n", mbRead,
-                 static_cast<unsigned long long>(m.BlocksRead));
-    std::fprintf(stderr, "Decompressed:  %.1f MB\n", mbDecomp);
-    std::fprintf(stderr, "Records:       %llu produced, %llu consumed\n",
-                 static_cast<unsigned long long>(m.RecordsProduced),
-                 static_cast<unsigned long long>(m.RecordsConsumed));
-    std::fprintf(stderr, "Pool peak:     queue %zu, workers %zu\n", m.PoolPeakQueueDepth,
+    std::println(stderr, "\n--- Final Pipeline Metrics ---");
+    std::println(stderr, "BGZF IO:       {:.1f} MB read, {} blocks", mbRead, m.BlocksRead);
+    std::println(stderr, "Decompressed:  {:.1f} MB", mbDecomp);
+    std::println(stderr, "Records:       {} produced, {} consumed", m.RecordsProduced,
+                 m.RecordsConsumed);
+    std::println(stderr, "Pool peak:     queue {}, workers {}", m.PoolPeakQueueDepth,
                  m.PoolPeakActiveWorkers);
-    std::fprintf(stderr, "Result peak:   queue %zu\n", m.PoolPeakResultQueueDepth);
-    std::fprintf(stderr, "Stalls:        IO=%llu, consumer=%llu, reader=%llu\n",
-                 static_cast<unsigned long long>(m.IoStalls),
-                 static_cast<unsigned long long>(m.ConsumerStalls),
-                 static_cast<unsigned long long>(m.ReaderStalls));
-    std::fprintf(stderr, "Timing:        IO %.1fms, decompress %.1fms, parse %.1fms\n", ioMs,
+    std::println(stderr, "Result peak:   queue {}", m.PoolPeakResultQueueDepth);
+    std::println(stderr, "Stalls:        IO={}, consumer={}, reader={}", m.IoStalls,
+                 m.ConsumerStalls, m.ReaderStalls);
+    std::println(stderr, "Timing:        IO {:.1f}ms, decompress {:.1f}ms, parse {:.1f}ms", ioMs,
                  decompMs, parseMs);
 }
 
@@ -393,18 +387,30 @@ int Runner(int argc, char* argv[])
     for (int i{0}; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if ((arg == "--bgzf-threads") && (i + 1 < argc)) {
-            bgzfOpt = std::stoi(std::string{argv[++i]});
+            const auto parsed{Tools::ParseInteger<std::int32_t>(argv[++i], "bgzf-threads")};
+            if (!parsed) {
+                throw std::runtime_error{parsed.error()};
+            }
+            bgzfOpt = *parsed;
         } else if ((arg == "--format-threads") && (i + 1 < argc)) {
-            formatOpt = std::stoi(std::string{argv[++i]});
+            const auto parsed{Tools::ParseInteger<std::int32_t>(argv[++i], "format-threads")};
+            if (!parsed) {
+                throw std::runtime_error{parsed.error()};
+            }
+            formatOpt = *parsed;
         } else if ((arg == "-j") && (i + 1 < argc)) {
-            bgzfOpt = std::stoi(std::string{argv[++i]});
+            const auto parsed{Tools::ParseInteger<std::int32_t>(argv[++i], "bgzf-threads")};
+            if (!parsed) {
+                throw std::runtime_error{parsed.error()};
+            }
+            bgzfOpt = *parsed;
         } else if (arg[0] != '-') {
             inputFile = argv[i];
         }
     }
 
     if (inputFile == nullptr) {
-        std::fprintf(stderr, "Usage: pbsamoa dump [--bgzf-threads N] [--format-threads N] INPUT\n");
+        std::println(stderr, "Usage: pbsamoa dump [--bgzf-threads N] [--format-threads N] INPUT");
         return EXIT_FAILURE;
     }
 

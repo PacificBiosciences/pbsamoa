@@ -49,8 +49,10 @@ const SamHeader& header = reader.Header();
 ### Range iteration
 
 ```cpp
+#include <print>
+
 for (const auto& view : reader.Records()) {
-    std::cout << view.Name() << '\n';
+    std::println("{}", view.Name());
 }
 ```
 
@@ -146,8 +148,10 @@ while (auto record = reader.ReadRecord()) {
 ### Range iteration
 
 ```cpp
+#include <print>
+
 for (const auto& record : reader.Records()) {
-    std::cout << record.Name() << '\n';
+    std::println("{}", record.Name());
 }
 ```
 
@@ -162,10 +166,13 @@ for (const auto& record : reader.Records()) {
 Reads text SAM files, producing owned `BamRecord` objects.
 
 ```cpp
+#include <print>
+#include <pbsamoa/io/SamReader.hpp>
+
 SamReader reader{"input.sam"};
 
 for (const auto& record : reader.Records()) {
-    std::cout << record.Name() << '\n';
+    std::println("{}", record.Name());
 }
 ```
 

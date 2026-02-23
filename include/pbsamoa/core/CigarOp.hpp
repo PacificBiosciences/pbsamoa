@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <cstdint>
@@ -97,7 +98,7 @@ constexpr std::uint32_t CigarOp::RawValue() const { return data_; }
 constexpr char CigarOpToChar(CigarOpType op)
 {
     constexpr std::array<char, 9> TABLE{'M', 'I', 'D', 'N', 'S', 'H', 'P', '=', 'X'};
-    const std::uint8_t idx{static_cast<std::uint8_t>(op)};
+    const std::uint8_t idx{std::to_underlying(op)};
     return (idx < std::size(TABLE)) ? TABLE[idx] : '?';
 }
 

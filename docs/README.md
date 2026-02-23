@@ -23,12 +23,13 @@ required.
 
 ```cpp
 #include <pbsamoa/io/BamRawReader.hpp>
+#include <print>
 
 PacBio::Samoa::BamRawReader reader{"input.bam"};
 
 // Print every read name (zero-copy views)
 for (const auto& view : reader.Records()) {
-    std::cout << view.Name() << '\n';
+    std::println("{}", view.Name());
 }
 ```
 
@@ -36,12 +37,13 @@ for (const auto& view : reader.Records()) {
 
 ```cpp
 #include <pbsamoa/io/BamRecordReader.hpp>
+#include <print>
 
 PacBio::Samoa::BamRecordReader reader{"input.bam"};
 
 // Pre-decoded owned BamRecord objects via background pipeline
 for (const auto& record : reader.Records()) {
-    std::cout << record.Name() << '\n';
+    std::println("{}", record.Name());
 }
 ```
 
@@ -131,3 +133,4 @@ auto record = view.ToOwned(KeepTags{TagKey{'R', 'G'}, TagKey{'N', 'M'}});
 | [Architecture](architecture.md) | Layer diagram, design decisions, data flow |
 | [API Reference](api.md)         | All public types and functions             |
 | [CLI Tools](cli.md)             | The `pbsamoa` command-line tool            |
+| [C++23 Guide](cpp23-best-practices.md) | Project-level C++23 coding rules and applicability |

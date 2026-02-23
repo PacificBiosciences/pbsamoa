@@ -8,38 +8,37 @@
 
 #include <pbsamoa/PbSamoaLibraryInfo.hpp>
 
+#include <print>
 #include <string_view>
-
-#include <cstdio>
 
 namespace {
 
 void PrintUsage()
 {
     const std::string version{PacBio::Samoa::LibraryFormattedVersion()};
-    std::fprintf(stderr,
-                 "pbsamoa — SAM/BAM/BAI toolkit (%s)\n"
-                 "\n"
-                 "Usage: pbsamoa <command> [args...]\n"
-                 "\n"
-                 "Commands:\n"
-                 "  dump       Convert BAM to SAM text on stdout\n"
-                 "  chunk      Dump a chunk of BAM records as SAM text\n"
-                 "  bai-build  Build BAI index for a BAM file\n"
-                 "  bai-query  Query BAM records by genomic region\n"
-                 "  zmi-build  Copy BAM and build ZMI index alongside\n"
-                 "  zmi-query  Query BAM records by ZMW hole number\n"
-                 "  bench      Benchmark pbsamoa read/write performance\n"
-                 "\n"
-                 "Examples:\n"
-                 "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
-                 "  pbsamoa bai-build  input.bam              Build BAI index\n"
-                 "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
-                 "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
-                 "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
-                 "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
-                 "  pbsamoa bench      input.bam              Run benchmarks\n",
-                 version.c_str());
+    std::print(stderr,
+               "pbsamoa - SAM/BAM/BAI toolkit ({})\n"
+               "\n"
+               "Usage: pbsamoa <command> [args...]\n"
+               "\n"
+               "Commands:\n"
+               "  dump       Convert BAM to SAM text on stdout\n"
+               "  chunk      Dump a chunk of BAM records as SAM text\n"
+               "  bai-build  Build BAI index for a BAM file\n"
+               "  bai-query  Query BAM records by genomic region\n"
+               "  zmi-build  Copy BAM and build ZMI index alongside\n"
+               "  zmi-query  Query BAM records by ZMW hole number\n"
+               "  bench      Benchmark pbsamoa read/write performance\n"
+               "\n"
+               "Examples:\n"
+               "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
+               "  pbsamoa bai-build  input.bam              Build BAI index\n"
+               "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
+               "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
+               "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
+               "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
+               "  pbsamoa bench      input.bam              Run benchmarks\n",
+               version);
 }
 
 }  // namespace
@@ -81,7 +80,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    std::fprintf(stderr, "Unknown command: %s\n", argv[1]);
+    std::println(stderr, "Unknown command: {}", argv[1]);
     PrintUsage();
     return 1;
 }
