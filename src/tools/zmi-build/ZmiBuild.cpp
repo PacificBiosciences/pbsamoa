@@ -4,8 +4,8 @@
 #include <pbsamoa/io/ZmiBamWriter.hpp>
 
 #include <filesystem>
+#include <print>
 
-#include <cstdio>
 #include <cstdlib>
 
 namespace PacBio {
@@ -15,7 +15,7 @@ namespace ZmiBuild {
 int Runner(int argc, char* argv[])
 {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: pbsamoa zmi-build IN.bam OUT.bam\n");
+        std::println(stderr, "Usage: pbsamoa zmi-build IN.bam OUT.bam");
         return EXIT_FAILURE;
     }
 
@@ -28,7 +28,7 @@ int Runner(int argc, char* argv[])
         writer.Write(view);
     }
 
-    std::fprintf(stderr, "ZMI index written to %s.zmi\n", outputPath.c_str());
+    std::println(stderr, "ZMI index written to {}.zmi", outputPath.string());
     return EXIT_SUCCESS;
 }
 

@@ -3,9 +3,9 @@
 #include <pbsamoa/index/BaiIndex.hpp>
 
 #include <filesystem>
+#include <print>
 #include <string_view>
 
-#include <cstdio>
 #include <cstdlib>
 
 namespace PacBio {
@@ -15,7 +15,7 @@ namespace BaiBuild {
 int Runner(int argc, char* argv[])
 {
     if (argc < 1) {
-        std::fprintf(stderr, "Usage: pbsamoa bai-build IN.bam\n");
+        std::println(stderr, "Usage: pbsamoa bai-build IN.bam");
         return EXIT_FAILURE;
     }
 
@@ -23,7 +23,7 @@ int Runner(int argc, char* argv[])
     const auto index{BaiIndex::Build(bamPath)};
     const std::filesystem::path outPath{bamPath.string() + ".bai"};
     index.ToFile(outPath);
-    std::fprintf(stderr, "Index written to %s\n", outPath.c_str());
+    std::println(stderr, "Index written to {}", outPath.string());
     return EXIT_SUCCESS;
 }
 
