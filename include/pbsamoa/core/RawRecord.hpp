@@ -45,12 +45,6 @@ class RawRecord
 public:
     explicit RawRecord(std::span<const std::byte> data);
 
-    RawRecord(const RawRecord&) = default;
-    RawRecord& operator=(const RawRecord&) = default;
-    RawRecord(RawRecord&&) noexcept = default;
-    RawRecord& operator=(RawRecord&&) noexcept = default;
-    ~RawRecord() = default;
-
     // --- fixed fields ---
     std::int32_t RefId() const;
     std::int32_t Pos() const;
