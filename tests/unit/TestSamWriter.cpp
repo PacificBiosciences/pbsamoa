@@ -156,5 +156,64 @@ TEST_F(SamWriterTest, WriteViewFromBam)
     }
 }
 
+TEST_F(SamWriterTest, WriteBatch)
+{
+    SamHeader header;
+    std::size_t originalCount{0};
+
+    {
+        BamRawReader reader{tests::DataDir / "spec_example.bam"};
+        header = reader.Header();
+        SamWriter writer{tmpPath, header};
+
+        while (const auto batch = reader.ReadBatch(ByteLimit{1024U * 1024U})) {
+            writer.WriteBatch(*batch);
+            originalCount += batch->RecordCount();
+        }
+    }
+
+    const auto records{ReadRecordLines(tmpPath)};
+    EXPECT_EQ(std::size(records), originalCount);
+    EXPECT_GT(originalCount, 0u);
+}
+
+TEST_F(SamWriterTest, WriteBatchPreservesNames)
+{
+    BamRawReader reader{tests::DataDir / "spec_example.bam"};
+    const SamHeader& header = reader.Header();
+
+    std::vector<std::string> originalNames;
+    for (const auto& view : reader.Records()) {
+        originalNames.emplace_back(view.Name());
+    }
+
+    // Re-read with batch API and write
+    BamRawReader reader2{tests::DataDir / "spec_example.bam"};
+    {
+        SamWriter writer{tmpPath, header};
+        while (const auto batch = reader2.ReadBatch(ByteLimit{1024U * 1024U})) {
+            writer.WriteBatch(*batch);
+        }
+    }
+
+    const auto records{ReadRecordLines(tmpPath)};
+    ASSERT_EQ(std::size(records), std::size(originalNames));
+    for (std::size_t i{0}; i < std::size(originalNames); ++i) {
+        EXPECT_TRUE(records[i].starts_with(originalNames[i] + '\t'));
+    }
+}
+
+TEST_F(SamWriterTest, DoubleCloseIsSafe)
+{
+    const SamHeader header = MakeMinimalHeader();
+    SamWriter writer{tmpPath, header};
+    writer.Write(MakeTestRecord());
+    writer.Close();
+    writer.Close();
+
+    const auto records{ReadRecordLines(tmpPath)};
+    EXPECT_EQ(std::size(records), 1u);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio
