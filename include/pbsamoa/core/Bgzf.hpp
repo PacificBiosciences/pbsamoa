@@ -105,16 +105,24 @@ inline constexpr std::array<std::byte, 28> BGZF_EOF_MARKER = {
 // BgzfReader
 // ---------------------------------------------------------------------------
 
-/// \brief Reads and decompresses BGZF-compressed files block by block.
+/// \brief Reads and decompresses BGZF-compressed files.
 ///
-/// Synchronous single-threaded decompression. For parallel decompression,
-/// use BgzfPipeline via BamRawReader(path, BamRawReaderConfig{.BgzfWorkers =
-/// N}).
+/// Two construction modes:
+/// - Block-only (1-arg): synchronous ReadBlock() for index files.
+/// - BAM mode (2-arg): parses BAM header eagerly and provides ReadRecord().
+///   numWorkers == 0 uses synchronous record parsing.
+///   numWorkers > 0 uses parallel decompression pipeline internals.
 class BgzfReader
 {
 public:
-    /// \throws std::runtime_error if file cannot be opened
+    /// \brief Block-only mode — no header parsing, no record parsing, no threads.
+    /// \throws std::runtime_error if file cannot be opened.
     explicit BgzfReader(const std::filesystem::path& path);
+
+    /// \brief BAM mode — parses BAM header eagerly.
+    /// \param[in] numWorkers 0 = synchronous record parsing, >0 = parallel pipeline.
+    /// \throws std::runtime_error if file cannot be opened or header is invalid.
+    BgzfReader(const std::filesystem::path& path, std::size_t numWorkers);
 
     ~BgzfReader();
 
@@ -135,6 +143,18 @@ public:
 
     /// \brief Current virtual file offset (start of next unread block).
     VirtualOffset Tell() const;
+
+    /// \brief Access the parsed BAM header.
+    /// \throws std::runtime_error in block-only mode.
+    const SamHeader& Header() const;
+
+    /// \brief Read next BAM record.
+    /// \throws std::runtime_error in block-only mode.
+    /// \returns owning RawRecord, or nullopt at EOF.
+    std::optional<RawRecord> ReadRecord();
+
+    /// \brief Snapshot of read metrics.
+    BgzfMetrics GetMetrics() const;
 
 private:
     struct Impl;
@@ -209,73 +229,6 @@ public:
 
     /// \brief Snapshot writer metrics.
     BgzfWriteMetrics GetMetrics() const;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
-// ---------------------------------------------------------------------------
-// BgzfPipeline
-// ---------------------------------------------------------------------------
-
-/// \brief Staged parallel BGZF decompression pipeline.
-///
-/// Three-stage architecture:
-/// - IO thread reads compressed blocks and submits to ThreadPool
-/// - N worker threads decompress blocks (via ThreadPool<DecompressedBlock>)
-/// - Consumer thread runs ConsumeWith() to receive blocks in order,
-///   parses record boundaries, creates RawRecords, pushes to SPSC
-/// - Caller pops records from the SPSC via ReadRecord()
-///
-/// Also supports synchronous block-level reading via ReadBlock() (legacy API).
-class BgzfPipeline
-{
-public:
-    /// \param[in] path BAM/BGZF file to read
-    /// \param[in] numWorkers number of decompression worker threads (0 =
-    /// synchronous)
-    /// \throws std::runtime_error if file cannot be opened
-    explicit BgzfPipeline(const std::filesystem::path& path, std::size_t numWorkers);
-    ~BgzfPipeline();
-
-    BgzfPipeline(const BgzfPipeline&) = delete;
-    BgzfPipeline& operator=(const BgzfPipeline&) = delete;
-    BgzfPipeline(BgzfPipeline&&) = delete;
-    BgzfPipeline& operator=(BgzfPipeline&&) = delete;
-
-    /// \brief Parse BAM header from the start of the file.
-    /// Must be called before ReadRecord(). Positions the pipeline
-    /// after the header, ready to read records. Starts the pipeline
-    /// threads when numWorkers > 0.
-    void ParseHeader();
-
-    /// \brief Access the parsed SAM header.
-    /// \throws std::runtime_error if ParseHeader() has not been called.
-    const SamHeader& Header() const;
-
-    /// \brief Read next record from the pipeline.
-    /// Blocks until a record is available. Returns nullopt on EOF.
-    /// Requires ParseHeader() to have been called and numWorkers > 0.
-    std::optional<RawRecord> ReadRecord();
-
-    /// \brief Read next decompressed BGZF block (legacy API).
-    /// Always uses synchronous decompression regardless of numWorkers.
-    /// \param[out] buffer must be >= 65536 bytes
-    /// \returns decompressed byte count, 0 at EOF, nullopt on error
-    std::optional<std::size_t> ReadBlock(std::span<std::byte> buffer);
-
-    /// \brief Seek to a virtual file offset. Stops and restarts pipeline.
-    void Seek(VirtualOffset offset);
-
-    /// \brief Current virtual file offset (start of next unconsumed block).
-    VirtualOffset Tell() const;
-
-    /// \brief Whether file ends with standard 28-byte EOF marker.
-    bool HasEofMarker() const;
-
-    /// \brief Snapshot of pipeline metrics. Thread-safe, lock-free.
-    BgzfMetrics GetMetrics() const;
 
 private:
     struct Impl;

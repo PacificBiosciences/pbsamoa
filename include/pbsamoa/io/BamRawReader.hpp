@@ -229,8 +229,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-
-    bool RefillBuffer();
 };
 
 }  // namespace Samoa

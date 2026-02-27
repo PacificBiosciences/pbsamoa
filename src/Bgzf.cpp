@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -213,98 +214,67 @@ bool IsBgzfEofMarker(std::span<const std::byte> data)
 // BgzfReader
 // =============================================================================
 
+enum class BgzfReaderMode : std::uint8_t
+{
+    BlockOnly,
+    SyncBam,
+    ParallelBam,
+};
+
+struct BgzfPipelineState;
+
 struct BgzfReader::Impl
 {
-    std::ifstream file{};
+    BgzfReaderMode mode{BgzfReaderMode::BlockOnly};
+
+    // Shared sync decompression state (block-only and sync BAM mode)
+    std::ifstream syncFile{};
     std::vector<std::byte> compressedBuf{};
-    std::uint64_t blockFileOffset{0};
+    std::uint64_t syncBlockOffset{0};
     bool hasEofMarker{false};
-    DecompressorPtr decompressor{};
+    DecompressorPtr syncDecompressor{};
 
-    explicit Impl(const std::filesystem::path& path)
-    {
-        file.open(path, std::ios::binary);
-        if (!file.is_open()) {
-            throw std::runtime_error{"Cannot open file: " + path.string()};
-        }
+    // Sync BAM mode state
+    SamHeader syncHeader{};
+    std::vector<std::byte> recordBuf{};
+    std::size_t recordBufSize{0};
+    std::size_t recordBufPos{0};
+    bool syncEof{false};
 
-        compressedBuf.resize(MAX_BGZF_BLOCK_SIZE);
+    // Parallel BAM mode state
+    std::unique_ptr<BgzfPipelineState> pipeline{};
 
-        decompressor = DecompressorPtr{libdeflate_alloc_decompressor()};
-        if (!decompressor) {
-            throw std::runtime_error{"Failed to create libdeflate decompressor"};
-        }
+    // Records returned to caller (sync modes only; pipeline tracks internally)
+    std::uint64_t recordsConsumed{0};
 
-        file.seekg(-static_cast<std::streamoff>(std::size(BGZF_EOF_MARKER)), std::ios::end);
-        if (file.good()) {
-            std::array<std::byte, 28> tail{};
-            file.read(reinterpret_cast<char*>(std::data(tail)),
-                      static_cast<std::streamsize>(std::size(tail)));
-            hasEofMarker = IsBgzfEofMarker(tail);
-        }
+    explicit Impl(const std::filesystem::path& path);
+    Impl(const std::filesystem::path& path, std::size_t numWorkers);
+    ~Impl();
 
-        file.clear();
-        file.seekg(0, std::ios::beg);
-    }
-
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 
-    std::optional<std::size_t> ReadBlock(std::span<std::byte> buffer)
-    {
-        blockFileOffset = file.tellg();
+    void OpenSyncFile(const std::filesystem::path& path);
+    std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
+    void ParseHeaderSync();
+    bool RefillRecordBuffer();
+    std::optional<RawRecord> ReadRecordSync();
 
-        file.read(reinterpret_cast<char*>(std::data(compressedBuf)), BGZF_HEADER_SIZE);
-        if (file.gcount() == 0) {
-            return 0U;
-        }
-        if (file.gcount() < BGZF_HEADER_SIZE) {
-            return std::nullopt;
-        }
-
-        const std::optional<BgzfBlockInfo> info{
-            ParseBgzfBlockHeader(std::span<const std::byte>{compressedBuf}.first(
-                static_cast<std::size_t>(BGZF_HEADER_SIZE)))};
-        if (!info.has_value()) {
-            return std::nullopt;
-        }
-
-        const std::size_t blockSize{info->blockSize};
-        const std::size_t headerSize{static_cast<std::size_t>(BGZF_HEADER_SIZE)};
-        const std::size_t remaining{blockSize - headerSize};
-        if (std::size(compressedBuf) < blockSize) {
-            compressedBuf.resize(blockSize);
-        }
-
-        file.read(reinterpret_cast<char*>(std::data(compressedBuf) + headerSize),
-                  static_cast<std::streamsize>(remaining));
-        if (static_cast<std::size_t>(file.gcount()) < remaining) {
-            return std::nullopt;
-        }
-
-        const std::uint32_t isize{ReadU32LE(std::data(compressedBuf) + blockSize - 4U)};
-        if (isize == 0U) {
-            return 0U;
-        }
-
-        if (std::size(buffer) < static_cast<std::size_t>(isize)) {
-            return std::nullopt;
-        }
-
-        std::size_t actualOut{0};
-        const libdeflate_result result{libdeflate_deflate_decompress(
-            decompressor.get(), std::data(compressedBuf) + info->compressedDataOffset,
-            info->compressedDataSize, std::data(buffer), isize, &actualOut)};
-        if (result != LIBDEFLATE_SUCCESS) {
-            return std::nullopt;
-        }
-
-        return actualOut;
-    }
+    std::optional<std::size_t> ReadBlock(std::span<std::byte> buffer);
+    void Seek(VirtualOffset offset);
+    VirtualOffset Tell() const;
+    bool HasEofMarker() const;
+    const SamHeader& Header() const;
+    std::optional<RawRecord> ReadRecord();
+    BgzfMetrics GetMetrics() const;
 };
 
 BgzfReader::BgzfReader(const std::filesystem::path& path) : impl_{std::make_unique<Impl>(path)} {}
+
+BgzfReader::BgzfReader(const std::filesystem::path& path, std::size_t numWorkers)
+    : impl_{std::make_unique<Impl>(path, numWorkers)}
+{
+}
 
 BgzfReader::~BgzfReader() = default;
 BgzfReader::BgzfReader(BgzfReader&&) noexcept = default;
@@ -315,19 +285,17 @@ std::optional<std::size_t> BgzfReader::ReadBlock(std::span<std::byte> buffer)
     return impl_->ReadBlock(buffer);
 }
 
-void BgzfReader::Seek(VirtualOffset offset)
-{
-    impl_->file.clear();
-    impl_->file.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
-    impl_->blockFileOffset = offset.BlockOffset();
-}
+void BgzfReader::Seek(VirtualOffset offset) { impl_->Seek(offset); }
 
-bool BgzfReader::HasEofMarker() const { return impl_->hasEofMarker; }
+bool BgzfReader::HasEofMarker() const { return impl_->HasEofMarker(); }
 
-VirtualOffset BgzfReader::Tell() const
-{
-    return VirtualOffset{impl_->blockFileOffset, std::uint16_t{0}};
-}
+VirtualOffset BgzfReader::Tell() const { return impl_->Tell(); }
+
+const SamHeader& BgzfReader::Header() const { return impl_->Header(); }
+
+std::optional<RawRecord> BgzfReader::ReadRecord() { return impl_->ReadRecord(); }
+
+BgzfMetrics BgzfReader::GetMetrics() const { return impl_->GetMetrics(); }
 
 // =============================================================================
 // BgzfWriter
@@ -917,7 +885,7 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 }
 
 // =============================================================================
-// BgzfPipeline
+// BgzfReader parallel state
 // =============================================================================
 
 /// \brief Always-on atomic counters for pipeline introspection.
@@ -966,7 +934,7 @@ struct ScopedTimer
     ScopedTimer& operator=(const ScopedTimer&) = delete;
 };
 
-struct BgzfPipeline::Impl
+struct BgzfPipelineState
 {
     std::filesystem::path filePath;
     std::size_t numWorkers;
@@ -1001,11 +969,11 @@ struct BgzfPipeline::Impl
     // Always-on metrics
     PipelineCounters counters;
 
-    explicit Impl(const std::filesystem::path& path, std::size_t workers);
-    ~Impl();
+    explicit BgzfPipelineState(const std::filesystem::path& path, std::size_t workers);
+    ~BgzfPipelineState();
 
-    Impl(const Impl&) = delete;
-    Impl& operator=(const Impl&) = delete;
+    BgzfPipelineState(const BgzfPipelineState&) = delete;
+    BgzfPipelineState& operator=(const BgzfPipelineState&) = delete;
 
     void ParseHeader();
     void StartPipeline();
@@ -1013,9 +981,14 @@ struct BgzfPipeline::Impl
     void IoLoop(std::stop_token stopToken);
     void ConsumerLoop(std::stop_token stopToken);
     std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
+    const SamHeader& Header() const;
+    std::optional<RawRecord> ReadRecord();
+    void Seek(VirtualOffset offset);
+    VirtualOffset Tell() const;
+    BgzfMetrics GetMetrics() const;
 };
 
-BgzfPipeline::Impl::Impl(const std::filesystem::path& path, std::size_t workers)
+BgzfPipelineState::BgzfPipelineState(const std::filesystem::path& path, std::size_t workers)
     : filePath{path}, numWorkers{workers}
 {
     // Check EOF marker
@@ -1044,9 +1017,9 @@ BgzfPipeline::Impl::Impl(const std::filesystem::path& path, std::size_t workers)
     }
 }
 
-BgzfPipeline::Impl::~Impl() { StopPipeline(); }
+BgzfPipelineState::~BgzfPipelineState() { StopPipeline(); }
 
-void BgzfPipeline::Impl::ParseHeader()
+void BgzfPipelineState::ParseHeader()
 {
     // Read BGZF blocks synchronously until we have the complete BAM header
     std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
@@ -1135,7 +1108,7 @@ void BgzfPipeline::Impl::ParseHeader()
     }
 }
 
-void BgzfPipeline::Impl::StartPipeline()
+void BgzfPipelineState::StartPipeline()
 {
     // Create per-worker decompressors
     decompressors.clear();
@@ -1170,7 +1143,7 @@ void BgzfPipeline::Impl::StartPipeline()
     ioThread = std::jthread{[this](std::stop_token st) { IoLoop(st); }};
 }
 
-void BgzfPipeline::Impl::StopPipeline()
+void BgzfPipelineState::StopPipeline()
 {
     // 1. Signal IO thread to stop submitting
     if (ioThread.joinable()) {
@@ -1209,7 +1182,7 @@ void BgzfPipeline::Impl::StopPipeline()
     decompressors.clear();
 }
 
-void BgzfPipeline::Impl::IoLoop(std::stop_token stopToken)
+void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 {
     try {
         std::ifstream file{filePath, std::ios::binary};
@@ -1378,7 +1351,7 @@ void BgzfPipeline::Impl::IoLoop(std::stop_token stopToken)
     }
 }
 
-void BgzfPipeline::Impl::ConsumerLoop(std::stop_token stopToken)
+void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
 {
     // Signal the reader via condition variable.  Lock/unlock the mutex to
     // establish happens-before with the reader's cv.wait() predicate.
@@ -1475,7 +1448,7 @@ void BgzfPipeline::Impl::ConsumerLoop(std::stop_token stopToken)
     notifyReader();
 }
 
-std::optional<std::size_t> BgzfPipeline::Impl::ReadBlockSync(std::span<std::byte> buffer)
+std::optional<std::size_t> BgzfPipelineState::ReadBlockSync(std::span<std::byte> buffer)
 {
     syncBlockOffset = static_cast<std::uint64_t>(syncFile.tellg());
 
@@ -1520,62 +1493,51 @@ std::optional<std::size_t> BgzfPipeline::Impl::ReadBlockSync(std::span<std::byte
     return actualOut;
 }
 
-// --- BgzfPipeline public API ---
-
-BgzfPipeline::BgzfPipeline(const std::filesystem::path& path, std::size_t numWorkers)
-    : impl_{std::make_unique<Impl>(path, numWorkers)}
+const SamHeader& BgzfPipelineState::Header() const
 {
+    if (!headerParsed) {
+        throw std::runtime_error{"BAM header not parsed"};
+    }
+    return header;
 }
 
-BgzfPipeline::~BgzfPipeline() = default;
-
-void BgzfPipeline::ParseHeader() { impl_->ParseHeader(); }
-
-const SamHeader& BgzfPipeline::Header() const
+std::optional<RawRecord> BgzfPipelineState::ReadRecord()
 {
-    if (!impl_->headerParsed) {
-        throw std::runtime_error{"ParseHeader() must be called before accessing Header()"};
+    if (!headerParsed) {
+        throw std::runtime_error{"BAM header not parsed"};
     }
-    return impl_->header;
-}
-
-std::optional<RawRecord> BgzfPipeline::ReadRecord()
-{
-    if (!impl_->headerParsed) {
-        throw std::runtime_error{"ParseHeader() must be called before ReadRecord()"};
-    }
-    if (!impl_->outputQueue) {
+    if (!outputQueue) {
         throw std::runtime_error{"ReadRecord() requires numWorkers > 0"};
     }
 
     // Fast path: check SPSC queue without locking.
     while (true) {
-        RawRecord* front{impl_->outputQueue->front()};
+        RawRecord* front{outputQueue->front()};
         if (front != nullptr) {
             RawRecord result{std::move(*front)};
-            impl_->outputQueue->pop();
-            impl_->counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
+            outputQueue->pop();
+            counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
             return result;
         }
 
         // Queue empty — check termination before sleeping.
-        if (impl_->pipelineError.load(std::memory_order_acquire)) {
-            front = impl_->outputQueue->front();
+        if (pipelineError.load(std::memory_order_acquire)) {
+            front = outputQueue->front();
             if (front != nullptr) {
                 RawRecord result{std::move(*front)};
-                impl_->outputQueue->pop();
-                impl_->counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
+                outputQueue->pop();
+                counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
                 return result;
             }
-            std::rethrow_exception(impl_->errorPtr);
+            std::rethrow_exception(errorPtr);
         }
 
-        if (impl_->done.load(std::memory_order_acquire)) {
-            front = impl_->outputQueue->front();
+        if (done.load(std::memory_order_acquire)) {
+            front = outputQueue->front();
             if (front != nullptr) {
                 RawRecord result{std::move(*front)};
-                impl_->outputQueue->pop();
-                impl_->counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
+                outputQueue->pop();
+                counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
                 return result;
             }
             return std::nullopt;
@@ -1584,62 +1546,54 @@ std::optional<RawRecord> BgzfPipeline::ReadRecord()
         // Slow path: wait on condition variable for data/done/error.
         // The mutex lock creates a happens-before with the consumer's
         // lock/unlock in notifyReader(), preventing lost wakeups.
-        impl_->counters.readerStalls.fetch_add(1, std::memory_order_relaxed);
-        std::unique_lock lock{impl_->readyMutex};
-        impl_->readyCv.wait(lock, [this]() {
-            return impl_->outputQueue->front() != nullptr ||
-                   impl_->done.load(std::memory_order_acquire) ||
-                   impl_->pipelineError.load(std::memory_order_acquire);
+        counters.readerStalls.fetch_add(1, std::memory_order_relaxed);
+        std::unique_lock lock{readyMutex};
+        readyCv.wait(lock, [this]() {
+            return outputQueue->front() != nullptr || done.load(std::memory_order_acquire) ||
+                   pipelineError.load(std::memory_order_acquire);
         });
     }
 }
 
-std::optional<std::size_t> BgzfPipeline::ReadBlock(std::span<std::byte> buffer)
-{
-    return impl_->ReadBlockSync(buffer);
-}
-
-void BgzfPipeline::Seek(VirtualOffset offset)
+void BgzfPipelineState::Seek(VirtualOffset offset)
 {
     // Stop pipeline if running
-    impl_->StopPipeline();
+    StopPipeline();
 
     // Reset sync file position
-    impl_->syncFile.clear();
-    impl_->syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
-    impl_->syncBlockOffset = offset.BlockOffset();
+    syncFile.clear();
+    syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
+    syncBlockOffset = offset.BlockOffset();
 
     // Update pipeline start offset
-    impl_->headerEndFileOffset = offset.BlockOffset();
-    impl_->initialBytes.clear();
+    headerEndFileOffset = offset.BlockOffset();
+    initialBytes.clear();
 
     // Reset pipeline state
-    impl_->done.store(false, std::memory_order_relaxed);
-    impl_->pipelineError.store(false, std::memory_order_relaxed);
-    impl_->errorPtr = nullptr;
+    done.store(false, std::memory_order_relaxed);
+    pipelineError.store(false, std::memory_order_relaxed);
+    errorPtr = nullptr;
 
     // Restart pipeline if in parallel mode and header was parsed
-    if ((impl_->numWorkers > 0) && impl_->headerParsed) {
-        impl_->StartPipeline();
+    if ((numWorkers > 0) && headerParsed) {
+        StartPipeline();
     }
 }
 
-VirtualOffset BgzfPipeline::Tell() const { return VirtualOffset{impl_->syncBlockOffset, 0}; }
+VirtualOffset BgzfPipelineState::Tell() const { return VirtualOffset{syncBlockOffset, 0}; }
 
-bool BgzfPipeline::HasEofMarker() const { return impl_->hasEofMarker; }
-
-BgzfMetrics BgzfPipeline::GetMetrics() const
+BgzfMetrics BgzfPipelineState::GetMetrics() const
 {
     BgzfMetrics m{};
 
     // Throughput counters
-    m.BytesRead = impl_->counters.bytesRead.load(std::memory_order_relaxed);
-    m.BlocksRead = impl_->counters.blocksRead.load(std::memory_order_relaxed);
-    m.BytesDecompressed = impl_->counters.bytesDecompressed.load(std::memory_order_relaxed);
+    m.BytesRead = counters.bytesRead.load(std::memory_order_relaxed);
+    m.BlocksRead = counters.blocksRead.load(std::memory_order_relaxed);
+    m.BytesDecompressed = counters.bytesDecompressed.load(std::memory_order_relaxed);
 
     // ThreadPool metrics
-    if (impl_->pool) {
-        const auto poolSnap{impl_->pool->GetMetrics()};
+    if (pool) {
+        const auto poolSnap{pool->GetMetrics()};
         m.PoolQueueDepth = poolSnap.CurrentQueueDepth;
         m.PoolPeakQueueDepth = poolSnap.PeakQueueDepth;
         m.PoolActiveWorkers = poolSnap.CurrentActiveTasks;
@@ -1649,19 +1603,347 @@ BgzfMetrics BgzfPipeline::GetMetrics() const
     }
 
     // SPSC queue
-    m.RecordsProduced = impl_->counters.recordsProduced.load(std::memory_order_relaxed);
-    m.RecordsConsumed = impl_->counters.recordsConsumed.load(std::memory_order_relaxed);
+    m.RecordsProduced = counters.recordsProduced.load(std::memory_order_relaxed);
+    m.RecordsConsumed = counters.recordsConsumed.load(std::memory_order_relaxed);
 
     // Stall counters
-    m.IoStalls = impl_->counters.ioStalls.load(std::memory_order_relaxed);
-    m.ConsumerStalls = impl_->counters.consumerStalls.load(std::memory_order_relaxed);
-    m.ReaderStalls = impl_->counters.readerStalls.load(std::memory_order_relaxed);
+    m.IoStalls = counters.ioStalls.load(std::memory_order_relaxed);
+    m.ConsumerStalls = counters.consumerStalls.load(std::memory_order_relaxed);
+    m.ReaderStalls = counters.readerStalls.load(std::memory_order_relaxed);
 
     // Timing
-    m.IoReadNs = impl_->counters.ioReadNs.load(std::memory_order_relaxed);
-    m.DecompressNs = impl_->counters.decompressNs.load(std::memory_order_relaxed);
-    m.RecordParseNs = impl_->counters.recordParseNs.load(std::memory_order_relaxed);
+    m.IoReadNs = counters.ioReadNs.load(std::memory_order_relaxed);
+    m.DecompressNs = counters.decompressNs.load(std::memory_order_relaxed);
+    m.RecordParseNs = counters.recordParseNs.load(std::memory_order_relaxed);
 
+    return m;
+}
+
+BgzfReader::Impl::Impl(const std::filesystem::path& path)
+{
+    mode = BgzfReaderMode::BlockOnly;
+    OpenSyncFile(path);
+}
+
+BgzfReader::Impl::Impl(const std::filesystem::path& path, std::size_t numWorkers)
+{
+    if (numWorkers == 0) {
+        mode = BgzfReaderMode::SyncBam;
+        OpenSyncFile(path);
+        ParseHeaderSync();
+        return;
+    }
+
+    mode = BgzfReaderMode::ParallelBam;
+    pipeline = std::make_unique<BgzfPipelineState>(path, numWorkers);
+    pipeline->ParseHeader();
+}
+
+BgzfReader::Impl::~Impl() = default;
+
+void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
+{
+    syncFile.open(path, std::ios::binary);
+    if (!syncFile.is_open()) {
+        throw std::runtime_error{"Cannot open file: " + path.string()};
+    }
+
+    compressedBuf.resize(MAX_BGZF_BLOCK_SIZE);
+
+    syncDecompressor = DecompressorPtr{libdeflate_alloc_decompressor()};
+    if (!syncDecompressor) {
+        throw std::runtime_error{"Failed to create libdeflate decompressor"};
+    }
+
+    syncFile.seekg(-static_cast<std::streamoff>(std::size(BGZF_EOF_MARKER)), std::ios::end);
+    if (syncFile.good()) {
+        std::array<std::byte, 28> tail{};
+        syncFile.read(reinterpret_cast<char*>(std::data(tail)),
+                      static_cast<std::streamsize>(std::size(tail)));
+        hasEofMarker = IsBgzfEofMarker(tail);
+    }
+
+    syncFile.clear();
+    syncFile.seekg(0, std::ios::beg);
+}
+
+std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> buffer)
+{
+    syncBlockOffset = syncFile.tellg();
+
+    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf)), BGZF_HEADER_SIZE);
+    if (syncFile.gcount() == 0) {
+        return 0U;
+    }
+    if (syncFile.gcount() < BGZF_HEADER_SIZE) {
+        return std::nullopt;
+    }
+
+    const std::optional<BgzfBlockInfo> info{
+        ParseBgzfBlockHeader(std::span<const std::byte>{compressedBuf}.first(
+            static_cast<std::size_t>(BGZF_HEADER_SIZE)))};
+    if (!info.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::size_t blockSize{info->blockSize};
+    const std::size_t headerSize{static_cast<std::size_t>(BGZF_HEADER_SIZE)};
+    const std::size_t remaining{blockSize - headerSize};
+    if (std::size(compressedBuf) < blockSize) {
+        compressedBuf.resize(blockSize);
+    }
+
+    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf) + headerSize),
+                  static_cast<std::streamsize>(remaining));
+    if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
+        return std::nullopt;
+    }
+
+    const std::uint32_t isize{ReadU32LE(std::data(compressedBuf) + blockSize - 4U)};
+    if (isize == 0U) {
+        return 0U;
+    }
+
+    if (std::size(buffer) < static_cast<std::size_t>(isize)) {
+        return std::nullopt;
+    }
+
+    std::size_t actualOut{0};
+    const libdeflate_result result{libdeflate_deflate_decompress(
+        syncDecompressor.get(), std::data(compressedBuf) + info->compressedDataOffset,
+        info->compressedDataSize, std::data(buffer), isize, &actualOut)};
+    if (result != LIBDEFLATE_SUCCESS) {
+        return std::nullopt;
+    }
+
+    return actualOut;
+}
+
+void BgzfReader::Impl::ParseHeaderSync()
+{
+    std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
+    std::size_t headerLen{0};
+    std::vector<std::byte> blockBuf(MAX_DECOMPRESSED_BLOCK_SIZE);
+
+    while (true) {
+        const std::optional<std::size_t> bytesRead{ReadBlockSync(std::span<std::byte>{blockBuf})};
+
+        if (!bytesRead.has_value()) {
+            throw std::runtime_error{"Failed to read BGZF block while parsing BAM header"};
+        }
+        if (*bytesRead == 0) {
+            break;
+        }
+
+        if (headerLen + *bytesRead > std::size(headerBuf)) {
+            headerBuf.resize(headerLen + *bytesRead + MAX_DECOMPRESSED_BLOCK_SIZE);
+        }
+
+        std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
+        headerLen += *bytesRead;
+
+        const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+        if (hdrSize > 0) {
+            syncHeader = SamHeader::FromBamHeaderBlock(
+                std::span<const std::byte>{std::data(headerBuf), hdrSize});
+
+            const std::size_t remaining{headerLen - hdrSize};
+            recordBuf.resize(std::ranges::max(remaining, MAX_DECOMPRESSED_BLOCK_SIZE));
+            if (remaining > 0) {
+                std::ranges::copy_n(std::data(headerBuf) + hdrSize, remaining,
+                                    std::data(recordBuf));
+            }
+            recordBufSize = remaining;
+            recordBufPos = 0;
+            syncEof = false;
+            return;
+        }
+    }
+
+    if (headerLen == 0) {
+        throw std::runtime_error{"Empty BAM file: no BGZF blocks"};
+    }
+
+    const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+    if (hdrSize > 0) {
+        syncHeader = SamHeader::FromBamHeaderBlock(
+            std::span<const std::byte>{std::data(headerBuf), hdrSize});
+        recordBuf.resize(MAX_DECOMPRESSED_BLOCK_SIZE);
+        recordBufSize = 0;
+        recordBufPos = 0;
+        syncEof = true;
+        return;
+    }
+
+    throw std::runtime_error{"Incomplete BAM header"};
+}
+
+bool BgzfReader::Impl::RefillRecordBuffer()
+{
+    const std::size_t remaining{recordBufSize - recordBufPos};
+    if ((recordBufPos > 0) && ((remaining == 0) || (recordBufPos > recordBufSize / 2))) {
+        if (remaining > 0) {
+            std::memmove(std::data(recordBuf), std::data(recordBuf) + recordBufPos, remaining);
+        }
+        recordBufPos = 0;
+        recordBufSize = remaining;
+    }
+
+    if (syncEof) {
+        return remaining > 0;
+    }
+
+    const std::size_t needed{recordBufSize + MAX_DECOMPRESSED_BLOCK_SIZE};
+    if (std::size(recordBuf) < needed) {
+        recordBuf.resize(needed);
+    }
+
+    const std::optional<std::size_t> bytesRead{ReadBlockSync(
+        std::span<std::byte>{recordBuf}.subspan(recordBufSize, MAX_DECOMPRESSED_BLOCK_SIZE))};
+
+    if (!bytesRead.has_value()) {
+        syncEof = true;
+        return remaining > 0;
+    }
+    if (*bytesRead == 0) {
+        syncEof = true;
+        return remaining > 0;
+    }
+
+    recordBufSize += *bytesRead;
+    return true;
+}
+
+std::optional<RawRecord> BgzfReader::Impl::ReadRecordSync()
+{
+    while ((recordBufSize - recordBufPos) < RECORD_BLOCK_SIZE_FIELD) {
+        if (!RefillRecordBuffer()) {
+            return std::nullopt;
+        }
+    }
+
+    const std::byte* pos{std::data(recordBuf) + recordBufPos};
+    const std::uint32_t blockSize{ReadU32LE(pos)};
+
+    if (blockSize == 0) {
+        return std::nullopt;
+    }
+
+    const std::size_t totalRecordBytes{RECORD_BLOCK_SIZE_FIELD + blockSize};
+
+    while ((recordBufSize - recordBufPos) < totalRecordBytes) {
+        if (!RefillRecordBuffer()) {
+            return std::nullopt;
+        }
+    }
+
+    pos = std::data(recordBuf) + recordBufPos + RECORD_BLOCK_SIZE_FIELD;
+    recordBufPos += totalRecordBytes;
+
+    return RawRecord{std::span<const std::byte>{pos, blockSize}};
+}
+
+std::optional<std::size_t> BgzfReader::Impl::ReadBlock(std::span<std::byte> buffer)
+{
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->ReadBlockSync(buffer);
+    }
+    return ReadBlockSync(buffer);
+}
+
+void BgzfReader::Impl::Seek(VirtualOffset offset)
+{
+    if (mode == BgzfReaderMode::ParallelBam) {
+        pipeline->Seek(offset);
+        return;
+    }
+
+    syncFile.clear();
+    syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
+    syncBlockOffset = offset.BlockOffset();
+
+    if (mode != BgzfReaderMode::SyncBam) {
+        return;
+    }
+
+    recordBufPos = 0;
+    recordBufSize = 0;
+    syncEof = false;
+
+    const std::uint16_t withinBlock{offset.WithinBlockOffset()};
+    if (withinBlock == 0) {
+        return;
+    }
+
+    if (std::size(recordBuf) < MAX_DECOMPRESSED_BLOCK_SIZE) {
+        recordBuf.resize(MAX_DECOMPRESSED_BLOCK_SIZE);
+    }
+
+    const std::optional<std::size_t> bytesRead{
+        ReadBlockSync(std::span<std::byte>{recordBuf}.first(MAX_DECOMPRESSED_BLOCK_SIZE))};
+    if (!bytesRead.has_value() || (*bytesRead == 0)) {
+        syncEof = true;
+        return;
+    }
+
+    recordBufSize = *bytesRead;
+    if (recordBufSize >= withinBlock) {
+        recordBufPos = withinBlock;
+    }
+}
+
+VirtualOffset BgzfReader::Impl::Tell() const
+{
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->Tell();
+    }
+    return VirtualOffset{syncBlockOffset, std::uint16_t{0}};
+}
+
+bool BgzfReader::Impl::HasEofMarker() const
+{
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->hasEofMarker;
+    }
+    return hasEofMarker;
+}
+
+const SamHeader& BgzfReader::Impl::Header() const
+{
+    if (mode == BgzfReaderMode::BlockOnly) {
+        throw std::runtime_error{"Header() is unavailable in block-only mode"};
+    }
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->Header();
+    }
+    return syncHeader;
+}
+
+std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
+{
+    if (mode == BgzfReaderMode::BlockOnly) {
+        throw std::runtime_error{"ReadRecord() is unavailable in block-only mode"};
+    }
+
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->ReadRecord();
+    }
+
+    auto rec{ReadRecordSync()};
+    if (rec.has_value()) {
+        ++recordsConsumed;
+    }
+    return rec;
+}
+
+BgzfMetrics BgzfReader::Impl::GetMetrics() const
+{
+    if (mode == BgzfReaderMode::ParallelBam) {
+        return pipeline->GetMetrics();
+    }
+
+    BgzfMetrics m{};
+    m.RecordsConsumed = recordsConsumed;
     return m;
 }
 

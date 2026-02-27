@@ -18,31 +18,32 @@
 namespace PacBio {
 namespace Samoa {
 
-TEST(BgzfPipeline, OpenValidBam)
+TEST(BgzfReaderBam, OpenValidBam)
 {
     const std::filesystem::path path{tests::DataDir / "header_only.bam"};
-    const BgzfPipeline pipeline{path, 2};
+    const BgzfReader pipeline{path, 2};
     EXPECT_TRUE(pipeline.HasEofMarker());
 }
 
-TEST(BgzfPipeline, ThrowOnNonexistentFile)
+TEST(BgzfReaderBam, ThrowOnNonexistentFile)
 {
-    EXPECT_THROW(BgzfPipeline("/nonexistent/file.bam", 2), std::runtime_error);
+    EXPECT_THROW(BgzfReader("/nonexistent/file.bam", 2), std::runtime_error);
 }
 
-TEST(BgzfPipeline, SyncModeMatchesBgzfReader)
+TEST(BgzfReaderBam, SyncModeMatchesBgzfReader)
 {
-    // numWorkers=0 should produce identical output to BgzfReader(path) sync mode
+    // Compare from file start: BAM-mode reader parses header eagerly.
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
-    BgzfPipeline pipeline{path, 0};
-    BgzfReader reader{path};
+    BgzfReader syncReader{path, 0};
+    BgzfReader blockReader{path};
+    syncReader.Seek(VirtualOffset{0U, 0U});
 
     std::vector<std::byte> pBuf(65536);
     std::vector<std::byte> rBuf(65536);
 
     while (true) {
-        const auto pResult{pipeline.ReadBlock(pBuf)};
-        const auto rResult{reader.ReadBlock(rBuf)};
+        const auto pResult{syncReader.ReadBlock(pBuf)};
+        const auto rResult{blockReader.ReadBlock(rBuf)};
 
         ASSERT_EQ(pResult.has_value(), rResult.has_value());
         if (!pResult.has_value()) {
@@ -57,12 +58,12 @@ TEST(BgzfPipeline, SyncModeMatchesBgzfReader)
     }
 }
 
-TEST(BgzfPipeline, PipelineModeMatchesSyncMode)
+TEST(BgzfReaderBam, PipelineModeMatchesSyncMode)
 {
     // Pipeline with N workers must produce identical block-by-block output
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
-    BgzfPipeline sync{path, 0};
-    BgzfPipeline parallel{path, 4};
+    BgzfReader sync{path, 0};
+    BgzfReader parallel{path, 4};
 
     std::vector<std::byte> sBuf(65536);
     std::vector<std::byte> pBuf(65536);
@@ -88,12 +89,12 @@ TEST(BgzfPipeline, PipelineModeMatchesSyncMode)
     EXPECT_GT(blockIdx, 0U);
 }
 
-TEST(BgzfPipeline, ManyRecordsBamCorrectness)
+TEST(BgzfReaderBam, ManyRecordsBamCorrectness)
 {
     // Larger file with many BGZF blocks
     const std::filesystem::path path{tests::DataDir / "many_records.bam"};
-    BgzfPipeline sync{path, 0};
-    BgzfPipeline parallel{path, 8};
+    BgzfReader sync{path, 0};
+    BgzfReader parallel{path, 8};
 
     std::vector<std::byte> sBuf(65536);
     std::vector<std::byte> pBuf(65536);
@@ -115,26 +116,28 @@ TEST(BgzfPipeline, ManyRecordsBamCorrectness)
     EXPECT_GT(blockCount, 1U);
 }
 
-TEST(BgzfPipeline, EofOnSmallFile)
+TEST(BgzfReaderBam, EofOnSmallFile)
 {
-    // header_only.bam has just 1 BGZF block (header) + EOF marker
+    // BAM-mode reader parses header in ctor, so next block is EOF.
     const std::filesystem::path path{tests::DataDir / "header_only.bam"};
-    BgzfPipeline pipeline{path, 2};
+    BgzfReader pipeline{path, 2};
 
     std::vector<std::byte> buf(65536);
     const auto first{pipeline.ReadBlock(buf)};
     ASSERT_TRUE(first.has_value());
-    EXPECT_GT(*first, 0U);
-
-    const auto second{pipeline.ReadBlock(buf)};
-    ASSERT_TRUE(second.has_value());
-    EXPECT_EQ(*second, 0U);  // EOF
+    EXPECT_EQ(*first, 0U);
 }
 
-TEST(BgzfPipeline, SeekBackToStart)
+TEST(BgzfReaderBam, SeekBackToStart)
 {
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
-    BgzfPipeline pipeline{path, 4};
+    BgzfReader pipeline{path, 4};  // starts after header
+    BgzfReader blockReader{path};
+
+    std::vector<std::byte> expectedBuf(65536);
+    const auto expectedResult{blockReader.ReadBlock(expectedBuf)};
+    ASSERT_TRUE(expectedResult.has_value());
+    ASSERT_GT(*expectedResult, 0U);
 
     std::vector<std::byte> firstBuf(65536);
     const auto firstResult{pipeline.ReadBlock(firstBuf)};
@@ -147,15 +150,15 @@ TEST(BgzfPipeline, SeekBackToStart)
     std::vector<std::byte> secondBuf(65536);
     const auto secondResult{pipeline.ReadBlock(secondBuf)};
     ASSERT_TRUE(secondResult.has_value());
-    ASSERT_EQ(*firstResult, *secondResult);
-    EXPECT_TRUE(std::ranges::equal(std::span<const std::byte>{firstBuf}.first(*firstResult),
+    ASSERT_EQ(*expectedResult, *secondResult);
+    EXPECT_TRUE(std::ranges::equal(std::span<const std::byte>{expectedBuf}.first(*expectedResult),
                                    std::span<const std::byte>{secondBuf}.first(*secondResult)));
 }
 
-TEST(BgzfPipeline, TellTracksPosition)
+TEST(BgzfReaderBam, TellTracksPosition)
 {
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
-    BgzfPipeline pipeline{path, 2};
+    BgzfReader pipeline{path, 2};
 
     // Before first read, tell should be 0
     EXPECT_EQ(pipeline.Tell().BlockOffset(), 0U);
@@ -176,11 +179,11 @@ TEST(BgzfPipeline, TellTracksPosition)
     EXPECT_GE(pipeline.Tell().BlockOffset(), afterFirst);
 }
 
-TEST(BgzfPipeline, SingleWorkerCorrectness)
+TEST(BgzfReaderBam, SingleWorkerCorrectness)
 {
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
-    BgzfPipeline one{path, 1};
-    BgzfPipeline many{path, 8};
+    BgzfReader one{path, 1};
+    BgzfReader many{path, 8};
 
     std::vector<std::byte> oneBuf(65536);
     std::vector<std::byte> manyBuf(65536);
@@ -201,7 +204,7 @@ TEST(BgzfPipeline, SingleWorkerCorrectness)
 
 // --- ReadRecord tests (v2 pipeline) ---
 
-TEST(BgzfPipeline, ReadRecordMatchesSyncBamRawReader)
+TEST(BgzfReaderBam, ReadRecordMatchesSyncBamRawReader)
 {
     // Pipeline ReadRecord() must produce identical records to sync BamRawReader
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
@@ -216,8 +219,7 @@ TEST(BgzfPipeline, ReadRecordMatchesSyncBamRawReader)
     ASSERT_FALSE(refRecords.empty());
 
     // Pipeline: reads records via new API
-    BgzfPipeline pipeline{path, 4};
-    pipeline.ParseHeader();
+    BgzfReader pipeline{path, 4};
     std::size_t idx{0};
     while (const auto rec = pipeline.ReadRecord()) {
         ASSERT_LT(idx, refRecords.size()) << "Pipeline produced more records than sync reader";
@@ -228,7 +230,7 @@ TEST(BgzfPipeline, ReadRecordMatchesSyncBamRawReader)
     EXPECT_EQ(idx, refRecords.size()) << "Pipeline produced fewer records";
 }
 
-TEST(BgzfPipeline, ReadRecordManyRecordsBam)
+TEST(BgzfReaderBam, ReadRecordManyRecordsBam)
 {
     const std::filesystem::path path{tests::DataDir / "many_records.bam"};
 
@@ -240,8 +242,7 @@ TEST(BgzfPipeline, ReadRecordManyRecordsBam)
     }
     ASSERT_FALSE(refRecords.empty());
 
-    BgzfPipeline pipeline{path, 4};
-    pipeline.ParseHeader();
+    BgzfReader pipeline{path, 4};
     std::size_t idx{0};
     while (const auto rec = pipeline.ReadRecord()) {
         ASSERT_LT(idx, refRecords.size());
@@ -252,7 +253,7 @@ TEST(BgzfPipeline, ReadRecordManyRecordsBam)
     EXPECT_EQ(idx, refRecords.size());
 }
 
-TEST(BgzfPipeline, ReadRecordSingleWorker)
+TEST(BgzfReaderBam, ReadRecordSingleWorker)
 {
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
@@ -264,8 +265,7 @@ TEST(BgzfPipeline, ReadRecordSingleWorker)
     }
     ASSERT_FALSE(refRecords.empty());
 
-    BgzfPipeline pipeline{path, 1};
-    pipeline.ParseHeader();
+    BgzfReader pipeline{path, 1};
     std::size_t idx{0};
     while (const auto rec = pipeline.ReadRecord()) {
         ASSERT_LT(idx, refRecords.size());
@@ -276,24 +276,22 @@ TEST(BgzfPipeline, ReadRecordSingleWorker)
     EXPECT_EQ(idx, refRecords.size());
 }
 
-TEST(BgzfPipeline, ReadRecordEofOnHeaderOnly)
+TEST(BgzfReaderBam, ReadRecordEofOnHeaderOnly)
 {
     const std::filesystem::path path{tests::DataDir / "header_only.bam"};
-    BgzfPipeline pipeline{path, 2};
-    pipeline.ParseHeader();
+    BgzfReader pipeline{path, 2};
 
     // Should immediately return nullopt — no records in header-only file
     const auto rec{pipeline.ReadRecord()};
     EXPECT_FALSE(rec.has_value());
 }
 
-TEST(BgzfPipeline, ParseHeaderMatchesBamRawReader)
+TEST(BgzfReaderBam, ParseHeaderMatchesBamRawReader)
 {
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
     const BamRawReader syncReader{path};
-    BgzfPipeline pipeline{path, 4};
-    pipeline.ParseHeader();
+    BgzfReader pipeline{path, 4};
 
     EXPECT_EQ(pipeline.Header().NumReferences(), syncReader.Header().NumReferences());
     EXPECT_EQ(pipeline.Header().Version(), syncReader.Header().Version());
