@@ -7,7 +7,8 @@
 namespace PacBio {
 namespace Samoa {
 
-/// \brief Snapshot of BGZF pipeline metrics (IO + decompression + output queue).
+/// \brief Snapshot of BGZF pipeline metrics (IO + decompression + output
+/// queue).
 ///
 /// All fields are plain values captured at a point in time via relaxed atomics.
 /// Diff two snapshots to compute per-second rates.
@@ -77,6 +78,39 @@ struct ReaderMetrics
     std::uint64_t TotalRecordsRead{0};  ///< total records returned to caller
     bool ParallelBgzf{false};           ///< true if BgzfWorkers > 0
     bool ParallelDecode{false};         ///< true if DecodeWorkers > 0
+};
+
+/// \brief Snapshot of BGZF writer pipeline metrics.
+struct BgzfWriteMetrics
+{
+    // --- Stall counters ---
+    std::uint64_t CallerStalls{0};  ///< caller blocked on full input queue
+    std::uint64_t PackerStalls{0};  ///< packer found input queue empty
+    std::uint64_t WriterStalls{0};  ///< IO writer found no ready results
+
+    // --- Throughput ---
+    std::uint64_t BytesCompressed{0};  ///< compressed payload bytes produced
+    std::uint64_t BlocksWritten{0};    ///< BGZF blocks written
+
+    // --- Timing (nanoseconds) ---
+    std::uint64_t CompressNs{0};  ///< cumulative libdeflate time
+    std::uint64_t IoWriteNs{0};   ///< cumulative file write time
+    std::uint64_t CallbackNs{0};  ///< cumulative callback dispatch time
+
+    // --- Compression pool metrics ---
+    std::size_t PoolQueueDepth{0};
+    std::size_t PoolPeakQueueDepth{0};
+    std::size_t PoolActiveWorkers{0};
+    std::size_t PoolPeakActiveWorkers{0};
+    std::size_t PoolResultQueueDepth{0};
+    std::size_t PoolPeakResultQueueDepth{0};
+};
+
+/// \brief Composite writer metrics returned by BamWriter::GetMetrics().
+struct WriterMetrics
+{
+    BgzfWriteMetrics Bgzf;
+    std::uint64_t TotalRecordsWritten{0};
 };
 
 }  // namespace Samoa

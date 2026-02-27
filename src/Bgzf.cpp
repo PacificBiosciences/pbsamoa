@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -332,65 +333,509 @@ VirtualOffset BgzfReader::Tell() const
 // BgzfWriter
 // =============================================================================
 
+namespace {
+
+enum class WriteItemKind : std::uint8_t
+{
+    Data,
+    Close,
+};
+
+struct WriteItem
+{
+    WriteItemKind kind{WriteItemKind::Data};
+    std::vector<std::byte> data{};
+    PendingCallback callback{};
+
+    WriteItem() = default;
+
+    explicit WriteItem(WriteItemKind k) : kind{k} {}
+
+    WriteItem(WriteItemKind k, std::vector<std::byte>&& d, PendingCallback&& cb)
+        : kind{k}, data{std::move(d)}, callback{std::move(cb)}
+    {
+    }
+};
+
+struct UncompressedBlock
+{
+    std::vector<std::byte> data;
+    std::vector<PendingCallback> callbacks;
+};
+
+struct CompressedBatch
+{
+    struct Block
+    {
+        std::vector<std::uint8_t> cdata;
+        std::uint32_t crc32{0};
+        std::uint32_t isize{0};
+        std::vector<PendingCallback> callbacks;
+    };
+
+    std::vector<Block> blocks;
+};
+
+struct WritePipelineCounters
+{
+    std::atomic<std::uint64_t> callerStalls{0};
+    std::atomic<std::uint64_t> packerStalls{0};
+    std::atomic<std::uint64_t> compressNs{0};
+    std::atomic<std::uint64_t> bytesCompressed{0};
+    std::atomic<std::uint64_t> blocksWritten{0};
+    std::atomic<std::uint64_t> ioWriteNs{0};
+    std::atomic<std::uint64_t> writerStalls{0};
+    std::atomic<std::uint64_t> callbackNs{0};
+};
+
+}  // namespace
+
 struct BgzfWriter::Impl
 {
+    BgzfWriterConfig config;
     std::ofstream file{};
-    std::vector<std::byte> uncompressedBuf{};
-    std::vector<std::uint8_t> compressedBuf{};
-    CompressorPtr compressor{};
-    std::uint64_t compressedOffset_{0};
+    std::uint64_t compressedOffset{0};
+    std::unique_ptr<Parallel::ThreadPool<CompressedBatch>> pool;
+    std::unique_ptr<rigtorp::SPSCQueue<WriteItem>> inputQueue;
+    std::jthread packerThread;
+    std::jthread ioWriterThread;
+    std::vector<CompressorPtr> compressors;
+    IndexCallbackFn indexCallback{};
+    mutable std::mutex callbackMutex;
+    std::atomic<bool> pipelineError{false};
+    std::exception_ptr errorPtr;
+    mutable std::mutex errorMutex;
+    WritePipelineCounters counters;
     bool closed{false};
 
-    explicit Impl(const std::filesystem::path& path, int level)
-        : compressor{libdeflate_alloc_compressor(level)}
+    explicit Impl(const std::filesystem::path& path, const BgzfWriterConfig& cfg) : config{cfg}
     {
+        if (config.CompressionLevel < 1 || config.CompressionLevel > 12) {
+            throw std::invalid_argument{"BgzfWriter: compression level must be in [1, 12]"};
+        }
+        if (config.BgzfWorkers == 0) {
+            throw std::invalid_argument{"BgzfWriter: BgzfWorkers must be > 0"};
+        }
+        if (config.InputQueueCapacity == 0) {
+            throw std::invalid_argument{"BgzfWriter: InputQueueCapacity must be > 0"};
+        }
+        if (config.BlocksPerBatch <= 0) {
+            throw std::invalid_argument{"BgzfWriter: BlocksPerBatch must be > 0"};
+        }
+
         file.open(path, std::ios::binary);
         if (!file.is_open()) {
             throw std::runtime_error{"Cannot open file for writing: " + path.string()};
         }
 
-        if (!compressor) {
-            throw std::runtime_error{"Failed to create libdeflate compressor"};
+        compressors.reserve(config.BgzfWorkers);
+        for (std::size_t i{0}; i < config.BgzfWorkers; ++i) {
+            compressors.emplace_back(libdeflate_alloc_compressor(config.CompressionLevel));
+            if (!compressors.back()) {
+                throw std::runtime_error{"Failed to create libdeflate compressor"};
+            }
         }
 
-        uncompressedBuf.reserve(MAX_UNCOMPRESSED_SIZE);
-        compressedBuf.resize(BGZF_MAX_BLOCK_SIZE);
+        inputQueue = std::make_unique<rigtorp::SPSCQueue<WriteItem>>(config.InputQueueCapacity);
+        pool = std::make_unique<Parallel::ThreadPool<CompressedBatch>>(
+            Parallel::ThreadPool<CompressedBatch>::Config{
+                .NumThreads = config.BgzfWorkers,
+                .QueueMultiplier = 3,
+                .EnableMetrics = true,
+            });
+
+        try {
+            // Consumer must run before Submit() starts in producer-consumer mode.
+            ioWriterThread = std::jthread{[this](std::stop_token st) { IoWriterLoop(st); }};
+            packerThread = std::jthread{[this](std::stop_token st) { PackerLoop(st); }};
+        } catch (...) {
+            ShutdownPipelineNoThrow();
+            throw;
+        }
     }
 
     ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
+
+    void FinalizePoolNoThrow() noexcept
+    {
+        if (!pool) {
+            return;
+        }
+        try {
+            pool->Finalize();
+        } catch (...) {
+        }
+    }
+
+    void RequestStopThreads() noexcept
+    {
+        if (packerThread.joinable()) {
+            packerThread.request_stop();
+        }
+        if (ioWriterThread.joinable()) {
+            ioWriterThread.request_stop();
+        }
+    }
+
+    void JoinThreadsNoThrow() noexcept
+    {
+        if (packerThread.joinable()) {
+            try {
+                packerThread.join();
+            } catch (...) {
+            }
+        }
+        if (ioWriterThread.joinable()) {
+            try {
+                ioWriterThread.join();
+            } catch (...) {
+            }
+        }
+    }
+
+    void ShutdownPipelineNoThrow() noexcept
+    {
+        RequestStopThreads();
+        // ConsumeWith() can block until finalization; unblock before join.
+        FinalizePoolNoThrow();
+        JoinThreadsNoThrow();
+    }
+
+    void SetError(std::exception_ptr e) noexcept
+    {
+        std::lock_guard lock{errorMutex};
+        if (pipelineError.load(std::memory_order_relaxed)) {
+            return;
+        }
+        errorPtr = std::move(e);
+        pipelineError.store(true, std::memory_order_release);
+    }
+
+    void RethrowIfError() const
+    {
+        if (!pipelineError.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::lock_guard lock{errorMutex};
+        if (errorPtr) {
+            std::rethrow_exception(errorPtr);
+        }
+        throw std::runtime_error{"BgzfWriter: background pipeline failed"};
+    }
+
+    void PackerLoop(std::stop_token stopToken)
+    {
+        try {
+            const std::size_t batchLimit{static_cast<std::size_t>(config.BlocksPerBatch)};
+            std::vector<UncompressedBlock> batch{};
+            batch.reserve(batchLimit);
+            std::size_t emptyPollCount{0};
+
+            UncompressedBlock currentBlock{};
+            currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
+
+            const auto submitBatch = [&]() {
+                if (std::empty(batch)) {
+                    return;
+                }
+                std::vector<UncompressedBlock> blocks{};
+                blocks.swap(batch);
+                batch.reserve(batchLimit);
+
+                pool->Submit(
+                    [blocks = std::move(blocks), &comps = this->compressors,
+                     &ctr = this->counters](Parallel::ThreadIndex threadIdx) -> CompressedBatch {
+                        CompressedBatch result{};
+                        result.blocks.reserve(std::size(blocks));
+
+                        auto* comp{comps[threadIdx.Value()].get()};
+                        std::vector<std::uint8_t> cbuf(BGZF_MAX_BLOCK_SIZE);
+
+                        for (auto& block : blocks) {
+                            const auto t0{std::chrono::steady_clock::now()};
+                            const std::size_t compSize{libdeflate_deflate_compress(
+                                comp, std::data(block.data), std::size(block.data), std::data(cbuf),
+                                std::size(cbuf))};
+                            if (compSize == 0U) {
+                                throw std::runtime_error{"libdeflate_deflate_compress failed"};
+                            }
+                            const auto t1{std::chrono::steady_clock::now()};
+                            ctr.compressNs.fetch_add(
+                                static_cast<std::uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
+                                        .count()),
+                                std::memory_order_relaxed);
+
+                            const std::uint32_t crc{
+                                libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
+                            const std::uint32_t isize{
+                                static_cast<std::uint32_t>(std::size(block.data))};
+                            result.blocks.push_back(CompressedBatch::Block{
+                                .cdata = {std::begin(cbuf), std::begin(cbuf) + compSize},
+                                .crc32 = crc,
+                                .isize = isize,
+                                .callbacks = std::move(block.callbacks),
+                            });
+                            ctr.bytesCompressed.fetch_add(compSize, std::memory_order_relaxed);
+                        }
+
+                        return result;
+                    });
+            };
+
+            const auto flushIfBatchFull = [&]() {
+                if (std::size(batch) >= batchLimit) {
+                    submitBatch();
+                }
+            };
+
+            const auto sealBlock = [&]() {
+                if (!std::empty(currentBlock.data)) {
+                    batch.push_back(std::move(currentBlock));
+                    currentBlock = UncompressedBlock{};
+                    currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
+                    flushIfBatchFull();
+                }
+            };
+
+            while (!stopToken.stop_requested()) {
+                WriteItem* front{inputQueue->front()};
+                if (!front) {
+                    counters.packerStalls.fetch_add(1, std::memory_order_relaxed);
+                    ++emptyPollCount;
+                    if (emptyPollCount < 64) {
+                        std::this_thread::yield();
+                    } else {
+                        std::this_thread::sleep_for(std::chrono::microseconds{50});
+                    }
+                    continue;
+                }
+                emptyPollCount = 0;
+
+                WriteItem item{std::move(*front)};
+                inputQueue->pop();
+
+                if (item.kind == WriteItemKind::Close) {
+                    sealBlock();
+                    submitBatch();
+                    break;
+                }
+                if (item.kind != WriteItemKind::Data || std::empty(item.data)) {
+                    continue;
+                }
+
+                const bool fitsInSingleBlock{std::size(item.data) <= MAX_UNCOMPRESSED_SIZE};
+                if (fitsInSingleBlock && !std::empty(currentBlock.data) &&
+                    (std::size(currentBlock.data) + std::size(item.data) > MAX_UNCOMPRESSED_SIZE)) {
+                    sealBlock();
+                }
+
+                std::size_t dataPos{0};
+                bool callbackAssigned{false};
+                while (dataPos < std::size(item.data)) {
+                    if (std::size(currentBlock.data) >= MAX_UNCOMPRESSED_SIZE) {
+                        sealBlock();
+                    }
+
+                    const std::size_t space{MAX_UNCOMPRESSED_SIZE - std::size(currentBlock.data)};
+                    const std::size_t remaining{std::size(item.data) - dataPos};
+                    const std::size_t toCopy{std::ranges::min(space, remaining)};
+
+                    if (item.callback.active && !callbackAssigned) {
+                        item.callback.withinBlockOffset =
+                            static_cast<std::uint16_t>(std::size(currentBlock.data));
+                        currentBlock.callbacks.push_back(std::move(item.callback));
+                        callbackAssigned = true;
+                    }
+
+                    currentBlock.data.insert(
+                        std::ranges::end(currentBlock.data),
+                        std::ranges::begin(item.data) + static_cast<std::ptrdiff_t>(dataPos),
+                        std::ranges::begin(item.data) +
+                            static_cast<std::ptrdiff_t>(dataPos + toCopy));
+                    dataPos += toCopy;
+                }
+            }
+
+            pool->Finalize();
+        } catch (...) {
+            SetError(std::current_exception());
+            try {
+                pool->Finalize();
+            } catch (...) {
+            }
+        }
+    }
+
+    void WriteFrame(const CompressedBatch::Block& block)
+    {
+        const auto t0{std::chrono::steady_clock::now()};
+
+        const std::uint16_t xlen{6U};
+        const std::uint32_t blockSize{10U + 2U + xlen +
+                                      static_cast<std::uint32_t>(std::size(block.cdata)) + 8U};
+        if (blockSize > 65536U) {
+            throw std::runtime_error{"BgzfWriter: block size exceeds BGZF maximum"};
+        }
+        const std::uint16_t bsize{static_cast<std::uint16_t>(blockSize - 1U)};
+
+        const std::array<std::uint8_t, 18> frameHeader{
+            GZIP_ID1,
+            GZIP_ID2,
+            GZIP_CM_DEFLATE,
+            GZIP_FLG_FEXTRA,  // ID1, ID2, CM, FLG
+            0U,
+            0U,
+            0U,
+            0U,  // MTIME
+            0U,
+            0U,  // XFL, OS
+            static_cast<std::uint8_t>(xlen & 0xFFU),
+            static_cast<std::uint8_t>(xlen >> 8U),
+            BGZF_SI1,
+            BGZF_SI2,
+            2U,
+            0U,  // BC subfield ID + length
+            static_cast<std::uint8_t>(bsize & 0xFFU),
+            static_cast<std::uint8_t>(bsize >> 8U),
+        };
+        file.write(reinterpret_cast<const char*>(std::data(frameHeader)),
+                   static_cast<std::streamsize>(std::size(frameHeader)));
+        file.write(reinterpret_cast<const char*>(std::data(block.cdata)),
+                   static_cast<std::streamsize>(std::size(block.cdata)));
+
+        const std::array<std::uint8_t, 8> trailer{
+            static_cast<std::uint8_t>(block.crc32 & 0xFFU),
+            static_cast<std::uint8_t>((block.crc32 >> 8U) & 0xFFU),
+            static_cast<std::uint8_t>((block.crc32 >> 16U) & 0xFFU),
+            static_cast<std::uint8_t>((block.crc32 >> 24U) & 0xFFU),
+            static_cast<std::uint8_t>(block.isize & 0xFFU),
+            static_cast<std::uint8_t>((block.isize >> 8U) & 0xFFU),
+            static_cast<std::uint8_t>((block.isize >> 16U) & 0xFFU),
+            static_cast<std::uint8_t>((block.isize >> 24U) & 0xFFU),
+        };
+        file.write(reinterpret_cast<const char*>(std::data(trailer)),
+                   static_cast<std::streamsize>(std::size(trailer)));
+
+        if (!file.good()) {
+            throw std::runtime_error{"BgzfWriter: write failed"};
+        }
+
+        compressedOffset += blockSize;
+        const auto t1{std::chrono::steady_clock::now()};
+        counters.ioWriteNs.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+            std::memory_order_relaxed);
+    }
+
+    void FireCallbacks(const CompressedBatch::Block& block, std::uint64_t blockFileOffset)
+    {
+        IndexCallbackFn callback{};
+        {
+            const std::lock_guard lock{callbackMutex};
+            callback = indexCallback;
+        }
+        if (!callback || std::empty(block.callbacks)) {
+            return;
+        }
+
+        const auto t0{std::chrono::steady_clock::now()};
+        for (const auto& cb : block.callbacks) {
+            const VirtualOffset offset{blockFileOffset, cb.withinBlockOffset};
+            callback(static_cast<std::int64_t>(offset.Value()),
+                     std::span<const std::byte>{cb.rawData});
+        }
+        const auto t1{std::chrono::steady_clock::now()};
+        counters.callbackNs.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+            std::memory_order_relaxed);
+    }
+
+    void IoWriterLoop(std::stop_token /*stopToken*/)
+    {
+        try {
+            while (true) {
+                if (pool->GetMetrics().CurrentResultQueueDepth == 0U) {
+                    counters.writerStalls.fetch_add(1, std::memory_order_relaxed);
+                }
+                const bool keepConsuming = pool->ConsumeWith([this](CompressedBatch batch) {
+                    for (const auto& block : batch.blocks) {
+                        const std::uint64_t blockFileOffset{compressedOffset};
+                        WriteFrame(block);
+                        FireCallbacks(block, blockFileOffset);
+                        counters.blocksWritten.fetch_add(1, std::memory_order_relaxed);
+                    }
+                });
+                if (!keepConsuming) {
+                    break;
+                }
+            }
+        } catch (...) {
+            SetError(std::current_exception());
+        }
+    }
 };
 
-BgzfWriter::BgzfWriter(const std::filesystem::path& path, int compressionLevel)
-    : impl_{std::make_unique<Impl>(path, compressionLevel)}
+BgzfWriter::BgzfWriter(const std::filesystem::path& path, const BgzfWriterConfig& config)
+    : impl_{std::make_unique<Impl>(path, config)}
 {
 }
 
 BgzfWriter::~BgzfWriter()
 {
     if ((impl_ != nullptr) && (!impl_->closed)) {
-        Close();
+        try {
+            Close();
+        } catch (...) {
+        }
     }
 }
 
 BgzfWriter::BgzfWriter(BgzfWriter&&) noexcept = default;
 BgzfWriter& BgzfWriter::operator=(BgzfWriter&&) noexcept = default;
 
+void BgzfWriter::SetCallback(IndexCallbackFn callback)
+{
+    const std::lock_guard lock{impl_->callbackMutex};
+    impl_->indexCallback = std::move(callback);
+}
+
 void BgzfWriter::Write(std::span<const std::byte> data)
 {
-    while (!std::empty(data)) {
-        const std::size_t space{MAX_UNCOMPRESSED_SIZE - std::size(impl_->uncompressedBuf)};
-        const std::size_t toCopy{std::ranges::min(space, std::size(data))};
-        const std::span<const std::byte> chunk{data.first(toCopy)};
+    if (std::empty(data)) {
+        return;
+    }
+    Write(std::vector<std::byte>{std::ranges::begin(data), std::ranges::end(data)},
+          PendingCallback{});
+}
 
-        impl_->uncompressedBuf.insert(std::ranges::end(impl_->uncompressedBuf),
-                                      std::ranges::begin(chunk), std::ranges::end(chunk));
-        data = data.subspan(toCopy);
+void BgzfWriter::Write(std::vector<std::byte>&& data) { Write(std::move(data), PendingCallback{}); }
 
-        if (std::size(impl_->uncompressedBuf) >= MAX_UNCOMPRESSED_SIZE) {
-            FlushBlock();
-        }
+void BgzfWriter::Write(std::span<const std::byte> data, const PendingCallback& callback)
+{
+    if (std::empty(data)) {
+        return;
+    }
+    Write(std::vector<std::byte>{std::ranges::begin(data), std::ranges::end(data)},
+          PendingCallback{callback});
+}
+
+void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
+{
+    if (impl_->closed) {
+        throw std::runtime_error{"BgzfWriter: Write() called after Close()"};
+    }
+    impl_->RethrowIfError();
+
+    while (!impl_->inputQueue->try_emplace(WriteItemKind::Data, std::move(data),
+                                           std::move(callback))) {
+        impl_->RethrowIfError();
+        impl_->counters.callerStalls.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::yield();
     }
 }
 
@@ -399,100 +844,76 @@ void BgzfWriter::Close()
     if (impl_->closed) {
         return;
     }
-
-    if (!std::empty(impl_->uncompressedBuf)) {
-        FlushBlock();
-    }
-
-    impl_->file.write(reinterpret_cast<const char*>(std::data(BGZF_EOF_MARKER)),
-                      static_cast<std::streamsize>(std::size(BGZF_EOF_MARKER)));
-    if (!impl_->file.good()) {
-        throw std::runtime_error{"BgzfWriter: write failed during EOF marker"};
-    }
-
-    impl_->file.close();
-    if (impl_->file.fail()) {
-        throw std::runtime_error{"BgzfWriter: close failed"};
-    }
+    // Enter terminal state immediately: after Close() starts, no further writes
+    // are valid even if teardown later throws.
     impl_->closed = true;
+
+    try {
+        bool closeQueued{false};
+        while (!closeQueued) {
+            closeQueued = impl_->inputQueue->try_emplace(WriteItemKind::Close);
+            if (closeQueued) {
+                break;
+            }
+            if (impl_->pipelineError.load(std::memory_order_acquire)) {
+                break;
+            }
+            std::this_thread::yield();
+        }
+
+        if (!closeQueued) {
+            impl_->ShutdownPipelineNoThrow();
+        } else {
+            if (impl_->packerThread.joinable()) {
+                impl_->packerThread.join();
+            }
+            if (impl_->ioWriterThread.joinable()) {
+                impl_->ioWriterThread.join();
+            }
+        }
+
+        impl_->RethrowIfError();
+
+        impl_->file.write(reinterpret_cast<const char*>(std::data(BGZF_EOF_MARKER)),
+                          static_cast<std::streamsize>(std::size(BGZF_EOF_MARKER)));
+        if (!impl_->file.good()) {
+            throw std::runtime_error{"BgzfWriter: write failed during EOF marker"};
+        }
+        impl_->file.close();
+        if (impl_->file.fail()) {
+            throw std::runtime_error{"BgzfWriter: close failed"};
+        }
+    } catch (...) {
+        impl_->ShutdownPipelineNoThrow();
+        if (impl_->file.is_open()) {
+            impl_->file.close();
+        }
+        throw;
+    }
 }
 
-void BgzfWriter::FlushBlock()
+BgzfWriteMetrics BgzfWriter::GetMetrics() const
 {
-    const std::vector<std::byte>& uncompressedBuffer{impl_->uncompressedBuf};
-    std::vector<std::uint8_t>& compressedBuffer{impl_->compressedBuf};
+    BgzfWriteMetrics m{};
+    m.CallerStalls = impl_->counters.callerStalls.load(std::memory_order_relaxed);
+    m.PackerStalls = impl_->counters.packerStalls.load(std::memory_order_relaxed);
+    m.CompressNs = impl_->counters.compressNs.load(std::memory_order_relaxed);
+    m.BytesCompressed = impl_->counters.bytesCompressed.load(std::memory_order_relaxed);
+    m.BlocksWritten = impl_->counters.blocksWritten.load(std::memory_order_relaxed);
+    m.IoWriteNs = impl_->counters.ioWriteNs.load(std::memory_order_relaxed);
+    m.WriterStalls = impl_->counters.writerStalls.load(std::memory_order_relaxed);
+    m.CallbackNs = impl_->counters.callbackNs.load(std::memory_order_relaxed);
 
-    const std::size_t compressedSize{libdeflate_deflate_compress(
-        impl_->compressor.get(), std::data(uncompressedBuffer), std::size(uncompressedBuffer),
-        std::data(compressedBuffer), std::size(compressedBuffer))};
-    if (compressedSize == 0U) {
-        throw std::runtime_error{"BGZF compression failed"};
+    if (impl_->pool) {
+        const auto snap{impl_->pool->GetMetrics()};
+        m.PoolQueueDepth = snap.CurrentQueueDepth;
+        m.PoolPeakQueueDepth = snap.PeakQueueDepth;
+        m.PoolActiveWorkers = snap.CurrentActiveTasks;
+        m.PoolPeakActiveWorkers = snap.PeakActiveTasks;
+        m.PoolResultQueueDepth = snap.CurrentResultQueueDepth;
+        m.PoolPeakResultQueueDepth = snap.PeakResultQueueDepth;
     }
-
-    const std::uint32_t crc{
-        libdeflate_crc32(0, std::data(uncompressedBuffer), std::size(uncompressedBuffer))};
-    const std::uint32_t isize{static_cast<std::uint32_t>(std::size(uncompressedBuffer))};
-
-    const std::uint16_t xlen{6U};
-    const std::uint32_t blockSize{10U + 2U + xlen + static_cast<std::uint32_t>(compressedSize) +
-                                  8U};
-    const std::uint16_t bsize{static_cast<std::uint16_t>(blockSize - 1U)};
-
-    std::ofstream& file{impl_->file};
-
-    // Combined: BGZF header (12B) + BC extra field (6B) = 18B — one syscall
-    const std::array<std::uint8_t, 18> frameHeader{
-        31U,
-        139U,
-        8U,
-        4U,  // ID1, ID2, CM, FLG
-        0U,
-        0U,
-        0U,
-        0U,  // MTIME
-        0U,
-        0U,  // XFL, OS
-        static_cast<std::uint8_t>(xlen & 0xFFU),
-        static_cast<std::uint8_t>(xlen >> 8U),
-        66U,
-        67U,
-        2U,
-        0U,  // BC subfield ID + length
-        static_cast<std::uint8_t>(bsize & 0xFFU),
-        static_cast<std::uint8_t>(bsize >> 8U),
-    };
-    file.write(reinterpret_cast<const char*>(std::data(frameHeader)),
-               static_cast<std::streamsize>(std::size(frameHeader)));
-
-    file.write(reinterpret_cast<const char*>(std::data(compressedBuffer)),
-               static_cast<std::streamsize>(compressedSize));
-
-    // Combined: CRC32 (4B) + ISIZE (4B) = 8B — one syscall
-    const std::array<std::uint8_t, 8> trailer{
-        static_cast<std::uint8_t>(crc & 0xFFU),
-        static_cast<std::uint8_t>((crc >> 8U) & 0xFFU),
-        static_cast<std::uint8_t>((crc >> 16U) & 0xFFU),
-        static_cast<std::uint8_t>((crc >> 24U) & 0xFFU),
-        static_cast<std::uint8_t>(isize & 0xFFU),
-        static_cast<std::uint8_t>((isize >> 8U) & 0xFFU),
-        static_cast<std::uint8_t>((isize >> 16U) & 0xFFU),
-        static_cast<std::uint8_t>((isize >> 24U) & 0xFFU),
-    };
-    file.write(reinterpret_cast<const char*>(std::data(trailer)),
-               static_cast<std::streamsize>(std::size(trailer)));
-
-    if (!file.good()) {
-        throw std::runtime_error{"BgzfWriter: write failed during BGZF block flush"};
-    }
-
-    impl_->uncompressedBuf.clear();
-    impl_->compressedOffset_ = impl_->file.tellp();
-}
-
-VirtualOffset BgzfWriter::Tell() const
-{
-    return VirtualOffset{impl_->compressedOffset_,
-                         static_cast<std::uint16_t>(std::size(impl_->uncompressedBuf))};
+    return m;
 }
 
 // =============================================================================
@@ -741,7 +1162,8 @@ void BgzfPipeline::Impl::StartPipeline()
             .EnableMetrics = true,
         });
 
-    // Start consumer thread first — must enter ConsumeWith() before IO thread calls Submit()
+    // Start consumer thread first — must enter ConsumeWith() before IO thread
+    // calls Submit()
     consumerThread = std::jthread{[this](std::stop_token st) { ConsumerLoop(st); }};
 
     // Start IO thread
@@ -760,7 +1182,8 @@ void BgzfPipeline::Impl::StopPipeline()
         consumerThread.request_stop();
     }
 
-    // 3. Finalize pool — stops workers, unblocks Submit(), makes ConsumeWith() return false
+    // 3. Finalize pool — stops workers, unblocks Submit(), makes ConsumeWith()
+    // return false
     if (pool) {
         try {
             pool->Finalize();
@@ -992,7 +1415,8 @@ void BgzfPipeline::Impl::ConsumerLoop(std::stop_token stopToken)
                 RawRecord view{std::span<const std::byte>{
                     std::data(accumulator) + pos + RECORD_BLOCK_SIZE_FIELD, blockSize}};
 
-                // Push to SPSC — spin while queue is full (reader drains on another core).
+                // Push to SPSC — spin while queue is full (reader drains on another
+                // core).
                 while (!outputQueue->try_push(std::move(view))) {
                     if (stopToken.stop_requested()) {
                         counters.recordParseNs.fetch_add(

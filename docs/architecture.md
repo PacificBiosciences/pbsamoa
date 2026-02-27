@@ -74,7 +74,7 @@ this codebase.
 │                                                                        │
 │  BgzfReader ─────► VirtualOffset (current position)                    │
 │                                                                        │
-│  BgzfWriter ─────► VirtualOffset (current position)                    │
+│  BgzfWriter ─────► parallel compression pipeline + callback dispatch    │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -122,9 +122,13 @@ Supports `Seek()` to any `VirtualOffset`.
 
 ### BgzfWriter
 
-Accumulates data into 64 KiB blocks and compresses each with libdeflate.
-Compression level 1–12 (default 6). Appends the standard 28-byte EOF marker
-on close.
+Accumulates data into 64 KiB blocks and compresses each with libdeflate in a
+parallel writer pipeline. Compression level 1–12 (default 6). Appends the
+standard 28-byte EOF marker on close.
+
+When a callback is configured (via `BamWriter`), callback dispatch happens on
+the BGZF IO writer thread after block file offsets are known, not on the caller
+thread. Callbacks can be deferred until `Close()`.
 
 ### VirtualOffset
 

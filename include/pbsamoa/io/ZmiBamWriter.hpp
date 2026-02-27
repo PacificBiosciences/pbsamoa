@@ -4,6 +4,7 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
+#include <pbsamoa/io/BamWriter.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -23,9 +24,8 @@ class ZmiBamWriter
 public:
     /// \param[in] bamPath output BAM file path (.zmi created alongside)
     /// \param[in] header SAM header
-    /// \param[in] compressionLevel libdeflate level 1-12 (default 6)
     ZmiBamWriter(const std::filesystem::path& bamPath, const SamHeader& header,
-                 int compressionLevel = 6);
+                 const BamWriterConfig& config = BamWriterConfig{});
     ~ZmiBamWriter();
 
     ZmiBamWriter(const ZmiBamWriter&) = delete;
@@ -42,7 +42,8 @@ public:
     /// \brief Write a batch of records.
     void WriteBatch(const RawRecordBatch& batch);
 
-    /// \brief Flush and close both BAM and ZMI. Called automatically by destructor.
+    /// \brief Flush and close both BAM and ZMI. Called automatically by
+    /// destructor.
     void Close();
 
 private:

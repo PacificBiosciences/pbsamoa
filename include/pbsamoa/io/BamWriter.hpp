@@ -2,6 +2,7 @@
 #define PBSAMOA_IO_BAMWRITER_HPP
 
 #include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 
@@ -16,9 +17,17 @@
 namespace PacBio {
 namespace Samoa {
 
-/// \brief Callback invoked after each record write with virtual offset and raw data.
+/// \brief Callback invoked with virtual offset and raw data for each record.
+///
+/// Callbacks are dispatched asynchronously from BgzfWriter's IO thread once
+/// final block offsets are known (possibly during Close()).
 using IndexCallback =
     std::function<void(std::int64_t virtualOffset, std::span<const std::byte> rawData)>;
+
+struct BamWriterConfig
+{
+    BgzfWriterConfig BgzfConfig{};
+};
 
 /// \brief Writes BAM files via BGZF compression.
 ///
@@ -27,17 +36,11 @@ using IndexCallback =
 class BamWriter
 {
 public:
-    /// \param[in] path output BAM file path
-    /// \param[in] header SAM header to write
-    /// \param[in] compressionLevel libdeflate level 1-12 (default 6)
-    BamWriter(const std::filesystem::path& path, const SamHeader& header, int compressionLevel = 6);
+    BamWriter(const std::filesystem::path& path, const SamHeader& header,
+              const BamWriterConfig& config = BamWriterConfig{});
 
-    /// \param[in] path output BAM file path
-    /// \param[in] header SAM header to write
-    /// \param[in] compressionLevel libdeflate level 1-12
-    /// \param[in] callback invoked after each record write with virtual offset and raw data
-    BamWriter(const std::filesystem::path& path, const SamHeader& header, int compressionLevel,
-              IndexCallback callback);
+    BamWriter(const std::filesystem::path& path, const SamHeader& header,
+              const BamWriterConfig& config, IndexCallback callback);
     ~BamWriter();
 
     BamWriter(const BamWriter&) = delete;
@@ -59,6 +62,9 @@ public:
 
     /// \brief Flush and close. Called automatically by destructor.
     void Close();
+
+    /// \brief Snapshot writer metrics.
+    WriterMetrics GetMetrics() const;
 
 private:
     struct Impl;

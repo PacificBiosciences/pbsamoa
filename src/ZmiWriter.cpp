@@ -35,7 +35,13 @@ struct ZmiWriter::Impl
     std::uint64_t numRecords{0};
     bool closed{false};
 
-    explicit Impl(const std::filesystem::path& path) : bgzf{path, 6}
+    explicit Impl(const std::filesystem::path& path)
+        : bgzf{path, BgzfWriterConfig{
+                         .CompressionLevel = 6,
+                         .BgzfWorkers = 1,
+                         .InputQueueCapacity = 256,
+                         .BlocksPerBatch = 8,
+                     }}
     {
         // Write the 64-byte header with numRecords = 0 as a placeholder.
         //
@@ -83,7 +89,8 @@ ZmiWriter& ZmiWriter::operator=(ZmiWriter&&) noexcept = default;
 
 void ZmiWriter::AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virtualOffset)
 {
-    // Each entry is 16 bytes: rgId(4) + zmw(4) + virtualOffset(8), all little-endian.
+    // Each entry is 16 bytes: rgId(4) + zmw(4) + virtualOffset(8), all
+    // little-endian.
     std::array<std::byte, ZMI_ENTRY_SIZE> entry{};
     WriteLE(std::data(entry), rgId);
     WriteLE(std::data(entry) + 4, zmw);

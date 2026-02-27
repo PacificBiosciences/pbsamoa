@@ -14,15 +14,34 @@ struct ZmiBamWriter::Impl
 {
     ZmiWriter zmi;
     BamWriter bam;
-    std::int32_t pendingRgId_{0};
-    std::int32_t pendingZmw_{0};
     bool closed{false};
 
-    Impl(const std::filesystem::path& bamPath, const SamHeader& header, int compressionLevel)
+    static std::int32_t ParseZmwFromRawRecord(std::span<const std::byte> rawData)
+    {
+        // rawData starts at BAM refID; l_read_name is byte 8, read name starts at
+        // byte 32.
+        constexpr std::size_t FixedFieldsSize{32};
+        constexpr std::size_t NameLengthOffset{8};
+
+        if (std::size(rawData) <= NameLengthOffset) {
+            return 0;
+        }
+        const std::uint8_t lReadName{std::to_integer<std::uint8_t>(rawData[NameLengthOffset])};
+        if ((lReadName == 0U) || (std::size(rawData) < (FixedFieldsSize + lReadName))) {
+            return 0;
+        }
+
+        const char* namePtr{reinterpret_cast<const char*>(std::data(rawData) + FixedFieldsSize)};
+        const std::string_view readName{namePtr, static_cast<std::size_t>(lReadName - 1U)};
+        return ParseZmwFromName(readName);
+    }
+
+    Impl(const std::filesystem::path& bamPath, const SamHeader& header, const BamWriterConfig& cfg)
         : zmi{std::filesystem::path{bamPath.string() + ".zmi"}}
-        , bam{bamPath, header, compressionLevel,
-              [this](std::int64_t virtualOffset, std::span<const std::byte> /*rawData*/) {
-                  zmi.AddRecord(pendingRgId_, pendingZmw_, virtualOffset);
+        , bam{bamPath, header, cfg,
+              [this](std::int64_t virtualOffset, std::span<const std::byte> rawData) {
+                  const std::int32_t zmw{ParseZmwFromRawRecord(rawData)};
+                  zmi.AddRecord(0, zmw, virtualOffset);
               }}
     {
     }
@@ -33,8 +52,8 @@ struct ZmiBamWriter::Impl
 };
 
 ZmiBamWriter::ZmiBamWriter(const std::filesystem::path& bamPath, const SamHeader& header,
-                           int compressionLevel)
-    : impl_{std::make_unique<Impl>(bamPath, header, compressionLevel)}
+                           const BamWriterConfig& config)
+    : impl_{std::make_unique<Impl>(bamPath, header, config)}
 {
 }
 
@@ -48,19 +67,9 @@ ZmiBamWriter::~ZmiBamWriter()
 ZmiBamWriter::ZmiBamWriter(ZmiBamWriter&&) noexcept = default;
 ZmiBamWriter& ZmiBamWriter::operator=(ZmiBamWriter&&) noexcept = default;
 
-void ZmiBamWriter::Write(const BamRecord& record)
-{
-    impl_->pendingRgId_ = 0;
-    impl_->pendingZmw_ = ParseZmwFromName(record.Name());
-    impl_->bam.Write(record);
-}
+void ZmiBamWriter::Write(const BamRecord& record) { impl_->bam.Write(record); }
 
-void ZmiBamWriter::Write(const RawRecord& view)
-{
-    impl_->pendingRgId_ = 0;
-    impl_->pendingZmw_ = ParseZmwFromName(view.Name());
-    impl_->bam.Write(view);
-}
+void ZmiBamWriter::Write(const RawRecord& view) { impl_->bam.Write(view); }
 
 void ZmiBamWriter::WriteBatch(const RawRecordBatch& batch)
 {

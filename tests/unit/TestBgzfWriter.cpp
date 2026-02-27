@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <thread>
@@ -28,6 +29,28 @@ protected:
 
     void TearDown() override { std::filesystem::remove(tmpPath_); }
 };
+
+TEST(BgzfWriterConfigTest, DefaultValues)
+{
+    const BgzfWriterConfig config{};
+    EXPECT_EQ(config.CompressionLevel, 6);
+    EXPECT_EQ(config.BgzfWorkers, 4U);
+    EXPECT_EQ(config.InputQueueCapacity, 256U);
+    EXPECT_EQ(config.BlocksPerBatch, 32);
+}
+
+TEST(BgzfWriteMetricsTest, DefaultValues)
+{
+    const BgzfWriteMetrics metrics{};
+    EXPECT_EQ(metrics.CallerStalls, 0U);
+    EXPECT_EQ(metrics.PackerStalls, 0U);
+    EXPECT_EQ(metrics.CompressNs, 0U);
+    EXPECT_EQ(metrics.BytesCompressed, 0U);
+    EXPECT_EQ(metrics.BlocksWritten, 0U);
+    EXPECT_EQ(metrics.IoWriteNs, 0U);
+    EXPECT_EQ(metrics.WriterStalls, 0U);
+    EXPECT_EQ(metrics.CallbackNs, 0U);
+}
 
 TEST_F(BgzfWriterTest, WriteAndReadBack)
 {
@@ -117,32 +140,115 @@ TEST_F(BgzfWriterTest, MultipleSmallWrites)
     EXPECT_EQ(result, "Hello, world!");
 }
 
-TEST_F(BgzfWriterTest, TellReturnsVirtualOffset)
+TEST_F(BgzfWriterTest, ConstructWithConfig)
 {
-    BgzfWriter writer{tmpPath_};
+    const BgzfWriterConfig config{
+        .CompressionLevel = 4,
+        .BgzfWorkers = 2,
+    };
+    BgzfWriter writer{tmpPath_, config};
+    writer.Close();
+    EXPECT_TRUE(std::filesystem::exists(tmpPath_));
+}
 
-    // Before any writes, Tell should be (0, 0)
-    const VirtualOffset pos0{writer.Tell()};
-    EXPECT_EQ(pos0.BlockOffset(), 0u);
-    EXPECT_EQ(pos0.WithinBlockOffset(), 0u);
+TEST_F(BgzfWriterTest, WriteWithCallback)
+{
+    std::vector<std::pair<std::int64_t, std::vector<std::byte>>> received;
+    std::mutex mu;
 
-    // Write some data (smaller than one block)
-    const std::string data{"Hello"};
-    writer.Write(std::as_bytes(std::span{std::data(data), std::size(data)}));
+    auto callback = [&](std::int64_t offset, std::span<const std::byte> data) {
+        std::lock_guard lock{mu};
+        received.emplace_back(offset, std::vector<std::byte>{std::begin(data), std::end(data)});
+    };
 
-    // Within-block offset should advance, block offset still 0
-    const VirtualOffset pos1{writer.Tell()};
-    EXPECT_EQ(pos1.BlockOffset(), 0u);
-    EXPECT_EQ(pos1.WithinBlockOffset(), 5u);
+    BgzfWriter writer{tmpPath_, BgzfWriterConfig{.BgzfWorkers = 2}};
+    writer.SetCallback(std::move(callback));
 
-    // Write enough to force a block flush (MAX_UNCOMPRESSED_SIZE = 0xFF00 = 65280)
-    std::vector<std::byte> filler(65280 - 5);
-    writer.Write(filler);
+    for (int i{0}; i < 3; ++i) {
+        std::vector<std::byte> record(100);
+        std::ranges::fill(record, static_cast<std::byte>(i));
+        const PendingCallback cb{
+            .rawData = record,
+            .active = true,
+        };
+        writer.Write(record, cb);
+    }
+    writer.Close();
 
-    // After flush: block offset should be nonzero, within-block offset 0
-    const VirtualOffset pos2{writer.Tell()};
-    EXPECT_GT(pos2.BlockOffset(), 0u);
-    EXPECT_EQ(pos2.WithinBlockOffset(), 0u);
+    std::lock_guard lock{mu};
+    ASSERT_EQ(std::size(received), 3U);
+    for (std::size_t i{1}; i < std::size(received); ++i) {
+        EXPECT_GE(received[i].first, received[i - 1].first);
+    }
+}
+
+TEST_F(BgzfWriterTest, MetricsPopulatedAfterWrite)
+{
+    BgzfWriter writer{tmpPath_, BgzfWriterConfig{.BgzfWorkers = 2}};
+    std::vector<std::byte> chunk(32000U);
+    for (int i{0}; i < 20; ++i) {
+        writer.Write(chunk);
+    }
+    writer.Close();
+
+    const BgzfWriteMetrics metrics{writer.GetMetrics()};
+    EXPECT_GT(metrics.BlocksWritten, 0U);
+    EXPECT_GT(metrics.BytesCompressed, 0U);
+    EXPECT_GT(metrics.CompressNs, 0U);
+    EXPECT_GT(metrics.IoWriteNs, 0U);
+}
+
+TEST_F(BgzfWriterTest, OversizedRecordIsSplitAcrossBlocksAndCallbackFiresOnce)
+{
+    std::vector<std::byte> input(200000U);
+    for (std::size_t i{0}; i < std::size(input); ++i) {
+        input[i] = static_cast<std::byte>(i & 0xFFU);
+    }
+
+    std::vector<std::vector<std::byte>> callbackData;
+    std::vector<std::int64_t> callbackOffsets;
+    std::mutex mu;
+
+    BgzfWriter writer{tmpPath_, BgzfWriterConfig{
+                                    .BgzfWorkers = 2,
+                                    .BlocksPerBatch = 1,
+                                }};
+    writer.SetCallback([&](std::int64_t offset, std::span<const std::byte> rawData) {
+        std::lock_guard lock{mu};
+        callbackOffsets.push_back(offset);
+        callbackData.emplace_back(std::ranges::begin(rawData), std::ranges::end(rawData));
+    });
+
+    PendingCallback cb{
+        .rawData = input,
+        .active = true,
+    };
+    writer.Write(input, cb);
+    writer.Close();
+
+    {
+        const std::lock_guard lock{mu};
+        ASSERT_EQ(std::size(callbackOffsets), 1U);
+        ASSERT_EQ(std::size(callbackData), 1U);
+        EXPECT_TRUE(std::ranges::equal(callbackData.front(), input));
+    }
+
+    BgzfReader reader{tmpPath_};
+    std::vector<std::byte> output{};
+    std::vector<std::byte> buffer(65536U);
+    while (true) {
+        const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
+        ASSERT_TRUE(bytesRead.has_value());
+        if (*bytesRead == 0U) {
+            break;
+        }
+        output.insert(std::ranges::end(output), std::ranges::begin(buffer),
+                      std::ranges::begin(buffer) + static_cast<std::ptrdiff_t>(*bytesRead));
+    }
+    EXPECT_TRUE(std::ranges::equal(output, input));
+
+    const BgzfWriteMetrics metrics{writer.GetMetrics()};
+    EXPECT_GE(metrics.BlocksWritten, 2U);
 }
 
 }  // namespace Samoa

@@ -8,9 +8,11 @@
 #include <array>
 #include <compare>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include <cstddef>
 #include <cstdint>
@@ -106,7 +108,8 @@ inline constexpr std::array<std::byte, 28> BGZF_EOF_MARKER = {
 /// \brief Reads and decompresses BGZF-compressed files block by block.
 ///
 /// Synchronous single-threaded decompression. For parallel decompression,
-/// use BgzfPipeline via BamRawReader(path, BamRawReaderConfig{.BgzfWorkers = N}).
+/// use BgzfPipeline via BamRawReader(path, BamRawReaderConfig{.BgzfWorkers =
+/// N}).
 class BgzfReader
 {
 public:
@@ -142,6 +145,24 @@ private:
 // BgzfWriter
 // ---------------------------------------------------------------------------
 
+struct BgzfWriterConfig
+{
+    int CompressionLevel{6};
+    std::size_t BgzfWorkers{4};
+    std::size_t InputQueueCapacity{256};
+    std::int32_t BlocksPerBatch{32};
+};
+
+/// \brief Metadata attached to a queued write for deferred callbacks.
+struct PendingCallback
+{
+    std::uint16_t withinBlockOffset{0};
+    std::vector<std::byte> rawData;
+    std::int32_t rgId{0};
+    std::int32_t zmw{0};
+    bool active{false};
+};
+
 /// \brief Writes BGZF-compressed output files.
 ///
 /// Data is accumulated into blocks of up to 64 KiB, compressed via
@@ -149,8 +170,10 @@ private:
 class BgzfWriter
 {
 public:
-    /// \param[in] compressionLevel libdeflate level 1-12 (default 6)
-    explicit BgzfWriter(const std::filesystem::path& path, int compressionLevel = 6);
+    using IndexCallbackFn = std::function<void(std::int64_t, std::span<const std::byte>)>;
+
+    explicit BgzfWriter(const std::filesystem::path& path,
+                        const BgzfWriterConfig& config = BgzfWriterConfig{});
     ~BgzfWriter();
 
     BgzfWriter(const BgzfWriter&) = delete;
@@ -162,22 +185,34 @@ public:
     /// Data is buffered and compressed in 64 KiB blocks.
     void Write(std::span<const std::byte> data);
 
-    /// \brief Returns the current write position as a virtual offset.
+    /// \brief Write an owned payload without copying.
+    void Write(std::vector<std::byte>&& data);
+
+    /// \brief Write uncompressed data with callback metadata.
+    void Write(std::span<const std::byte> data, const PendingCallback& callback);
+
+    /// \brief Write an owned payload without copying, with callback metadata.
+    void Write(std::vector<std::byte>&& data, PendingCallback callback);
+
+    /// \brief Set callback invoked from the IO writer thread when offsets are known.
     ///
-    /// The block offset is the compressed file position of the current
-    /// (or next) BGZF block, and the within-block offset is the number
-    /// of uncompressed bytes buffered so far in the current block.
-    VirtualOffset Tell() const;
+    /// Callback dispatch is asynchronous relative to Write() and may be deferred
+    /// until Close() drains all queued blocks.
+    void SetCallback(IndexCallbackFn callback);
 
     /// \brief Flush remaining buffered data and close.
     /// Called automatically by destructor.
+    ///
+    /// Call Close() explicitly to observe I/O errors. Errors that occur during
+    /// destructor-driven close are suppressed.
     void Close();
+
+    /// \brief Snapshot writer metrics.
+    BgzfWriteMetrics GetMetrics() const;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-
-    void FlushBlock();
 };
 
 // ---------------------------------------------------------------------------
@@ -198,7 +233,8 @@ class BgzfPipeline
 {
 public:
     /// \param[in] path BAM/BGZF file to read
-    /// \param[in] numWorkers number of decompression worker threads (0 = synchronous)
+    /// \param[in] numWorkers number of decompression worker threads (0 =
+    /// synchronous)
     /// \throws std::runtime_error if file cannot be opened
     explicit BgzfPipeline(const std::filesystem::path& path, std::size_t numWorkers);
     ~BgzfPipeline();

@@ -189,18 +189,31 @@ Writes BGZF-compressed BAM files.
 ### Construction
 
 ```cpp
-// Default compression (level 6)
-BamWriter writer{"output.bam", header};
+// Default writer config
+BamWriter defaultWriter{"output.bam", header};
 
-// Custom compression level (1 = fastest, 12 = smallest)
-BamWriter writer{"output.bam", header, 1};
+// Custom BGZF settings
+BamWriterConfig cfg{
+    .BgzfConfig = {
+        .CompressionLevel = 1,      // 1 = fastest, 12 = smallest
+        .BgzfWorkers = 4,
+        .InputQueueCapacity = 256,
+        .BlocksPerBatch = 32,
+    },
+};
+BamWriter tunedWriter{"output.bam", header, cfg};
 
 // With index callback (for building BAI alongside writing)
-BamWriter writer{"output.bam", header, 6, [](std::int64_t vOffset,
-                                              std::span<const std::byte> raw) {
+BamWriter indexedWriter{"output.bam", header, cfg, [](std::int64_t vOffset,
+                                                      std::span<const std::byte> raw) {
     // track offsets for index building
 }};
 ```
+
+Index callback notes:
+- Callback runs asynchronously on the BGZF IO writer thread.
+- Callback can be invoked after `Write()` returns (often during `Close()`).
+- Call `Close()` explicitly to surface write/close errors (destructor close suppresses errors).
 
 ### Writing records
 
@@ -577,10 +590,21 @@ BGZF compression. Accumulates into 64 KiB blocks, compresses with
 libdeflate.
 
 ```cpp
-BgzfWriter writer{"output.gz", 6};  // compression level 1-12
+BgzfWriterConfig cfg{
+    .CompressionLevel = 6,
+    .BgzfWorkers = 4,
+    .InputQueueCapacity = 256,
+    .BlocksPerBatch = 32,
+};
+BgzfWriter writer{"output.gz", cfg};
 writer.Write(data);
-writer.Close();  // appends EOF marker
+writer.Close();  // call explicitly to observe errors
 ```
+
+Close semantics:
+- `Close()` transitions the writer to a terminal state; later `Write()` calls throw.
+- If `Close()` throws, treat the writer as closed/failed and do not reuse it.
+- Destructor still attempts close, but suppresses exceptions.
 
 ---
 

@@ -58,6 +58,13 @@ protected:
     }
 };
 
+TEST(BamWriterConfigTest, CompositeDefaults)
+{
+    const BamWriterConfig config{};
+    EXPECT_EQ(config.BgzfConfig.CompressionLevel, 6);
+    EXPECT_EQ(config.BgzfConfig.BgzfWorkers, 4U);
+}
+
 TEST_F(BamWriterTest, WriteHeaderOnly)
 {
     const SamHeader header = MakeMinimalHeader();
@@ -252,7 +259,10 @@ TEST_F(BamWriterTest, IndexCallbackInvokedPerRecord)
             capturedOffsets.push_back(offset);
         };
 
-        BamWriter writer{tmpPath, header, 6, std::move(callback)};
+        const BamWriterConfig config{
+            .BgzfConfig = {.BgzfWorkers = 4},
+        };
+        BamWriter writer{tmpPath, header, config, std::move(callback)};
         for (int i{0}; i < 5; ++i) {
             BamRecord rec = MakeTestRecord();
             rec.Name(std::format("read{}", i));
@@ -279,6 +289,37 @@ TEST_F(BamWriterTest, NoCallbackStillWorks)
     const auto view = reader.ReadRecord();
     ASSERT_TRUE(view.has_value());
     EXPECT_EQ(view->Name(), "read1");
+}
+
+TEST_F(BamWriterTest, ConstructWithConfig)
+{
+    const BamWriterConfig config{
+        .BgzfConfig = {.CompressionLevel = 4, .BgzfWorkers = 2},
+    };
+    BamWriter writer{tmpPath, MakeMinimalHeader(), config};
+    writer.Write(MakeTestRecord());
+    writer.Close();
+
+    BamRawReader reader{tmpPath};
+    EXPECT_EQ(reader.Header().Version(), "1.6");
+}
+
+TEST_F(BamWriterTest, MetricsPopulatedAfterWrite)
+{
+    const BamWriterConfig config{
+        .BgzfConfig = {.BgzfWorkers = 2},
+    };
+    BamWriter writer{tmpPath, MakeMinimalHeader(), config};
+    for (int i{0}; i < 20; ++i) {
+        BamRecord rec = MakeTestRecord();
+        rec.Name(std::format("read{}", i));
+        writer.Write(rec);
+    }
+    writer.Close();
+
+    const WriterMetrics metrics{writer.GetMetrics()};
+    EXPECT_EQ(metrics.TotalRecordsWritten, 20U);
+    EXPECT_GT(metrics.Bgzf.BlocksWritten, 0U);
 }
 
 }  // namespace Samoa
