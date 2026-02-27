@@ -1,7 +1,5 @@
 # SAMv1
 
-Source PDF: `/Users/atoepfer/Downloads/SAMv1.pdf`
-
 ## Page 1
 
 Sequence Alignment/Map Format Specification

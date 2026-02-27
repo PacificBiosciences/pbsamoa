@@ -1,7 +1,5 @@
 # SAMtags
 
-Source PDF: `/Users/atoepfer/Downloads/SAMtags.pdf`
-
 ## Page 1
 
 Sequence Alignment/Map Optional Fields Specification
