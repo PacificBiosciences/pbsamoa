@@ -288,14 +288,14 @@ struct BgzfPipelineState
 
 enum class BgzfReaderMode : std::uint8_t
 {
-    BlockOnly,
-    SyncBam,
-    ParallelBam,
+    BLOCK_ONLY,
+    SYNC_BAM,
+    PARALLEL_BAM,
 };
 
 struct BgzfReader::Impl
 {
-    BgzfReaderMode mode{BgzfReaderMode::BlockOnly};
+    BgzfReaderMode mode{BgzfReaderMode::BLOCK_ONLY};
 
     // Shared sync decompression state (block-only and sync BAM mode)
     std::ifstream syncFile{};
@@ -375,13 +375,13 @@ namespace detail {
 
 enum class WriteItemKind : std::uint8_t
 {
-    Data,
-    Close,
+    DATA,
+    CLOSE,
 };
 
 struct WriteItem
 {
-    WriteItemKind kind{WriteItemKind::Data};
+    WriteItemKind kind{WriteItemKind::DATA};
     std::vector<std::byte> data{};
     PendingCallback callback{};
 
@@ -544,7 +544,7 @@ struct BgzfWriter::Impl
 
     void SetError(std::exception_ptr e) noexcept
     {
-        std::lock_guard lock{errorMutex};
+        const std::lock_guard lock{errorMutex};
         if (pipelineError.load(std::memory_order_relaxed)) {
             return;
         }
@@ -557,7 +557,7 @@ struct BgzfWriter::Impl
         if (!pipelineError.load(std::memory_order_acquire)) {
             return;
         }
-        std::lock_guard lock{errorMutex};
+        const std::lock_guard lock{errorMutex};
         if (errorPtr) {
             std::rethrow_exception(errorPtr);
         }
@@ -656,12 +656,12 @@ struct BgzfWriter::Impl
                 detail::WriteItem item{std::move(*front)};
                 inputQueue->pop();
 
-                if (item.kind == detail::WriteItemKind::Close) {
+                if (item.kind == detail::WriteItemKind::CLOSE) {
                     sealBlock();
                     submitBatch();
                     break;
                 }
-                if (item.kind != detail::WriteItemKind::Data || std::empty(item.data)) {
+                if (item.kind != detail::WriteItemKind::DATA || std::empty(item.data)) {
                     continue;
                 }
 
@@ -870,7 +870,7 @@ void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
     }
     impl_->RethrowIfError();
 
-    while (!impl_->inputQueue->try_emplace(detail::WriteItemKind::Data, std::move(data),
+    while (!impl_->inputQueue->try_emplace(detail::WriteItemKind::DATA, std::move(data),
                                            std::move(callback))) {
         impl_->RethrowIfError();
         impl_->counters.callerStalls.fetch_add(1, std::memory_order_relaxed);
@@ -890,7 +890,7 @@ void BgzfWriter::Close()
     try {
         bool closeQueued{false};
         while (!closeQueued) {
-            closeQueued = impl_->inputQueue->try_emplace(detail::WriteItemKind::Close);
+            closeQueued = impl_->inputQueue->try_emplace(detail::WriteItemKind::CLOSE);
             if (closeQueued) {
                 break;
             }
@@ -1613,22 +1613,21 @@ BgzfMetrics BgzfPipelineState::GetMetrics() const
     return m;
 }
 
-BgzfReader::Impl::Impl(const std::filesystem::path& path)
+BgzfReader::Impl::Impl(const std::filesystem::path& path) : mode{BgzfReaderMode::BLOCK_ONLY}
 {
-    mode = BgzfReaderMode::BlockOnly;
     OpenSyncFile(path);
 }
 
 BgzfReader::Impl::Impl(const std::filesystem::path& path, std::size_t numWorkers)
 {
     if (numWorkers == 0) {
-        mode = BgzfReaderMode::SyncBam;
+        mode = BgzfReaderMode::SYNC_BAM;
         OpenSyncFile(path);
         ParseHeaderSync();
         return;
     }
 
-    mode = BgzfReaderMode::ParallelBam;
+    mode = BgzfReaderMode::PARALLEL_BAM;
     pipeline = std::make_unique<BgzfPipelineState>(path, numWorkers);
     pipeline->ParseHeader();
 }
@@ -1839,7 +1838,7 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecordSync()
 
 std::optional<std::size_t> BgzfReader::Impl::ReadBlock(std::span<std::byte> buffer)
 {
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->ReadBlockSync(buffer);
     }
     return ReadBlockSync(buffer);
@@ -1847,7 +1846,7 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlock(std::span<std::byte> buff
 
 void BgzfReader::Impl::Seek(VirtualOffset offset)
 {
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         pipeline->Seek(offset);
         return;
     }
@@ -1856,7 +1855,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
     syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
     syncBlockOffset = offset.BlockOffset();
 
-    if (mode != BgzfReaderMode::SyncBam) {
+    if (mode != BgzfReaderMode::SYNC_BAM) {
         return;
     }
 
@@ -1888,7 +1887,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
 
 VirtualOffset BgzfReader::Impl::Tell() const
 {
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->Tell();
     }
     return VirtualOffset{syncBlockOffset, std::uint16_t{0}};
@@ -1896,7 +1895,7 @@ VirtualOffset BgzfReader::Impl::Tell() const
 
 bool BgzfReader::Impl::HasEofMarker() const
 {
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->hasEofMarker;
     }
     return hasEofMarker;
@@ -1904,10 +1903,10 @@ bool BgzfReader::Impl::HasEofMarker() const
 
 const SamHeader& BgzfReader::Impl::Header() const
 {
-    if (mode == BgzfReaderMode::BlockOnly) {
+    if (mode == BgzfReaderMode::BLOCK_ONLY) {
         throw std::runtime_error{"Header() is unavailable in block-only mode"};
     }
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->Header();
     }
     return syncHeader;
@@ -1915,11 +1914,11 @@ const SamHeader& BgzfReader::Impl::Header() const
 
 std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
 {
-    if (mode == BgzfReaderMode::BlockOnly) {
+    if (mode == BgzfReaderMode::BLOCK_ONLY) {
         throw std::runtime_error{"ReadRecord() is unavailable in block-only mode"};
     }
 
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->ReadRecord();
     }
 
@@ -1932,7 +1931,7 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
 
 BgzfMetrics BgzfReader::Impl::GetMetrics() const
 {
-    if (mode == BgzfReaderMode::ParallelBam) {
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->GetMetrics();
     }
 

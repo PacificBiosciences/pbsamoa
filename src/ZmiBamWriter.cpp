@@ -20,18 +20,18 @@ struct ZmiBamWriter::Impl
     {
         // rawData starts at BAM refID; l_read_name is byte 8, read name starts at
         // byte 32.
-        constexpr std::size_t FixedFieldsSize{32};
-        constexpr std::size_t NameLengthOffset{8};
+        constexpr std::size_t FIXED_FIELDS_SIZE{32};
+        constexpr std::size_t NAME_LENGTH_OFFSET{8};
 
-        if (std::size(rawData) <= NameLengthOffset) {
+        if (std::size(rawData) <= NAME_LENGTH_OFFSET) {
             return 0;
         }
-        const std::uint8_t lReadName{std::to_integer<std::uint8_t>(rawData[NameLengthOffset])};
-        if ((lReadName == 0U) || (std::size(rawData) < (FixedFieldsSize + lReadName))) {
+        const std::uint8_t lReadName{std::to_integer<std::uint8_t>(rawData[NAME_LENGTH_OFFSET])};
+        if ((lReadName == 0U) || (std::size(rawData) < (FIXED_FIELDS_SIZE + lReadName))) {
             return 0;
         }
 
-        const char* namePtr{reinterpret_cast<const char*>(std::data(rawData) + FixedFieldsSize)};
+        const char* namePtr{reinterpret_cast<const char*>(std::data(rawData) + FIXED_FIELDS_SIZE)};
         const std::string_view readName{namePtr, static_cast<std::size_t>(lReadName - 1U)};
         return ParseZmwFromName(readName);
     }

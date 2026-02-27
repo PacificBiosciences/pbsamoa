@@ -17,7 +17,7 @@ namespace PacBio {
 namespace Samoa {
 namespace ChunkTool {
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     if (argc < 3) {
         std::println(stderr, "Usage: pbsamoa chunk IN.bam CHUNK TOTAL");

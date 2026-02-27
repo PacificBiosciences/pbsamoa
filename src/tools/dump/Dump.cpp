@@ -377,7 +377,7 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
 
 }  // namespace
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     // Parse options
     std::int32_t bgzfOpt{-1};

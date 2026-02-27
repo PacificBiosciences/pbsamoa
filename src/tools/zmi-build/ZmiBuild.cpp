@@ -12,7 +12,7 @@ namespace PacBio {
 namespace Samoa {
 namespace ZmiBuild {
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     if (argc < 2) {
         std::println(stderr, "Usage: pbsamoa zmi-build IN.bam OUT.bam");

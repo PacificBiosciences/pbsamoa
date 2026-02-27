@@ -236,7 +236,7 @@ std::size_t ResolveNumWorkers(std::int32_t requested)
 
 }  // namespace
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     // Parse options
     std::int32_t bgzfOpt{-1};

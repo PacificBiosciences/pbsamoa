@@ -12,7 +12,7 @@ namespace PacBio {
 namespace Samoa {
 namespace BaiBuild {
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     if (argc < 1) {
         std::println(stderr, "Usage: pbsamoa bai-build IN.bam");

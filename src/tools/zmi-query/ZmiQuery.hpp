@@ -5,7 +5,7 @@ namespace PacBio {
 namespace Samoa {
 namespace ZmiQuery {
 
-int Runner(int argc, char* argv[]);
+int Runner(int argc, char** argv);
 
 }  // namespace ZmiQuery
 }  // namespace Samoa

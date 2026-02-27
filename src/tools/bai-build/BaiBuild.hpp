@@ -5,7 +5,7 @@ namespace PacBio {
 namespace Samoa {
 namespace BaiBuild {
 
-int Runner(int argc, char* argv[]);
+int Runner(int argc, char** argv);
 
 }  // namespace BaiBuild
 }  // namespace Samoa

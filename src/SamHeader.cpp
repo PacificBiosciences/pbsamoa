@@ -546,7 +546,7 @@ std::int32_t SamHeader::ReferenceId(std::string_view name) const
         return -1;
     }
     BuildNameIndex();
-    const auto it = nameToId_.find(name);
+    const auto it = nameToId_.find(std::string{name});
     if (it == std::ranges::end(nameToId_)) {
         return -1;
     }

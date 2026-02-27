@@ -157,7 +157,7 @@ TEST_F(BgzfWriterTest, WriteWithCallback)
     std::mutex mu;
 
     auto callback = [&](std::int64_t offset, std::span<const std::byte> data) {
-        std::lock_guard lock{mu};
+        const std::lock_guard lock{mu};
         received.emplace_back(offset, std::vector<std::byte>{std::begin(data), std::end(data)});
     };
 
@@ -175,7 +175,7 @@ TEST_F(BgzfWriterTest, WriteWithCallback)
     }
     writer.Close();
 
-    std::lock_guard lock{mu};
+    const std::lock_guard lock{mu};
     ASSERT_EQ(std::size(received), 3U);
     for (std::size_t i{1}; i < std::size(received); ++i) {
         EXPECT_GE(received[i].first, received[i - 1].first);
@@ -214,12 +214,12 @@ TEST_F(BgzfWriterTest, OversizedRecordIsSplitAcrossBlocksAndCallbackFiresOnce)
                                     .BlocksPerBatch = 1,
                                 }};
     writer.SetCallback([&](std::int64_t offset, std::span<const std::byte> rawData) {
-        std::lock_guard lock{mu};
+        const std::lock_guard lock{mu};
         callbackOffsets.push_back(offset);
         callbackData.emplace_back(std::ranges::begin(rawData), std::ranges::end(rawData));
     });
 
-    PendingCallback cb{
+    const PendingCallback cb{
         .rawData = input,
         .active = true,
     };

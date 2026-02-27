@@ -19,7 +19,7 @@ namespace PacBio {
 namespace Samoa {
 namespace ZmiQuery {
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     if (argc < 2) {
         std::println(stderr, "Usage: pbsamoa zmi-query IN.bam ZMW");

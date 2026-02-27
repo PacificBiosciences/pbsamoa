@@ -60,7 +60,7 @@ std::expected<Region, std::string> ParseRegion(std::string_view text)
 
 }  // namespace
 
-int Runner(int argc, char* argv[])
+int Runner(int argc, char** argv)
 {
     if (argc < 2) {
         std::println(stderr, "Usage: pbsamoa bai-query INPUT REGION");
