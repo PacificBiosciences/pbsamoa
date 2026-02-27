@@ -105,10 +105,6 @@ public:
         class Iterator
         {
         public:
-            using difference_type = std::ptrdiff_t;
-            using value_type = RawRecord;
-            using iterator_concept = std::input_iterator_tag;
-
             Iterator();
             explicit Iterator(BamRawReader* reader);
 
@@ -140,10 +136,6 @@ public:
         class Iterator
         {
         public:
-            using difference_type = std::ptrdiff_t;
-            using value_type = RawRecord;
-            using iterator_concept = std::input_iterator_tag;
-
             Iterator();
             Iterator(BamRawReader* reader, std::vector<Chunk> chunks, std::int32_t refId,
                      std::int32_t beg, std::int32_t end);
@@ -189,10 +181,6 @@ public:
         class Iterator
         {
         public:
-            using difference_type = std::ptrdiff_t;
-            using value_type = RawRecord;
-            using iterator_concept = std::input_iterator_tag;
-
             Iterator();
             Iterator(BamRawReader* reader, std::vector<std::int64_t> offsets);
 

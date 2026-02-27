@@ -133,4 +133,3 @@ auto record = view.ToOwned(KeepTags{TagKey{'R', 'G'}, TagKey{'N', 'M'}});
 | [Architecture](architecture.md) | Layer diagram, design decisions, data flow |
 | [API Reference](api.md)         | All public types and functions             |
 | [CLI Tools](cli.md)             | The `pbsamoa` command-line tool            |
-| [C++23 Guide](cpp23-best-practices.md) | Project-level C++23 coding rules and applicability |

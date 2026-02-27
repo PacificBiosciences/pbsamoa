@@ -33,10 +33,6 @@ public:
         class Iterator
         {
         public:
-            using difference_type = std::ptrdiff_t;
-            using value_type = BamRecord;
-            using iterator_concept = std::input_iterator_tag;
-
             Iterator();
             explicit Iterator(SamReader* reader);
 
