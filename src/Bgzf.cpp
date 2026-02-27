@@ -371,7 +371,7 @@ BgzfMetrics BgzfReader::GetMetrics() const { return impl_->GetMetrics(); }
 // BgzfWriter
 // =============================================================================
 
-namespace {
+namespace detail {
 
 enum class WriteItemKind : std::uint8_t
 {
@@ -426,15 +426,15 @@ struct WritePipelineCounters
     std::atomic<std::uint64_t> callbackNs{0};
 };
 
-}  // namespace
+}  // namespace detail
 
 struct BgzfWriter::Impl
 {
     BgzfWriterConfig config;
     std::ofstream file{};
     std::uint64_t compressedOffset{0};
-    std::unique_ptr<Parallel::ThreadPool<CompressedBatch>> pool;
-    std::unique_ptr<rigtorp::SPSCQueue<WriteItem>> inputQueue;
+    std::unique_ptr<Parallel::ThreadPool<detail::CompressedBatch>> pool;
+    std::unique_ptr<rigtorp::SPSCQueue<detail::WriteItem>> inputQueue;
     std::jthread packerThread;
     std::jthread ioWriterThread;
     std::vector<detail::CompressorPtr> compressors;
@@ -443,7 +443,7 @@ struct BgzfWriter::Impl
     std::atomic<bool> pipelineError{false};
     std::exception_ptr errorPtr;
     mutable std::mutex errorMutex;
-    WritePipelineCounters counters;
+    detail::WritePipelineCounters counters;
     bool closed{false};
 
     explicit Impl(const std::filesystem::path& path, const BgzfWriterConfig& cfg) : config{cfg}
@@ -474,9 +474,10 @@ struct BgzfWriter::Impl
             }
         }
 
-        inputQueue = std::make_unique<rigtorp::SPSCQueue<WriteItem>>(config.InputQueueCapacity);
-        pool = std::make_unique<Parallel::ThreadPool<CompressedBatch>>(
-            Parallel::ThreadPool<CompressedBatch>::Config{
+        inputQueue =
+            std::make_unique<rigtorp::SPSCQueue<detail::WriteItem>>(config.InputQueueCapacity);
+        pool = std::make_unique<Parallel::ThreadPool<detail::CompressedBatch>>(
+            Parallel::ThreadPool<detail::CompressedBatch>::Config{
                 .NumThreads = config.BgzfWorkers,
                 .QueueMultiplier = 3,
                 .EnableMetrics = true,
@@ -567,25 +568,25 @@ struct BgzfWriter::Impl
     {
         try {
             const std::size_t batchLimit{static_cast<std::size_t>(config.BlocksPerBatch)};
-            std::vector<UncompressedBlock> batch{};
+            std::vector<detail::UncompressedBlock> batch{};
             batch.reserve(batchLimit);
             std::size_t emptyPollCount{0};
 
-            UncompressedBlock currentBlock{};
+            detail::UncompressedBlock currentBlock{};
             currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
 
             const auto submitBatch = [&]() {
                 if (std::empty(batch)) {
                     return;
                 }
-                std::vector<UncompressedBlock> blocks{};
+                std::vector<detail::UncompressedBlock> blocks{};
                 blocks.swap(batch);
                 batch.reserve(batchLimit);
 
                 pool->Submit(
-                    [blocks = std::move(blocks), &comps = this->compressors,
-                     &ctr = this->counters](Parallel::ThreadIndex threadIdx) -> CompressedBatch {
-                        CompressedBatch result{};
+                    [blocks = std::move(blocks), &comps = this->compressors, &ctr = this->counters](
+                        Parallel::ThreadIndex threadIdx) -> detail::CompressedBatch {
+                        detail::CompressedBatch result{};
                         result.blocks.reserve(std::size(blocks));
 
                         auto* comp{comps[threadIdx.Value()].get()};
@@ -610,7 +611,7 @@ struct BgzfWriter::Impl
                                 libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
                             const std::uint32_t isize{
                                 static_cast<std::uint32_t>(std::size(block.data))};
-                            result.blocks.push_back(CompressedBatch::Block{
+                            result.blocks.push_back(detail::CompressedBatch::Block{
                                 .cdata = {std::begin(cbuf), std::begin(cbuf) + compSize},
                                 .crc32 = crc,
                                 .isize = isize,
@@ -632,14 +633,14 @@ struct BgzfWriter::Impl
             const auto sealBlock = [&]() {
                 if (!std::empty(currentBlock.data)) {
                     batch.push_back(std::move(currentBlock));
-                    currentBlock = UncompressedBlock{};
+                    currentBlock = detail::UncompressedBlock{};
                     currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
                     flushIfBatchFull();
                 }
             };
 
             while (!stopToken.stop_requested()) {
-                WriteItem* front{inputQueue->front()};
+                detail::WriteItem* front{inputQueue->front()};
                 if (!front) {
                     counters.packerStalls.fetch_add(1, std::memory_order_relaxed);
                     ++emptyPollCount;
@@ -652,15 +653,15 @@ struct BgzfWriter::Impl
                 }
                 emptyPollCount = 0;
 
-                WriteItem item{std::move(*front)};
+                detail::WriteItem item{std::move(*front)};
                 inputQueue->pop();
 
-                if (item.kind == WriteItemKind::Close) {
+                if (item.kind == detail::WriteItemKind::Close) {
                     sealBlock();
                     submitBatch();
                     break;
                 }
-                if (item.kind != WriteItemKind::Data || std::empty(item.data)) {
+                if (item.kind != detail::WriteItemKind::Data || std::empty(item.data)) {
                     continue;
                 }
 
@@ -707,7 +708,7 @@ struct BgzfWriter::Impl
         }
     }
 
-    void WriteFrame(const CompressedBatch::Block& block)
+    void WriteFrame(const detail::CompressedBatch::Block& block)
     {
         const auto t0{std::chrono::steady_clock::now()};
 
@@ -769,7 +770,7 @@ struct BgzfWriter::Impl
             std::memory_order_relaxed);
     }
 
-    void FireCallbacks(const CompressedBatch::Block& block, std::uint64_t blockFileOffset)
+    void FireCallbacks(const detail::CompressedBatch::Block& block, std::uint64_t blockFileOffset)
     {
         IndexCallbackFn callback{};
         {
@@ -800,7 +801,7 @@ struct BgzfWriter::Impl
                 if (pool->GetMetrics().CurrentResultQueueDepth == 0U) {
                     counters.writerStalls.fetch_add(1, std::memory_order_relaxed);
                 }
-                const bool keepConsuming = pool->ConsumeWith([this](CompressedBatch batch) {
+                const bool keepConsuming = pool->ConsumeWith([this](detail::CompressedBatch batch) {
                     for (const auto& block : batch.blocks) {
                         const std::uint64_t blockFileOffset{compressedOffset};
                         WriteFrame(block);
@@ -869,7 +870,7 @@ void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
     }
     impl_->RethrowIfError();
 
-    while (!impl_->inputQueue->try_emplace(WriteItemKind::Data, std::move(data),
+    while (!impl_->inputQueue->try_emplace(detail::WriteItemKind::Data, std::move(data),
                                            std::move(callback))) {
         impl_->RethrowIfError();
         impl_->counters.callerStalls.fetch_add(1, std::memory_order_relaxed);
@@ -889,7 +890,7 @@ void BgzfWriter::Close()
     try {
         bool closeQueued{false};
         while (!closeQueued) {
-            closeQueued = impl_->inputQueue->try_emplace(WriteItemKind::Close);
+            closeQueued = impl_->inputQueue->try_emplace(detail::WriteItemKind::Close);
             if (closeQueued) {
                 break;
             }
