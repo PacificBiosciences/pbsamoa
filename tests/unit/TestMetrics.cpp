@@ -80,7 +80,7 @@ TEST(Metrics, ReaderMetricsComposite)
 {
     BamRecordReader reader{tests::DataDir / "spec_example.bam",
                            BamRecordReaderConfig{
-                               .ViewConfig = {.BgzfWorkers = 2},
+                               .RawReaderConfig = {.BgzfWorkers = 2},
                                .DecodeWorkers = 2,
                            }};
 
@@ -136,7 +136,7 @@ TEST(Metrics, LivePollingDuringRead)
     }
 
     BamRecordReader reader{path, BamRecordReaderConfig{
-                                     .ViewConfig = {.BgzfWorkers = 2},
+                                     .RawReaderConfig = {.BgzfWorkers = 2},
                                      .DecodeWorkers = 2,
                                  }};
 

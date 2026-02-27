@@ -77,7 +77,7 @@ struct BamRecordReader::Impl
     std::jthread producer_;
 
     Impl(const std::filesystem::path& path, BamRecordReaderConfig config)
-        : viewReader_{path, config.ViewConfig}
+        : viewReader_{path, config.RawReaderConfig}
         , header_{viewReader_.Header()}
         , pool_{config.DecodeWorkers > 0 ? std::make_shared<PacBio::Parallel::ThreadPool<>>(
                                                PacBio::Parallel::ThreadPool<>::Config{
@@ -88,7 +88,7 @@ struct BamRecordReader::Impl
         , queue_{config.OutputCapacity}
         , tagFilter_{config.TagFilter}
         , batchBudget_{config.BatchBudget}
-        , parallelBgzf_{config.ViewConfig.BgzfWorkers > 0}
+        , parallelBgzf_{config.RawReaderConfig.BgzfWorkers > 0}
         , parallelDecode_{config.DecodeWorkers > 0}
     {
         producer_ = std::jthread{[this](std::stop_token stopToken) { ProducerLoop(stopToken); }};

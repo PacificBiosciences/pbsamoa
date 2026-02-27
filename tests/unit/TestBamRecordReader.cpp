@@ -69,7 +69,7 @@ TEST(BamRecordReader, ParallelDecodeMatchesSerial)
     const auto path = tests::DataDir / "spec_example.bam";
     BamRecordReader serial{path, BamRecordReaderConfig{.DecodeWorkers = 0}};
     BamRecordReader parallel{path, BamRecordReaderConfig{
-                                       .ViewConfig = {.BgzfWorkers = 2},
+                                       .RawReaderConfig = {.BgzfWorkers = 2},
                                        .DecodeWorkers = 2,
                                    }};
 
@@ -97,7 +97,7 @@ TEST(BamRecordReader, ManyRecordsParallel)
     }
 
     BamRecordReader reader{path, BamRecordReaderConfig{
-                                     .ViewConfig = {.BgzfWorkers = 2},
+                                     .RawReaderConfig = {.BgzfWorkers = 2},
                                      .DecodeWorkers = 2,
                                  }};
 
@@ -143,7 +143,7 @@ TEST(BamRecordReader, EarlyDestruction)
 
     {
         BamRecordReader reader{path, BamRecordReaderConfig{
-                                         .ViewConfig = {.BgzfWorkers = 2},
+                                         .RawReaderConfig = {.BgzfWorkers = 2},
                                          .DecodeWorkers = 2,
                                      }};
         // Read just one record, then destroy

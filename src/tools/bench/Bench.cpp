@@ -158,7 +158,7 @@ void BenchRecordReader(const std::filesystem::path& path, std::size_t bgzfThread
 {
     const auto start{std::chrono::steady_clock::now()};
     BamRecordReader reader{path, BamRecordReaderConfig{
-                                     .ViewConfig = {.BgzfWorkers = bgzfThreads},
+                                     .RawReaderConfig = {.BgzfWorkers = bgzfThreads},
                                      .DecodeWorkers = decodeThreads,
                                  }};
     std::size_t records{0};

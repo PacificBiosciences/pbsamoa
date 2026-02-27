@@ -19,7 +19,7 @@ namespace Samoa {
 
 struct BamRecordReaderConfig
 {
-    BamRawReaderConfig ViewConfig{};
+    BamRawReaderConfig RawReaderConfig{};
     std::size_t DecodeWorkers{4};
     ByteLimit BatchBudget{ByteLimit{4 * 1024 * 1024}};
     std::size_t OutputCapacity{4096};
