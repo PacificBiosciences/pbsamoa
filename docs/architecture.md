@@ -13,23 +13,23 @@ below it.
 │  Record                                                │
 │  RawRecord  BamRecord  RawRecordBatch                  │
 │  ZmwGroup                                              │
-│  CigarOp  Sequence  Tags  SamHeader                    │
+│  CigarOp  SequenceView  TagMap  SamHeader              │
 ├────────────────────────────────────────────────────────┤
 │  Compression                                           │
-│  BgzfReader  BgzfPipeline  BgzfWriter  VirtualOffset   │
+│  BgzfReader  BgzfWriter  VirtualOffset                 │
 └────────────────────────────────────────────────────────┘
 ```
 
 ## Class Dependencies
 
 Arrows show composition ("owns") or required dependencies ("uses"). Dotted
-arrows show decode-on-demand relationships. No class inheritance exists in
-this codebase.
+arrows show decode-on-demand relationships. The only inheritance hierarchy
+is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
 
 ```
 ┌─ API ──────────────────────────────────────────────────────────────────┐
 │                                                                        │
-│  BamRawReader ──┬──► BgzfReader (sync) | BgzfPipeline (parallel)       │
+│  BamRawReader ──┬──► BgzfReader (sync or parallel via numWorkers)      │
 │                 ├──► SamHeader                                         │
 │                 └──► RawRecordBatch                                    │
 │                       └──► RecordData(i) → span<const byte>            │
@@ -56,7 +56,8 @@ this codebase.
 │                                                                        │
 ├─ Record ───────────────────────────────────────────────────────────────┤
 │                                                                        │
-│  RawRecord ─────···► CigarOp, SequenceView, TagMap (decode on demand)  │
+│  RawRecord ─────···► SequenceView, TagMap (decode on demand)           │
+│             ────────► CigarOp (eagerly copied on construction)         │
 │                                                                        │
 │  BamRecord ──┬──► std::vector<CigarOp>                                 │
 │              └──► TagMap ──► TagKey + TagValue                         │
@@ -74,19 +75,20 @@ this codebase.
 │                                                                        │
 │  BgzfReader ─────► VirtualOffset (current position)                    │
 │                                                                        │
-│  BgzfWriter ─────► parallel compression pipeline + callback dispatch    │
+│  BgzfWriter ─────► parallel compression pipeline + callback dispatch   │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 Key relationships:
 
-- **BamRawReader** owns either a `BgzfReader` (synchronous) or a
-  `BgzfPipeline` (parallel, when `BgzfWorkers > 0`) for decompression, and a
+- **BamRawReader** owns a `BgzfReader` (synchronous when `BgzfWorkers == 0`,
+  parallel pipeline when `BgzfWorkers > 0`) for decompression, and a
   `SamHeader` parsed from the BAM header block. It produces `RawRecordBatch`
   objects that own their backing buffers and provide indexed access to raw
   record spans via `RecordData(i)`. Supports chunked reading via
-  `ChunkNum`/`TotalChunks` in config.
+  `ChunkNum`/`TotalChunks` in config and ZMW whitelist filtering via
+  `Whitelist()`.
 
 - **BamRecordReader** wraps a `BamRawReader` and pre-decodes views into
   owned `BamRecord` objects in a background `std::jthread`. Records are
@@ -99,15 +101,16 @@ Key relationships:
   group's `ZmwIdentity` with `rgId` always set to 0.
 
 - **BamWriter** owns a `BgzfWriter` for compression and a `SamHeader` for
-  the output file header. Accepts `BamRecord`, `RawRecord`, and raw
-  `span<const byte>`.
+  the output file header. Accepts `BamRecord`, `RawRecord`, raw
+  `span<const byte>`, and `RawRecordBatch` (via `WriteBatch()`).
 
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.
 
-- **RawRecord** owns a copy of raw BAM bytes and decodes `CigarOp`,
-  `SequenceView`, and `TagMap` on demand. All decode logic is inline in the
-  header for maximum performance.
+- **RawRecord** owns a copy of raw BAM bytes. `CigarOp` values are eagerly
+  copied into an aligned buffer on construction (BAM does not guarantee
+  alignment). `SequenceView` and `TagMap` are decoded on demand. All decode
+  logic is inline in the header for maximum performance.
 
 ## Compression
 
@@ -143,9 +146,11 @@ Two representations for alignment records, chosen by use case:
 
 ### RawRecord — fast, read-only
 
-An owning type that copies raw BAM bytes into a `vector<byte>`. Accessors
-decode fields on demand directly from the binary layout. All decode logic is
-inline in the header for maximum inlining.
+An owning type that copies raw BAM bytes into a `vector<byte>`. CIGAR ops
+are eagerly copied into an aligned buffer on construction (BAM does not
+guarantee 4-byte alignment). Other accessors decode fields on demand
+directly from the binary layout. All decode logic is inline in the header
+for maximum inlining.
 
 Use raw records when you're reading records and don't need to modify them —
 this is the common case.
@@ -169,8 +174,9 @@ Serialization to BAM binary happens once, in the writer, via
 matters for PacBio BAM files where kinetics arrays can be megabytes per
 record.
 
-Both `BamWriter` and `SamWriter` accept either type. Writing a view is
-zero-copy; writing a record serializes it.
+Both `BamWriter` and `SamWriter` accept either type (plus `WriteBatch()`
+for `RawRecordBatch`). `BamWriter` also accepts raw `span<const byte>`.
+Writing a view to `BamWriter` is zero-copy; writing a record serializes it.
 
 ### RawRecordBatch
 
@@ -232,10 +238,12 @@ views, since there's no persistent binary buffer to view into).
 ### Writers
 
 **BamWriter** writes BGZF-compressed BAM. Accepts `BamRecord` (serializes),
-`RawRecord`, and raw `span<const byte>`. An optional `IndexCallback`
-is invoked after each record write for downstream index building.
+`RawRecord`, raw `span<const byte>`, and `RawRecordBatch` (via
+`WriteBatch()`). An optional `IndexCallback` is invoked after each record
+write for downstream index building.
 
-**SamWriter** writes text SAM. Accepts `BamRecord` and `RawRecord`.
+**SamWriter** writes text SAM. Accepts `BamRecord`, `RawRecord`, and
+`RawRecordBatch` (via `WriteBatch()`).
 
 ### Indexing
 
@@ -247,7 +255,16 @@ for records overlapping a genomic region.
 ### PacBio extensions
 
 **ZmwIndex** — In-memory index mapping ZMW hole numbers to virtual offsets.
-Reads `.zmi` (native format) or `.pbi` (legacy PacBio index).
+Reads `.zmi` (native format) or `.pbi` (legacy PacBio index). Supports
+point queries (`Find(zmw)`, `Find(ZmwIdentity)`), batch queries
+(`Find(span<const ZmwIdentity>)`), and chunking via `UniqueZmws()`.
+
+**ZmwWhitelist** — A set of ZMW hole numbers or identities to select from
+a BAM file. Resolves against a `ZmwIndex` to produce sorted virtual offsets.
+Used via `BamRawReader::Whitelist()` for seek-per-record iteration.
+
+**ZmiWriter** — Streaming writer for `.zmi` files. Appends `(rgId, zmw,
+virtualOffset)` entries in BAM write order. BGZF-compressed.
 
 **BamZmwReader** — Groups consecutive records by ZMW identity, producing
 groups of `BamRecord` objects (one group per ZMW). Wraps a `BamRecordReader`
@@ -271,7 +288,7 @@ The three-layer reader stack:
           BamRawReader::ReadBatch()                             │
                 │                                               │
                 ▼                                               │
-          BgzfReader (sync) | BgzfPipeline (BgzfWorkers > 0)    │
+          BgzfReader (sync or parallel via BgzfWorkers)         │
                 │                                               │
                 ▼                                               │
           Parallel::Dispatch (optional ThreadPool)              │
@@ -336,7 +353,7 @@ file on disk
   → BgzfReader (decompress BGZF blocks, optionally parallel)
     → BamRawReader (parse record boundaries from decompressed bytes)
       → RawRecordBatch (owns buffer, provides RecordData(i) spans)
-        → RawRecord (decode-on-demand from raw bytes)
+        → RawRecord (eager CIGAR copy, other fields decode-on-demand)
           → BamRecord (optional: ToOwned() for mutation)
 ```
 
@@ -348,3 +365,41 @@ BamRecord or RawRecord or raw span<const byte>
     → BgzfWriter (compress blocks with libdeflate)
       → file on disk
 ```
+
+## Clipping
+
+`BamRecord` supports coordinate-based clipping via `Clip()` (in-place) and
+`Clipped()` (copy). Two clip types: `CLIP_TO_QUERY` (polymerase/ZMW
+coordinates) and `CLIP_TO_REFERENCE` (genomic coordinates).
+
+Clipping adjusts CIGAR, sequence, qualities, and optionally auxiliary tags.
+Tag clipping is driven by a `TagClipper` registry that maps `TagKey` values
+to `TagClipStrategy` subclasses:
+
+- **SubstringClipStrategy** — simple substring for per-base tags (`ip`, `pw`, etc.)
+- **ReverseSubstringClipStrategy** — mirrored offset for reverse-orientation tags (`ri`, `rp`)
+- **PulseClipStrategy** — pulse-space mapping via the `pc` tag
+- **BasemodClipStrategy** — MM/ML base-modification tags per SAMv1.6
+- **PileupClipStrategy** — RLE-encoded `sa` pileup coverage tag
+
+`TagClipper::PacBioDefault()` returns a pre-configured clipper with all
+PacBio-standard strategies registered.
+
+## Metrics
+
+All readers and writers expose `GetMetrics()` for runtime performance
+monitoring.
+
+- **BgzfMetrics** — IO throughput, decompression pool stats, SPSC queue
+  depth, stall counters, cumulative stage timing (nanoseconds)
+- **DecodeMetrics** — decode pool stats, throughput, stall counters, timing
+- **ReaderMetrics** — composite of `BgzfMetrics` + `DecodeMetrics` +
+  `TotalRecordsRead`, returned by `BamRecordReader::GetMetrics()`
+- **BgzfWriteMetrics** — compression pool stats, stall counters, throughput,
+  timing
+- **WriterMetrics** — composite of `BgzfWriteMetrics` +
+  `TotalRecordsWritten`, returned by `BamWriter::GetMetrics()`
+
+`BamRawReader::GetMetrics()` returns `BgzfMetrics` directly. All snapshots
+are captured via relaxed atomics — diff two snapshots to compute per-second
+rates.

@@ -33,17 +33,26 @@ BamRawReader reader{"input.bam", BamRawReaderConfig{.ChunkNum = 2, .TotalChunks 
 
 `BamRawReaderConfig` fields:
 
-|     Field     | Default |                 Description                  |
-| ------------- | ------- | -------------------------------------------- |
-| `BgzfWorkers` | `0`     | BGZF decompression threads (0 = synchronous) |
-| `RecordLimit` | `0`     | Stop after N records (0 = unlimited)         |
-| `ChunkNum`    | `0`     | 1-based chunk number (0 = no chunking)       |
-| `TotalChunks` | `0`     | Total chunk count (0 = no chunking)          |
+|     Field     | Default |                  Description                  |
+| ------------- | ------- | --------------------------------------------- |
+| `BgzfWorkers` | `0`     | BGZF decompression threads (0 = synchronous)  |
+| `RecordLimit` | `0`     | Stop after N records (0 = unlimited)          |
+| `ChunkNum`    | `0`     | 1-based chunk number (0 = no chunking)        |
+| `TotalChunks` | `0`     | Total chunk count (0 = no chunking)           |
+| `Whitelist`   | `{}`    | Optional `ZmwWhitelist` for whitelist queries |
 
 ### Header access
 
 ```cpp
 const SamHeader& header = reader.Header();
+```
+
+### Single-record reading
+
+```cpp
+while (auto view = reader.ReadRecord()) {
+    // view is an owning RawRecord, safe to hold across calls
+}
 ```
 
 ### Range iteration
@@ -85,12 +94,33 @@ for (const auto& view : reader.Query(index, refId, 1000, 2000)) {
 }
 ```
 
+### ZMW whitelist query
+
+```cpp
+#include <pbsamoa/index/ZmwWhitelist.hpp>
+
+ZmwWhitelist wl{std::vector<std::int32_t>{12345, 23456}};
+for (const auto& view : reader.Whitelist(wl)) {
+    // records for ZMWs 12345 and 23456 via seek-per-record
+}
+```
+
+The `WhitelistRange` owns a dedicated sync reader internally (pipeline mode
+would restart per seek).
+
 ### Random access
 
 ```cpp
 VirtualOffset pos = reader.Tell();
 // ... read some records ...
 reader.Seek(pos);  // jump back
+```
+
+### Metrics
+
+```cpp
+BgzfMetrics m = reader.GetMetrics();
+// m.BytesRead, m.BlocksRead, m.BytesDecompressed, m.RecordsConsumed, ...
 ```
 
 ---
@@ -117,7 +147,7 @@ BamRecordReader reader{"input.bam", BamRecordReaderConfig{.DecodeWorkers = 0}};
 
 // Parallel BGZF decompression + parallel ToOwned decode
 BamRecordReader reader{"input.bam", BamRecordReaderConfig{
-    .ViewConfig = {.BgzfWorkers = 4},
+    .RawReaderConfig = {.BgzfWorkers = 4},
     .DecodeWorkers = 8,
 }};
 
@@ -129,13 +159,13 @@ BamRecordReader reader{"input.bam", BamRecordReaderConfig{
 
 ### Configuration
 
-|      Field       |                   Type                   | Default |                     Description                      |
-| ---------------- | ---------------------------------------- | ------- | ---------------------------------------------------- |
-| `ViewConfig`     | `BamRawReaderConfig`                     | `{}`    | Config for underlying `BamRawReader`                 |
-| `DecodeWorkers`  | `size_t`                                 | `4`     | Threads for parallel `ToOwned()` decode (0 = serial) |
-| `BatchBudget`    | `ByteLimit`                              | `4_MiB` | Memory budget per batch read from view reader        |
-| `OutputCapacity` | `size_t`                                 | `4096`  | SPSC queue capacity (records)                        |
-| `TagFilter`      | `variant<monostate, DropTags, KeepTags>` | `{}`    | Tag filter applied during `ToOwned()`                |
+|       Field       |                   Type                   | Default |                     Description                      |
+| ----------------- | ---------------------------------------- | ------- | ---------------------------------------------------- |
+| `RawReaderConfig` | `BamRawReaderConfig`                     | `{}`    | Config for underlying `BamRawReader`                 |
+| `DecodeWorkers`   | `size_t`                                 | `4`     | Threads for parallel `ToOwned()` decode (0 = serial) |
+| `BatchBudget`     | `ByteLimit`                              | `4_MiB` | Memory budget per batch read from view reader        |
+| `OutputCapacity`  | `size_t`                                 | `4096`  | SPSC queue capacity (records)                        |
+| `TagFilter`       | `variant<monostate, DropTags, KeepTags>` | `{}`    | Tag filter applied during `ToOwned()`                |
 
 ### Reading records
 
@@ -153,6 +183,13 @@ while (auto record = reader.ReadRecord()) {
 for (const auto& record : reader.Records()) {
     std::println("{}", record.Name());
 }
+```
+
+### Metrics
+
+```cpp
+ReaderMetrics m = reader.GetMetrics();
+// m.Bgzf.BytesRead, m.Decode.RecordsDecoded, m.TotalRecordsRead, ...
 ```
 
 ---
@@ -225,6 +262,13 @@ writer.WriteBatch(batch);  // batch of records
 writer.Close();        // flush and finalize (also called by destructor)
 ```
 
+### Metrics
+
+```cpp
+WriterMetrics m = writer.GetMetrics();
+// m.Bgzf.BytesCompressed, m.Bgzf.BlocksWritten, m.TotalRecordsWritten, ...
+```
+
 ---
 
 ## SamWriter
@@ -237,8 +281,9 @@ Writes text SAM files.
 
 ```cpp
 SamWriter writer{"output.sam", header};
-writer.Write(view);    // accepts RawRecord
-writer.Write(record);  // accepts BamRecord
+writer.Write(view);         // accepts RawRecord
+writer.Write(record);       // accepts BamRecord
+writer.WriteBatch(batch);   // accepts RawRecordBatch
 writer.Close();
 ```
 
@@ -250,8 +295,9 @@ writer.Close();
 #include <pbsamoa/core/RawRecord.hpp>
 ```
 
-Owning type that copies raw BAM bytes. Decodes on demand — all decode
-logic is inline in the header.
+Owning type that copies raw BAM bytes. CIGAR ops are eagerly copied into
+an aligned buffer on construction. Other fields decode on demand — all
+decode logic is inline in the header.
 
 ### Fixed fields
 
@@ -334,6 +380,33 @@ record.Name("read1")
       .Cigar({CigarOp{CigarOpType::M, 100}})
       .Sequence("ACGT...")
       .Qualities({30, 30, 30, 30});
+```
+
+### Derived fields
+
+|       Method        | Return type |             Description             |
+| ------------------- | ----------- | ----------------------------------- |
+| `IsMapped()`        | `bool`      | `(Flag() & 4) == 0`                 |
+| `IsReverseStrand()` | `bool`      | `(Flag() & 16) != 0`                |
+| `IsPrimary()`       | `bool`      | Not secondary and not supplementary |
+| `ReferenceEnd()`    | `int32_t`   | `Pos() + ReferenceLength(Cigar())`  |
+| `MutableTags()`     | `TagMap&`   | Mutable access to the tag map       |
+
+### Clipping
+
+```cpp
+#include <pbsamoa/core/BamRecord.hpp>    // ClipType
+#include <pbsamoa/core/TagClipping.hpp>  // TagClipper
+
+// Clip in-place to reference coordinates
+record.Clip(ClipType::CLIP_TO_REFERENCE, 1000, 2000);
+
+// Clip with PacBio tag clipping strategies
+auto clipper = TagClipper::PacBioDefault();
+record.Clip(ClipType::CLIP_TO_REFERENCE, 1000, 2000, clipper);
+
+// Non-mutating variant
+BamRecord clipped = record.Clipped(ClipType::CLIP_TO_QUERY, 10, 500);
 ```
 
 ### Serialization
@@ -573,7 +646,12 @@ Block-by-block BGZF decompression.
 BgzfReader reader{"file.bam"};
 std::vector<std::byte> buf(65536);
 
-while (auto n = reader.ReadBlock(buf)) {
+// ReadBlock returns std::optional<size_t>:
+//   - optional{N>0}: N decompressed bytes
+//   - optional{0}: EOF reached
+//   - nullopt: error
+std::optional<std::size_t> n;
+while ((n = reader.ReadBlock(buf)) && *n > 0) {
     // *n bytes of decompressed data in buf
 }
 ```
@@ -635,7 +713,7 @@ ByteLimit precise{1024 * 1024 * 64};  // 64 MiB
 |    Policy     |                        Behavior                         |
 | ------------- | ------------------------------------------------------- |
 | `ThrowPolicy` | Throws `std::runtime_error` on corrupt records          |
-| `SkipPolicy`  | Logs and skips. `SkippedCount()` returns total skipped. |
+| `SkipPolicy`  | Silently skips. `SkippedCount()` returns total skipped. |
 
 ---
 
@@ -651,6 +729,27 @@ PacBio ZMW index — maps ZMW hole numbers to virtual offsets.
 auto index = ZmwIndex::Open("movie.bam");  // auto-detects .zmi or .pbi
 std::vector<std::int64_t> offsets = index.Find(12345);  // raw virtual offsets by hole number
 ```
+
+### Loading
+
+|   Method    |               Description               |
+| ----------- | --------------------------------------- |
+| `Open(bam)` | Auto-detect `.zmi` then `.pbi` from BAM |
+| `FromZmi()` | Load from `.zmi` file directly          |
+| `FromPbi()` | Load from legacy `.pbi` file            |
+
+### Queries
+
+|             Method              |      Return type      |                Description                |
+| ------------------------------- | --------------------- | ----------------------------------------- |
+| `Find(int32_t zmw)`             | `vector<int64_t>`     | Offsets for hole number (all read groups) |
+| `Find(ZmwIdentity)`             | `vector<int64_t>`     | Offsets for exact (rgId, zmw)             |
+| `Find(span<const ZmwIdentity>)` | `vector<int64_t>`     | Batch query                               |
+| `FirstOffset(int32_t zmw)`      | `int64_t`             | First offset for hole number              |
+| `FirstOffset(ZmwIdentity)`      | `int64_t`             | First offset for exact (rgId, zmw)        |
+| `UniqueZmws()`                  | `vector<ZmwIdentity>` | All unique (rgId, zmw) in file order      |
+| `NumRecords()`                  | `uint64_t`            | Total records in the index                |
+| `NumZmws()`                     | `uint64_t`            | Unique ZMW count                          |
 
 ## ZmwGroup
 
@@ -693,6 +792,8 @@ BamZmwReader reader{BamRecordReader{"movie.bam",
 ### Reading
 
 ```cpp
+const SamHeader& header = reader.Header();
+
 std::vector<BamRecord> records;
 while (reader.GetNext(records)) {
     ZmwIdentity zmw = reader.CurrentZmw();
@@ -710,6 +811,129 @@ Writes BAM and `.zmi` index simultaneously.
 
 ```cpp
 ZmiBamWriter writer{"output.bam", header};
-writer.Write(record);  // updates both BAM and ZMI
+writer.Write(record);       // updates both BAM and ZMI
+writer.WriteBatch(batch);   // batch write to both BAM and ZMI
 writer.Close();
 ```
+
+---
+
+## ZmwWhitelist
+
+```cpp
+#include <pbsamoa/index/ZmwWhitelist.hpp>
+```
+
+A set of ZMW hole numbers or identities to select from a BAM file.
+
+```cpp
+// From bare hole numbers (matches any read group)
+ZmwWhitelist wl{std::vector<std::int32_t>{12345, 23456}};
+
+// From (rgId, zmw) pairs (exact identity matching)
+ZmwWhitelist wl{std::vector<ZmwIdentity>{{0, 12345}, {0, 23456}}};
+
+// Resolve against an index (sorted, deduplicated virtual offsets)
+auto offsets = wl.Resolve(index);
+```
+
+---
+
+## ZmiWriter
+
+```cpp
+#include <pbsamoa/io/ZmiWriter.hpp>
+```
+
+Streaming writer for `.zmi` files. BGZF-compressed.
+
+```cpp
+ZmiWriter writer{"output.bam.zmi"};
+writer.AddRecord(rgId, zmw, virtualOffset);
+writer.Close();
+```
+
+---
+
+## SequenceView
+
+```cpp
+#include <pbsamoa/core/Sequence.hpp>
+```
+
+Non-owning view over 4-bit packed BAM sequence bytes. Returned by
+`RawRecord::Seq()`.
+
+|     Method      | Return type |               Description                |
+| --------------- | ----------- | ---------------------------------------- |
+| `operator[](i)` | `char`      | Decoded base at position `i`             |
+| `Size()`        | `uint32_t`  | Sequence length                          |
+| `ToString()`    | `string`    | Decode full sequence to string           |
+| `WriteTo(out)`  | `void`      | Append decoded sequence to string buffer |
+
+### Utility functions
+
+```cpp
+std::vector<std::byte> packed = PackSequence("ACGT");
+std::string seq = UnpackSequence(packed, 4);
+std::string rc = ReverseComplement("ACGT");
+ReverseComplementInPlace(seq);
+```
+
+---
+
+## TagClipping
+
+```cpp
+#include <pbsamoa/core/TagClipping.hpp>
+```
+
+Extensible tag clipping via strategy pattern. `TagClipper` maps tag keys
+to `TagClipStrategy` subclasses.
+
+### Built-in strategies
+
+|            Strategy            |                                     Tags                                     |          Behavior          |
+| ------------------------------ | ---------------------------------------------------------------------------- | -------------------------- |
+| `SubstringClipStrategy`        | `dq`, `iq`, `mq`, `sq`, `dt`, `st`, `ip`, `pw`, `fi`, `fp`                   | Simple substring           |
+| `ReverseSubstringClipStrategy` | `ri`, `rp`                                                                   | Mirrored offset substring  |
+| `PulseClipStrategy`            | `pc`, `pt`, `pq`, `pv`, `pg`, `pa`, `pm`, `ps`, `pi`, `pd`, `px`, `pe`, `sf` | Pulse-space via `pc` tag   |
+| `BasemodClipStrategy`          | `MM`, `ML`                                                                   | SAMv1.6 base modifications |
+| `PileupClipStrategy`           | `sa`                                                                         | RLE pileup coverage        |
+
+### Usage
+
+```cpp
+auto clipper = TagClipper::PacBioDefault();  // all standard strategies
+clipper.ClipTags(tags, clipOffset, clipLength, seqLength, sequence);
+```
+
+---
+
+## Metrics
+
+```cpp
+#include <pbsamoa/core/Metrics.hpp>
+```
+
+Runtime performance snapshots for all reader/writer pipelines. Captured
+via relaxed atomics — diff two snapshots for per-second rates.
+
+### Types
+
+|        Type        |             Source              |
+| ------------------ | ------------------------------- |
+| `BgzfMetrics`      | `BamRawReader::GetMetrics()`    |
+| `DecodeMetrics`    | (internal to `ReaderMetrics`)   |
+| `ReaderMetrics`    | `BamRecordReader::GetMetrics()` |
+| `BgzfWriteMetrics` | (internal to `WriterMetrics`)   |
+| `WriterMetrics`    | `BamWriter::GetMetrics()`       |
+
+### BgzfMetrics fields
+
+Throughput: `BytesRead`, `BlocksRead`, `BytesDecompressed`.
+Pool: `PoolQueueDepth`, `PoolPeakQueueDepth`, `PoolActiveWorkers`,
+`PoolPeakActiveWorkers`, `PoolResultQueueDepth`, `PoolPeakResultQueueDepth`.
+Queue: `RecordsProduced`, `RecordsConsumed`.
+Stalls: `IoStalls`, `ConsumerStalls`, `ReaderStalls`.
+Timing (ns): `IoReadNs`, `DecompressNs`, `RecordParseNs`.

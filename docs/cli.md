@@ -14,13 +14,16 @@ pbsamoa dump input.bam
 pbsamoa dump input.bam > output.sam
 ```
 
-### copy — BAM to BAM
+Options:
 
-Copy a BAM file.
+|         Flag         | Alias |                            Description                            |
+| -------------------- | ----- | ----------------------------------------------------------------- |
+| `--bgzf-threads N`   | `-j`  | BGZF decompression worker threads (default: auto, max 8)          |
+| `--format-threads N` |       | SAM formatting thread pool size (default: max(hw_concurrency, 4)) |
 
-```sh
-pbsamoa copy input.bam output.bam
-```
+Environment:
+
+- `PBSAMOA_METRICS=1` — Print per-second pipeline metrics and a final summary to stderr.
 
 ### bai-query — region query
 
@@ -40,15 +43,6 @@ Build a `.bai` index from a coordinate-sorted BAM file.
 ```sh
 pbsamoa bai-build sorted.bam
 # creates sorted.bam.bai
-```
-
-### parse — parse-only benchmark
-
-Parse a BAM file without producing output. Reports throughput in MiB/s
-and records/s.
-
-```sh
-pbsamoa parse input.bam
 ```
 
 ### zmi-build — build ZMW index
@@ -79,24 +73,18 @@ pbsamoa chunk movie.bam 4 4   # chunk 4 of 4 (last)
 
 ### bench — benchmarks
 
-Run throughput benchmarks on a BAM file.
+Run throughput benchmarks on a BAM file. Executes multiple benchmarks
+in sequence: `sequential_read`, `batch_read`, `pipeline_raw_read`,
+`record_reader` (serial), `record_reader` (parallel), `write`, and
+`region_query`.
 
 ```sh
 pbsamoa bench input.bam
 ```
 
-### bgzf-cat — decompress BGZF
+Options:
 
-Read a BGZF file block by block and write decompressed data to stdout.
-
-```sh
-pbsamoa bgzf-cat compressed.bam > raw.bin
-```
-
-### bgzf-compress — compress to BGZF
-
-Compress stdin to BGZF format.
-
-```sh
-cat data.bin | pbsamoa bgzf-compress data.bgzf
-```
+|         Flag         | Alias |                       Description                        |
+| -------------------- | ----- | -------------------------------------------------------- |
+| `--bgzf-threads N`   | `-j`  | BGZF decompression worker threads (default: auto, max 8) |
+| `--decode-threads N` |       | BamRecord decode worker threads (default: 4)             |

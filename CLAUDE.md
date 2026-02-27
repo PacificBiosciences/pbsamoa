@@ -13,13 +13,13 @@ rg --files -g 'src/**/*.cpp' -g 'src/**/*.hpp' -g 'include/**/*.hpp' -g 'tests/u
 
 ## Architecture (four layers, bottom-up)
 
-**Compression** — `VirtualOffset`, `BgzfReader`, `BgzfWriter`, `BgzfPipeline` (3-stage parallel decompression via libdeflate).
+**Compression** — `VirtualOffset`, `BgzfReader` (sync or parallel via `numWorkers`, 3-stage pipeline internally), `BgzfWriter`.
 
 **Record** — `RawRecord` (owning, copies raw BAM bytes, inline decode-on-demand), `RawRecordBatch` (owns decompressed buffers, indexed access), `BamRecord` (structured fields, zero-cost mutation, serialize once in writer), `CigarOp`, `TagMap`.
 
-**API** — `BamRawReader` (zero-copy iteration, sync/parallel BGZF), `BamRecordReader` (wraps BamRawReader, pre-decodes to `BamRecord` in background thread), `SamReader`, `BamWriter`, `SamWriter`, `BaiIndex`. Both readers: range-based + batch interfaces, memory-budget sizing, region queries via BAI.
+**API** — `BamRawReader` (zero-copy iteration, sync/parallel BGZF, range + batch + whitelist interfaces, region queries via BAI), `BamRecordReader` (wraps BamRawReader, pre-decodes to `BamRecord` via background producer thread + optional thread pool), `SamReader`, `BamWriter`, `SamWriter`, `BaiIndex`. Memory-budget sizing via `ByteLimit`.
 
-**ZMW Index** — `ZmwIndex` (`.zmi`/`.pbi`, point/batch queries, chunking by `(rgId, zmw)`), `ZmwIdentity`, `ZmiWriter`, `ZmiBamWriter` (BAM+ZMI coordinated output), `BamZmwReader` (groups by ZMW). Chunking via `BamRawReaderConfig::RecordLimit`.
+**ZMW Index** — `ZmwIndex` (`.zmi`/`.pbi`, point/batch queries, chunking by `(rgId, zmw)`), `ZmwIdentity`, `ZmwWhitelist`, `ZmiWriter`, `ZmiBamWriter` (BAM+ZMI coordinated output), `BamZmwReader` (groups by ZMW). Chunking via `BamRawReaderConfig::ChunkNum`/`TotalChunks`.
 
 ## Design
 
