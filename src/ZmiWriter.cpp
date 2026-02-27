@@ -12,12 +12,6 @@
 namespace PacBio {
 namespace Samoa {
 
-using detail::ZMI_ENTRY_SIZE;
-using detail::ZMI_ENTRY_SIZE_FIELD;
-using detail::ZMI_HEADER_SIZE;
-using detail::ZMI_MAGIC;
-using detail::ZMI_VERSION;
-
 namespace {
 
 template <typename T>
@@ -52,16 +46,17 @@ struct ZmiWriter::Impl
         // the first block, patching, recompressing, and overwriting). The
         // numRecords field is reserved for future optimization where a reader
         // could pre-allocate if the value is nonzero.
-        std::array<std::byte, ZMI_HEADER_SIZE> header{};
+        std::array<std::byte, detail::ZMI_HEADER_SIZE> header{};
 
         // Offset 0: magic "ZMI\1" (4 bytes)
-        std::ranges::copy_n(std::begin(ZMI_MAGIC), std::size(ZMI_MAGIC), std::begin(header));
+        std::ranges::copy_n(std::begin(detail::ZMI_MAGIC), std::size(detail::ZMI_MAGIC),
+                            std::begin(header));
 
         // Offset 4: version 0x010000 (4 bytes LE)
-        WriteLE(std::data(header) + 4, ZMI_VERSION);
+        WriteLE(std::data(header) + 4, detail::ZMI_VERSION);
 
         // Offset 8: entrySize = 16 (2 bytes LE)
-        WriteLE(std::data(header) + 8, ZMI_ENTRY_SIZE_FIELD);
+        WriteLE(std::data(header) + 8, detail::ZMI_ENTRY_SIZE_FIELD);
 
         // Offset 10: flags = 0 (2 bytes LE, already zeroed)
         // Offset 12: numRecords = 0 (8 bytes LE, already zeroed)
@@ -91,7 +86,7 @@ void ZmiWriter::AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virt
 {
     // Each entry is 16 bytes: rgId(4) + zmw(4) + virtualOffset(8), all
     // little-endian.
-    std::array<std::byte, ZMI_ENTRY_SIZE> entry{};
+    std::array<std::byte, detail::ZMI_ENTRY_SIZE> entry{};
     WriteLE(std::data(entry), rgId);
     WriteLE(std::data(entry) + 4, zmw);
     WriteLE(std::data(entry) + 8, virtualOffset);

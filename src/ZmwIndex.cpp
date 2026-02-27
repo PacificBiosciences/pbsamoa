@@ -19,9 +19,6 @@
 namespace PacBio {
 namespace Samoa {
 
-using detail::ZMI_HEADER_SIZE;
-using detail::ZMI_MAGIC;
-
 ZmwIndex::ZmwIndex(ZmwIndex&& other) noexcept
     : rgIds_{std::move(other.rgIds_)}
     , zmws_{std::move(other.zmws_)}
@@ -97,12 +94,12 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
     }
 
     // Validate minimum size for header
-    if (std::size(data) < ZMI_HEADER_SIZE) {
+    if (std::size(data) < detail::ZMI_HEADER_SIZE) {
         throw std::runtime_error{"ZMI file too small: missing header"};
     }
 
     // Validate magic "ZMI\1"
-    if (std::memcmp(std::data(data), std::data(ZMI_MAGIC), 4) != 0) {
+    if (std::memcmp(std::data(data), std::data(detail::ZMI_MAGIC), 4) != 0) {
         throw std::runtime_error{"ZMI file has invalid magic bytes"};
     }
 
@@ -114,7 +111,7 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
 
     // Iterate over entries starting at offset 64 with stride = entrySize
     const std::size_t dataSize{std::size(data)};
-    const std::size_t numEntries{(dataSize - ZMI_HEADER_SIZE) / entrySize};
+    const std::size_t numEntries{(dataSize - detail::ZMI_HEADER_SIZE) / entrySize};
 
     ZmwIndex index;
     index.rgIds_.reserve(numEntries);
@@ -122,7 +119,7 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
     index.offsets_.reserve(numEntries);
 
     for (std::size_t i{0}; i < numEntries; ++i) {
-        const std::byte* entry{std::data(data) + ZMI_HEADER_SIZE + (i * entrySize)};
+        const std::byte* entry{std::data(data) + detail::ZMI_HEADER_SIZE + (i * entrySize)};
 
         const std::int32_t rgId{ReadLE32Signed(entry)};
         const std::int32_t zmw{ReadLE32Signed(entry + 4)};

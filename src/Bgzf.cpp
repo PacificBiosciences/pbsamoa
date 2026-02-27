@@ -100,11 +100,6 @@ constexpr std::size_t BLOCKS_PER_BATCH{32};
 
 }  // namespace
 
-using detail::CompressedEntry;
-using detail::CompressorPtr;
-using detail::DecompressedBatch;
-using detail::DecompressorPtr;
-
 // =============================================================================
 // ParseBgzfBlockHeader / DecompressBgzfBlock / IsBgzfEofMarker
 // =============================================================================
@@ -185,7 +180,7 @@ std::optional<std::size_t> DecompressBgzfBlock(std::span<const std::byte> blockD
         return std::nullopt;
     }
 
-    const DecompressorPtr decompressor{libdeflate_alloc_decompressor()};
+    const detail::DecompressorPtr decompressor{libdeflate_alloc_decompressor()};
     if (!decompressor) {
         return std::nullopt;
     }
@@ -210,6 +205,83 @@ bool IsBgzfEofMarker(std::span<const std::byte> data)
     return std::ranges::equal(data.first(std::size(BGZF_EOF_MARKER)), BGZF_EOF_MARKER);
 }
 
+/// \brief Always-on atomic counters for BGZF reader pipeline introspection.
+struct PipelineCounters
+{
+    // IO stage
+    std::atomic<std::uint64_t> bytesRead{0};
+    std::atomic<std::uint64_t> blocksRead{0};
+    std::atomic<std::uint64_t> bytesDecompressed{0};
+    std::atomic<std::uint64_t> ioReadNs{0};
+    std::atomic<std::uint64_t> ioStalls{0};
+
+    // Decompression workers (summed across all workers)
+    std::atomic<std::uint64_t> decompressNs{0};
+
+    // Consumer thread
+    std::atomic<std::uint64_t> recordsProduced{0};
+    std::atomic<std::uint64_t> consumerStalls{0};
+    std::atomic<std::uint64_t> recordParseNs{0};
+
+    // Reader (caller thread)
+    std::atomic<std::uint64_t> recordsConsumed{0};
+    std::atomic<std::uint64_t> readerStalls{0};
+};
+
+struct BgzfPipelineState
+{
+    std::filesystem::path filePath;
+    std::size_t numWorkers;
+    bool hasEofMarker{false};
+
+    // Sync decompression (for ReadBlock and header parsing)
+    std::ifstream syncFile;
+    detail::DecompressorPtr syncDecompressor;
+    std::array<std::byte, MAX_COMPRESSED_BLOCK_SIZE> syncCompressed;
+    std::uint64_t syncBlockOffset{0};
+
+    // Header
+    SamHeader header;
+    std::vector<std::byte> initialBytes;
+    bool headerParsed{false};
+    std::uint64_t headerEndFileOffset{0};
+
+    // Pipeline (created after ParseHeader when numWorkers > 0)
+    std::unique_ptr<Parallel::ThreadPool<detail::DecompressedBatch>> pool;
+    std::jthread ioThread;
+    std::jthread consumerThread;
+    std::unique_ptr<rigtorp::SPSCQueue<RawRecord>> outputQueue;
+    std::mutex readyMutex;
+    std::condition_variable readyCv;
+    std::atomic<bool> done{false};
+    std::atomic<bool> pipelineError{false};
+    std::exception_ptr errorPtr;
+
+    // Per-worker decompressors (indexed by ThreadIndex)
+    std::vector<detail::DecompressorPtr> decompressors;
+
+    // Always-on metrics
+    PipelineCounters counters;
+
+    explicit BgzfPipelineState(const std::filesystem::path& path, std::size_t workers);
+    ~BgzfPipelineState();
+
+    BgzfPipelineState(const BgzfPipelineState&) = delete;
+    BgzfPipelineState& operator=(const BgzfPipelineState&) = delete;
+
+    void ParseHeader();
+    void StartPipeline();
+    void StopPipeline();
+    void IoLoop(std::stop_token stopToken);
+    void ConsumerLoop(std::stop_token stopToken);
+    std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
+    const SamHeader& Header() const;
+    std::optional<RawRecord> ReadRecord();
+    void Seek(VirtualOffset offset);
+    VirtualOffset Tell() const;
+    BgzfMetrics GetMetrics() const;
+};
+
 // =============================================================================
 // BgzfReader
 // =============================================================================
@@ -221,8 +293,6 @@ enum class BgzfReaderMode : std::uint8_t
     ParallelBam,
 };
 
-struct BgzfPipelineState;
-
 struct BgzfReader::Impl
 {
     BgzfReaderMode mode{BgzfReaderMode::BlockOnly};
@@ -232,7 +302,7 @@ struct BgzfReader::Impl
     std::vector<std::byte> compressedBuf{};
     std::uint64_t syncBlockOffset{0};
     bool hasEofMarker{false};
-    DecompressorPtr syncDecompressor{};
+    detail::DecompressorPtr syncDecompressor{};
 
     // Sync BAM mode state
     SamHeader syncHeader{};
@@ -367,7 +437,7 @@ struct BgzfWriter::Impl
     std::unique_ptr<rigtorp::SPSCQueue<WriteItem>> inputQueue;
     std::jthread packerThread;
     std::jthread ioWriterThread;
-    std::vector<CompressorPtr> compressors;
+    std::vector<detail::CompressorPtr> compressors;
     IndexCallbackFn indexCallback{};
     mutable std::mutex callbackMutex;
     std::atomic<bool> pipelineError{false};
@@ -888,29 +958,6 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 // BgzfReader parallel state
 // =============================================================================
 
-/// \brief Always-on atomic counters for pipeline introspection.
-struct PipelineCounters
-{
-    // IO stage
-    std::atomic<std::uint64_t> bytesRead{0};
-    std::atomic<std::uint64_t> blocksRead{0};
-    std::atomic<std::uint64_t> bytesDecompressed{0};
-    std::atomic<std::uint64_t> ioReadNs{0};
-    std::atomic<std::uint64_t> ioStalls{0};
-
-    // Decompression workers (summed across all workers)
-    std::atomic<std::uint64_t> decompressNs{0};
-
-    // Consumer thread
-    std::atomic<std::uint64_t> recordsProduced{0};
-    std::atomic<std::uint64_t> consumerStalls{0};
-    std::atomic<std::uint64_t> recordParseNs{0};
-
-    // Reader (caller thread)
-    std::atomic<std::uint64_t> recordsConsumed{0};
-    std::atomic<std::uint64_t> readerStalls{0};
-};
-
 /// \brief Helper: measure elapsed nanoseconds for a scope.
 struct ScopedTimer
 {
@@ -932,60 +979,6 @@ struct ScopedTimer
 
     ScopedTimer(const ScopedTimer&) = delete;
     ScopedTimer& operator=(const ScopedTimer&) = delete;
-};
-
-struct BgzfPipelineState
-{
-    std::filesystem::path filePath;
-    std::size_t numWorkers;
-    bool hasEofMarker{false};
-
-    // Sync decompression (for ReadBlock and header parsing)
-    std::ifstream syncFile;
-    DecompressorPtr syncDecompressor;
-    std::array<std::byte, MAX_COMPRESSED_BLOCK_SIZE> syncCompressed;
-    std::uint64_t syncBlockOffset{0};
-
-    // Header
-    SamHeader header;
-    std::vector<std::byte> initialBytes;
-    bool headerParsed{false};
-    std::uint64_t headerEndFileOffset{0};
-
-    // Pipeline (created after ParseHeader when numWorkers > 0)
-    std::unique_ptr<Parallel::ThreadPool<DecompressedBatch>> pool;
-    std::jthread ioThread;
-    std::jthread consumerThread;
-    std::unique_ptr<rigtorp::SPSCQueue<RawRecord>> outputQueue;
-    std::mutex readyMutex;
-    std::condition_variable readyCv;
-    std::atomic<bool> done{false};
-    std::atomic<bool> pipelineError{false};
-    std::exception_ptr errorPtr;
-
-    // Per-worker decompressors (indexed by ThreadIndex)
-    std::vector<DecompressorPtr> decompressors;
-
-    // Always-on metrics
-    PipelineCounters counters;
-
-    explicit BgzfPipelineState(const std::filesystem::path& path, std::size_t workers);
-    ~BgzfPipelineState();
-
-    BgzfPipelineState(const BgzfPipelineState&) = delete;
-    BgzfPipelineState& operator=(const BgzfPipelineState&) = delete;
-
-    void ParseHeader();
-    void StartPipeline();
-    void StopPipeline();
-    void IoLoop(std::stop_token stopToken);
-    void ConsumerLoop(std::stop_token stopToken);
-    std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
-    const SamHeader& Header() const;
-    std::optional<RawRecord> ReadRecord();
-    void Seek(VirtualOffset offset);
-    VirtualOffset Tell() const;
-    BgzfMetrics GetMetrics() const;
 };
 
 BgzfPipelineState::BgzfPipelineState(const std::filesystem::path& path, std::size_t workers)
@@ -1011,7 +1004,7 @@ BgzfPipelineState::BgzfPipelineState(const std::filesystem::path& path, std::siz
     if (!syncFile.is_open()) {
         throw std::runtime_error{"Cannot open file: " + path.string()};
     }
-    syncDecompressor = DecompressorPtr{libdeflate_alloc_decompressor()};
+    syncDecompressor = detail::DecompressorPtr{libdeflate_alloc_decompressor()};
     if (!syncDecompressor) {
         throw std::runtime_error{"Failed to create libdeflate decompressor"};
     }
@@ -1114,7 +1107,7 @@ void BgzfPipelineState::StartPipeline()
     decompressors.clear();
     decompressors.reserve(numWorkers);
     for (std::size_t i{0}; i < numWorkers; ++i) {
-        DecompressorPtr d{libdeflate_alloc_decompressor()};
+        detail::DecompressorPtr d{libdeflate_alloc_decompressor()};
         if (!d) {
             throw std::runtime_error{"Failed to create libdeflate decompressor"};
         }
@@ -1128,8 +1121,8 @@ void BgzfPipelineState::StartPipeline()
     errorPtr = nullptr;
 
     // Create thread pool (producer-consumer mode) with metrics enabled
-    pool = std::make_unique<Parallel::ThreadPool<DecompressedBatch>>(
-        Parallel::ThreadPool<DecompressedBatch>::Config{
+    pool = std::make_unique<Parallel::ThreadPool<detail::DecompressedBatch>>(
+        Parallel::ThreadPool<detail::DecompressedBatch>::Config{
             .NumThreads = numWorkers,
             .QueueMultiplier = 3,
             .EnableMetrics = true,
@@ -1193,7 +1186,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 
         std::array<std::byte, MAX_COMPRESSED_BLOCK_SIZE> compressed{};
         std::vector<std::byte> batchBuffer;
-        std::vector<CompressedEntry> batchEntries;
+        std::vector<detail::CompressedEntry> batchEntries;
         batchEntries.reserve(BLOCKS_PER_BATCH);
 
         const std::size_t poolCapacity{numWorkers * 3};
@@ -1271,7 +1264,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                 const std::size_t cdataSize{info->compressedDataSize};
                 batchBuffer.insert(std::end(batchBuffer), std::data(compressed) + cdataOffset,
                                    std::data(compressed) + cdataOffset + cdataSize);
-                batchEntries.push_back(CompressedEntry{
+                batchEntries.push_back(detail::CompressedEntry{
                     .offset = batchOffset,
                     .size = cdataSize,
                     .isize = isize,
@@ -1299,7 +1292,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
             // Submit one task for the entire batch
             pool->Submit([entries = batchEntries, cdata = std::move(batchBuffer),
                           &decomps = this->decompressors, &ctr = this->counters](
-                             Parallel::ThreadIndex threadIdx) -> DecompressedBatch {
+                             Parallel::ThreadIndex threadIdx) -> detail::DecompressedBatch {
                 const auto decompStart{std::chrono::steady_clock::now()};
 
                 // Compute total expected output size
@@ -1308,7 +1301,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                     totalIsize += entry.isize;
                 }
 
-                DecompressedBatch batch;
+                detail::DecompressedBatch batch;
                 batch.data.resize(totalIsize);
 
                 std::size_t outOffset{0};
@@ -1429,7 +1422,7 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
         // may contain record data when header + records fit in one BGZF block).
         parseRecords();
 
-        while (pool->ConsumeWith([&](DecompressedBatch batch) {
+        while (pool->ConsumeWith([&](detail::DecompressedBatch batch) {
             // Append decompressed data to accumulator
             accumulator.insert(std::end(accumulator), std::data(batch.data),
                                std::data(batch.data) + std::size(batch.data));
@@ -1650,7 +1643,7 @@ void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
 
     compressedBuf.resize(MAX_BGZF_BLOCK_SIZE);
 
-    syncDecompressor = DecompressorPtr{libdeflate_alloc_decompressor()};
+    syncDecompressor = detail::DecompressorPtr{libdeflate_alloc_decompressor()};
     if (!syncDecompressor) {
         throw std::runtime_error{"Failed to create libdeflate decompressor"};
     }

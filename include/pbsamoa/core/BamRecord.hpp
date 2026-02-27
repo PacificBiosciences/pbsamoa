@@ -2,6 +2,7 @@
 #define PBSAMOA_CORE_BAMRECORD_HPP
 
 #include <pbsamoa/core/CigarOp.hpp>
+#include <pbsamoa/core/TagClipping.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include <span>
@@ -13,8 +14,6 @@
 
 namespace PacBio {
 namespace Samoa {
-
-class TagClipper;
 
 /// \brief Type of coordinate clipping.
 enum class ClipType
