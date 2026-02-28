@@ -209,5 +209,14 @@ TEST(BaiIndex, BuildQueryRoundTripDiverseBam)
     std::filesystem::remove(tmpBam);
 }
 
+TEST(BaiIndex, BuildThrowsOnUnsortedBam)
+{
+    const auto bamPath = tests::DataDir / "unsorted.bam";
+    if (!std::filesystem::exists(bamPath)) {
+        GTEST_SKIP() << "unsorted.bam not found";
+    }
+    EXPECT_THROW(BaiIndex::Build(bamPath), std::runtime_error);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

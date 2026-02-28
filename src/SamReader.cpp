@@ -78,7 +78,7 @@ struct SamReader::Impl
     {
         file.open(path);
         if (!file.is_open()) {
-            throw std::runtime_error{"SamReader: cannot open file: " + path.string()};
+            throw std::runtime_error{std::format("SamReader: cannot open file: {}", path.string())};
         }
 
         // Read header lines (starting with @)
@@ -98,7 +98,11 @@ struct SamReader::Impl
         }
 
         if (!std::empty(headerText)) {
-            header = SamHeader::FromText(headerText);
+            auto headerResult{SamHeader::FromText(headerText)};
+            if (!headerResult.has_value()) {
+                throw std::runtime_error{std::move(headerResult.error())};
+            }
+            header = std::move(*headerResult);
         }
     }
 
@@ -169,7 +173,14 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     record.MapQ(ParseUInt8(fields[4], "MAPQ"));
 
     // CIGAR
-    record.Cigar(ParseCigar(fields[5]));
+    {
+        auto cigar{ParseCigar(fields[5])};
+        if (!cigar.has_value()) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: {}", impl_->lineNumber, cigar.error())};
+        }
+        record.Cigar(std::move(*cigar));
+    }
 
     // RNEXT → NextRefId
     if (fields[6] == "*") {

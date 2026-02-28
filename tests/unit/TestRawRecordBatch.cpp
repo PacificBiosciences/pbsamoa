@@ -41,7 +41,7 @@ std::vector<std::byte> BuildMultiRecordBuffer(std::vector<std::uint32_t>& record
         .RefId(0)
         .Pos(100)
         .MapQ(30)
-        .Cigar(ParseCigar("10M"))
+        .Cigar(*ParseCigar("10M"))
         .Sequence("ACGTACGTAC")
         .Qualities({30, 30, 30, 30, 30, 30, 30, 30, 30, 30});
 
@@ -51,7 +51,7 @@ std::vector<std::byte> BuildMultiRecordBuffer(std::vector<std::uint32_t>& record
         .RefId(0)
         .Pos(200)
         .MapQ(40)
-        .Cigar(ParseCigar("5M"))
+        .Cigar(*ParseCigar("5M"))
         .Sequence("TTTTT")
         .Qualities({40, 40, 40, 40, 40});
 

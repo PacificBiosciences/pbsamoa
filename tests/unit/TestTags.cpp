@@ -452,5 +452,35 @@ TEST(TagSerialize, BamRoundTripMixed)
     EXPECT_FLOAT_EQ(std::get<float>(*parsed.Get(TagKey{'Z', 'S'})), 1.5f);
 }
 
+TEST(TagSamParse, HexStringTag)
+{
+    const ParsedTag result{ParseTagFromSam("BC:H:1AE1")};
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->first, TagKey('B', 'C'));
+    ASSERT_TRUE(std::holds_alternative<HexString>(result->second));
+    EXPECT_EQ(std::get<HexString>(result->second).value, "1AE1");
+}
+
+TEST(TagSerialize, ToSamHexString)
+{
+    const std::string result{SerializeTagToSam(TagKey{'B', 'C'}, TagValue{HexString{"1AE1"}})};
+    EXPECT_EQ(result, "BC:H:1AE1");
+}
+
+TEST(TagSerialize, BamRoundTripHexString)
+{
+    TagMap original;
+    original.Set(TagKey{'B', 'C'}, TagValue{HexString{"1AE1"}});
+
+    const std::vector<std::byte> bamBytes{SerializeTagsToBam(original)};
+    const TagMap parsed{ParseTagsFromBam(bamBytes)};
+
+    ASSERT_EQ(parsed.Size(), 1U);
+    const TagValue* val{parsed.Get(TagKey{'B', 'C'})};
+    ASSERT_NE(val, nullptr);
+    ASSERT_TRUE(std::holds_alternative<HexString>(*val));
+    EXPECT_EQ(std::get<HexString>(*val).value, "1AE1");
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

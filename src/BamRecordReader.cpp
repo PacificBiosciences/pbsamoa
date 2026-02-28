@@ -153,6 +153,8 @@ struct BamRecordReader::Impl
                     }
                     counters_.recordsProduced.fetch_add(1, std::memory_order_relaxed);
                     {
+                        // Memory fence: lock/unlock ensures the queue write is
+                        // visible to the consumer before notify_one().
                         const std::lock_guard lock{readyMutex_};
                     }
                     readyCv_.notify_one();
@@ -168,6 +170,7 @@ struct BamRecordReader::Impl
                 std::this_thread::yield();
             }
             {
+                // Memory fence: see above.
                 const std::lock_guard lock{readyMutex_};
             }
             readyCv_.notify_one();
@@ -181,6 +184,7 @@ struct BamRecordReader::Impl
                 std::this_thread::yield();
             }
             {
+                // Memory fence: see above.
                 const std::lock_guard lock{readyMutex_};
             }
             readyCv_.notify_one();

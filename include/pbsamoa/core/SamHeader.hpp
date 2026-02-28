@@ -1,6 +1,7 @@
 #ifndef PBSAMOA_CORE_SAMHEADER_HPP
 #define PBSAMOA_CORE_SAMHEADER_HPP
 
+#include <expected>
 #include <span>
 #include <string>
 #include <string_view>
@@ -27,7 +28,7 @@ public:
 
     const std::string* GetTag(std::string_view key) const;
     void SetTag(std::string key, std::string value);
-    const std::vector<std::pair<std::string, std::string>>& CustomTags() const;
+    std::span<const std::pair<std::string, std::string>> CustomTags() const;
 
 private:
     std::string name_;
@@ -48,7 +49,7 @@ public:
 
     const std::string* GetTag(std::string_view key) const;
     void SetTag(std::string key, std::string value);
-    const std::vector<std::pair<std::string, std::string>>& CustomTags() const;
+    std::span<const std::pair<std::string, std::string>> CustomTags() const;
 
 private:
     std::string id_;
@@ -68,7 +69,7 @@ public:
 
     const std::string* GetTag(std::string_view key) const;
     void SetTag(std::string key, std::string value);
-    const std::vector<std::pair<std::string, std::string>>& CustomTags() const;
+    std::span<const std::pair<std::string, std::string>> CustomTags() const;
 
 private:
     std::string id_;
@@ -85,8 +86,7 @@ public:
     SamHeader();
 
     /// \brief Parse header from SAM text (one or more lines starting with @).
-    /// \throws std::runtime_error on required fields missing from @SQ/@RG/@PG
-    static SamHeader FromText(std::string_view text);
+    static std::expected<SamHeader, std::string> FromText(std::string_view text);
 
     /// \brief Serialize header to SAM text.
     /// Line order: @HD, @SQ (in insertion order), @RG, @PG, @CO.
@@ -100,9 +100,8 @@ public:
     ///
     /// The binary reference dictionary is authoritative. If @SQ lines are
     /// present in header text, they are parsed for optional tags only.
-    ///
-    /// \throws std::runtime_error on bad magic, truncated data
-    static SamHeader FromBamHeaderBlock(std::span<const std::byte> data);
+    static std::expected<SamHeader, std::string> FromBamHeaderBlock(
+        std::span<const std::byte> data);
 
     /// \brief Serialize to BAM binary header block.
     ///
@@ -123,22 +122,22 @@ public:
     void SetSubSort(std::string subSort);
 
     // --- @SQ ---
-    const std::vector<ReferenceSequence>& ReferenceSequences() const;
+    std::span<const ReferenceSequence> ReferenceSequences() const;
     std::vector<ReferenceSequence>& ReferenceSequences();
     void AddReferenceSequence(ReferenceSequence seq);
 
     // --- @RG ---
-    const std::vector<ReadGroup>& ReadGroups() const;
+    std::span<const ReadGroup> ReadGroups() const;
     std::vector<ReadGroup>& ReadGroups();
     void AddReadGroup(ReadGroup rg);
 
     // --- @PG ---
-    const std::vector<ProgramRecord>& ProgramRecords() const;
+    std::span<const ProgramRecord> ProgramRecords() const;
     std::vector<ProgramRecord>& ProgramRecords();
     void AddProgramRecord(ProgramRecord pg);
 
     // --- @CO ---
-    const std::vector<std::string>& Comments() const;
+    std::span<const std::string> Comments() const;
     void AddComment(std::string comment);
 
     // --- Reference name/ID lookup ---
@@ -169,6 +168,8 @@ private:
 
     struct TransparentStringHash
     {
+        using is_transparent = void;
+
         std::size_t operator()(std::string_view sv) const noexcept
         {
             return std::hash<std::string_view>{}(sv);

@@ -28,7 +28,7 @@ BamRecord MakeSimpleRecord()
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10M"))
+        .Cigar(*ParseCigar("10M"))
         .Sequence("ACGTACGTAC")
         .Qualities(std::vector<std::uint8_t>{30, 31, 32, 33, 34, 35, 36, 37, 38, 39});
 
@@ -146,7 +146,7 @@ TEST(BamRecordClipping, ClipToQuery_WithMixedCigar)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("3M2I5M"))  // query length = 10
+        .Cigar(*ParseCigar("3M2I5M"))  // query length = 10
         .Sequence("ACGTACGTAC")
         .Qualities(std::vector<std::uint8_t>{30, 31, 32, 33, 34, 35, 36, 37, 38, 39});
 
@@ -170,7 +170,7 @@ TEST(BamRecordClipping, ClipToReference_WithDeletion)
         .RefId(0)
         .Pos(50)
         .MapQ(60)
-        .Cigar(ParseCigar("3M2D5M"))  // ref span = 10, query length = 8
+        .Cigar(*ParseCigar("3M2D5M"))  // ref span = 10, query length = 8
         .Sequence("ABCDEFGH")
         .Qualities(std::vector<std::uint8_t>{10, 20, 30, 40, 50, 60, 70, 80});
 
@@ -196,7 +196,7 @@ TEST(BamRecordClipping, ClipToQuery_CCSRecord_NoQsQe)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10M"))
+        .Cigar(*ParseCigar("10M"))
         .Sequence("ACGTACGTAC")
         .Qualities(std::vector<std::uint8_t>{30, 31, 32, 33, 34, 35, 36, 37, 38, 39});
 
@@ -259,7 +259,7 @@ BamRecord MakePipelineRecord(std::string_view cigarStr, bool isReverse, std::int
         .RefId(0)
         .Pos(pos)
         .MapQ(80)
-        .Cigar(ParseCigar(cigarStr))
+        .Cigar(*ParseCigar(cigarStr))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -563,7 +563,7 @@ TEST(BamRecordClipping, ClipToReference_SoftClips_Forward)
         .RefId(0)
         .Pos(100)
         .MapQ(80)
-        .Cigar(ParseCigar("2S10=3S"))
+        .Cigar(*ParseCigar("2S10=3S"))
         .Sequence(seq)
         .Qualities(std::move(quals));
 
@@ -609,7 +609,7 @@ TEST(BamRecordClipping, ClipToQuery_CCS_WithTags)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10="))
+        .Cigar(*ParseCigar("10="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -646,7 +646,7 @@ TEST(BamRecordClipping, ClipToReference_CCS_WithTags)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("5=3D5="))
+        .Cigar(*ParseCigar("5=3D5="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -691,7 +691,7 @@ TEST(BamRecordClipping, FlankingInserts_Forward_KeepVsExcise)
         .RefId(0)
         .Pos(100)
         .MapQ(80)
-        .Cigar(ParseCigar("3=6I10=6I1="))
+        .Cigar(*ParseCigar("3=6I10=6I1="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -733,7 +733,7 @@ TEST(BamRecordClipping, FlankingInserts_Reverse_KeepVsExcise)
         .RefId(0)
         .Pos(100)
         .MapQ(80)
-        .Cigar(ParseCigar("3=6I10=6I1="))
+        .Cigar(*ParseCigar("3=6I10=6I1="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -773,7 +773,7 @@ TEST(BamRecordClipping, FlankingInserts_QueryClip_DoesNotExcise)
         .RefId(0)
         .Pos(100)
         .MapQ(80)
-        .Cigar(ParseCigar("4I5=6I"))
+        .Cigar(*ParseCigar("4I5=6I"))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -805,7 +805,7 @@ TEST(BamRecordClipping, CCSKinetics_FiRiFpRp)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10="))
+        .Cigar(*ParseCigar("10="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -863,7 +863,7 @@ TEST(BamRecordClipping, CCSKinetics_SingleBase)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10="))
+        .Cigar(*ParseCigar("10="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -899,7 +899,7 @@ TEST(BamRecordClipping, CCSKinetics_NoClip)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10="))
+        .Cigar(*ParseCigar("10="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -953,7 +953,7 @@ TEST(BamRecordClipping, Basemods_MMML_FullPipeline)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("29="))
+        .Cigar(*ParseCigar("29="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -997,7 +997,7 @@ TEST(BamRecordClipping, Basemods_MMML_LostAllMods)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("29="))
+        .Cigar(*ParseCigar("29="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -1042,7 +1042,7 @@ TEST(BamRecordClipping, Pileup_SaTag_FullPipeline)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("29="))
+        .Cigar(*ParseCigar("29="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -1114,7 +1114,7 @@ TEST(BamRecordClipping, Pileup_SaTag_AlignedBoundary)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("15="))
+        .Cigar(*ParseCigar("15="))
         .Sequence(seq)
         .Qualities(quals);
 
@@ -1200,7 +1200,7 @@ TEST(BamRecordClipping, RoundTrip_ReferenceClipWithDeletion)
         .RefId(0)
         .Pos(50)
         .MapQ(60)
-        .Cigar(ParseCigar("3M2D5M"))
+        .Cigar(*ParseCigar("3M2D5M"))
         .Sequence("ACGTAGCT")
         .Qualities(std::vector<std::uint8_t>{10, 20, 30, 40, 50, 60, 70, 80});
 
@@ -1259,7 +1259,7 @@ TEST(BamRecordClipping, RoundTrip_CCSKinetics)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("10="))
+        .Cigar(*ParseCigar("10="))
         .Sequence("AACCGTTAGC")
         .Qualities(std::vector<std::uint8_t>{10, 10, 20, 20, 30, 40, 40, 10, 30, 20});
 
@@ -1336,7 +1336,7 @@ TEST(BamRecordClipping, RoundTrip_BasemodsMMML)
         .RefId(0)
         .Pos(100)
         .MapQ(60)
-        .Cigar(ParseCigar("29="))
+        .Cigar(*ParseCigar("29="))
         .Sequence(seq)
         .Qualities(quals);
 

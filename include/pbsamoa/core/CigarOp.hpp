@@ -2,6 +2,7 @@
 #define PBSAMOA_CORE_CIGAROP_HPP
 
 #include <array>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string>
@@ -64,7 +65,7 @@ constexpr std::int64_t ReferenceLength(CigarView cigar);
 constexpr std::int64_t QueryLength(CigarView cigar);
 
 /// \brief Parse CIGAR from SAM text (e.g., "8M2I4M1D3M"). "*" returns empty.
-std::vector<CigarOp> ParseCigar(std::string_view text);
+std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view text);
 
 /// \brief Serialize CIGAR operations to SAM text. Empty returns "*".
 std::string CigarToString(CigarView cigar);

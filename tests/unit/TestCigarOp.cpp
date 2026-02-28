@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <array>
-#include <stdexcept>
 #include <vector>
 
 #include <cstdint>
@@ -85,7 +84,7 @@ TEST(CigarOp, ConsumesQueryAndReference)
 TEST(CigarParse, SpecExample)
 {
     // r001: 8M2I4M1D3M
-    const std::vector<CigarOp> cigar{ParseCigar("8M2I4M1D3M")};
+    const std::vector<CigarOp> cigar{*ParseCigar("8M2I4M1D3M")};
     ASSERT_EQ(std::size(cigar), 5U);
     EXPECT_EQ(cigar[0], CigarOp(CigarOpType::M, 8));
     EXPECT_EQ(cigar[1], CigarOp(CigarOpType::I, 2));
@@ -96,20 +95,20 @@ TEST(CigarParse, SpecExample)
 
 TEST(CigarParse, StarReturnsEmpty)
 {
-    const std::vector<CigarOp> cigar{ParseCigar("*")};
+    const std::vector<CigarOp> cigar{*ParseCigar("*")};
     EXPECT_TRUE(std::empty(cigar));
 }
 
 TEST(CigarParse, SingleOp)
 {
-    const std::vector<CigarOp> cigar{ParseCigar("100M")};
+    const std::vector<CigarOp> cigar{*ParseCigar("100M")};
     ASSERT_EQ(std::size(cigar), 1U);
     EXPECT_EQ(cigar[0], CigarOp(CigarOpType::M, 100));
 }
 
 TEST(CigarParse, AllOpTypes)
 {
-    const std::vector<CigarOp> cigar{ParseCigar("1M1I1D1N1S1H1P1=1X")};
+    const std::vector<CigarOp> cigar{*ParseCigar("1M1I1D1N1S1H1P1=1X")};
     ASSERT_EQ(std::size(cigar), 9U);
     EXPECT_EQ(cigar[0].Type(), CigarOpType::M);
     EXPECT_EQ(cigar[8].Type(), CigarOpType::X);
@@ -118,7 +117,7 @@ TEST(CigarParse, AllOpTypes)
 TEST(CigarToString, RoundTrip)
 {
     const std::string original{"8M2I4M1D3M"};
-    const std::vector<CigarOp> cigar{ParseCigar(original)};
+    const std::vector<CigarOp> cigar{*ParseCigar(original)};
     EXPECT_EQ(CigarToString(cigar), original);
 }
 
@@ -127,21 +126,21 @@ TEST(CigarToString, EmptyReturnsStar) { EXPECT_EQ(CigarToString({}), "*"); }
 TEST(CigarLength, SpecExampleReferenceLength)
 {
     // 8M2I4M1D3M: ref = 8+4+1+3 = 16
-    const std::vector<CigarOp> cigar{ParseCigar("8M2I4M1D3M")};
+    const std::vector<CigarOp> cigar{*ParseCigar("8M2I4M1D3M")};
     EXPECT_EQ(ReferenceLength(cigar), 16);
 }
 
 TEST(CigarLength, SpecExampleQueryLength)
 {
     // 8M2I4M1D3M: query = 8+2+4+3 = 17
-    const std::vector<CigarOp> cigar{ParseCigar("8M2I4M1D3M")};
+    const std::vector<CigarOp> cigar{*ParseCigar("8M2I4M1D3M")};
     EXPECT_EQ(QueryLength(cigar), 17);
 }
 
 TEST(CigarLength, WithSoftClip)
 {
     // 3S6M1P1I4M: query = 3+6+1+4 = 14, ref = 6+4 = 10
-    const std::vector<CigarOp> cigar{ParseCigar("3S6M1P1I4M")};
+    const std::vector<CigarOp> cigar{*ParseCigar("3S6M1P1I4M")};
     EXPECT_EQ(QueryLength(cigar), 14);
     EXPECT_EQ(ReferenceLength(cigar), 10);
 }
@@ -189,24 +188,25 @@ TEST(Reg2Bins, LargeRegionProducesManyBins)
     EXPECT_GT(std::size(bins), 10U);
 }
 
-TEST(CigarParse, ZeroLengthOpThrows)
+TEST(CigarParse, ZeroLengthOpReturnsError)
 {
-    EXPECT_THROW(ParseCigar("0M"), std::runtime_error);
-    EXPECT_THROW(ParseCigar("0S2M"), std::runtime_error);
-    EXPECT_THROW(ParseCigar("3M0D2I"), std::runtime_error);
+    EXPECT_FALSE(ParseCigar("0M").has_value());
+    EXPECT_FALSE(ParseCigar("0S2M").has_value());
+    EXPECT_FALSE(ParseCigar("3M0D2I").has_value());
 }
 
 TEST(CigarParse, EmptyStringReturnsEmpty)
 {
-    const std::vector<CigarOp> cigar{ParseCigar("")};
-    EXPECT_TRUE(std::empty(cigar));
+    const auto cigar{ParseCigar("")};
+    ASSERT_TRUE(cigar.has_value());
+    EXPECT_TRUE(std::empty(*cigar));
 }
 
-TEST(CigarParse, InvalidOpCharThrows) { EXPECT_THROW(ParseCigar("8Z"), std::runtime_error); }
+TEST(CigarParse, InvalidOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8Z").has_value()); }
 
-TEST(CigarParse, MissingOpCharThrows) { EXPECT_THROW(ParseCigar("8"), std::runtime_error); }
+TEST(CigarParse, MissingOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8").has_value()); }
 
-TEST(CigarParse, BadIntegerThrows) { EXPECT_THROW(ParseCigar("M8"), std::runtime_error); }
+TEST(CigarParse, BadIntegerReturnsError) { EXPECT_FALSE(ParseCigar("M8").has_value()); }
 
 }  // namespace Samoa
 }  // namespace PacBio

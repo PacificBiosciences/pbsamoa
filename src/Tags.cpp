@@ -8,7 +8,6 @@
 #include <vector>
 
 #include <cstdio>
-#include <cstdlib>
 
 namespace PacBio {
 namespace Samoa {
@@ -291,15 +290,13 @@ void TagArray::AppendFloat(float v)
 
 const TagValue* TagMap::Get(TagKey key) const
 {
-    const std::vector<Entry>::const_iterator it{
-        std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
+    const auto it{std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
     return (it != std::ranges::end(entries_)) ? &it->second : nullptr;
 }
 
 void TagMap::Set(TagKey key, TagValue value)
 {
-    const std::vector<Entry>::iterator it{
-        std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
+    const auto it{std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
     if (it != std::ranges::end(entries_)) {
         it->second = std::move(value);
     } else {
@@ -309,8 +306,7 @@ void TagMap::Set(TagKey key, TagValue value)
 
 bool TagMap::Remove(TagKey key)
 {
-    const std::vector<Entry>::const_iterator it{
-        std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
+    const auto it{std::ranges::find_if(entries_, [key](const Entry& e) { return e.first == key; })};
     if (it == std::ranges::end(entries_)) {
         return false;
     }

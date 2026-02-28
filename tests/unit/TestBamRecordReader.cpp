@@ -134,6 +134,37 @@ TEST(BamRecordReader, TagFilterDropTags)
     }
 }
 
+TEST(BamRecordReader, TagFilterKeepTags)
+{
+    BamRecordReader noFilter{tests::DataDir / "spec_example.bam",
+                             BamRecordReaderConfig{.DecodeWorkers = 0}};
+    BamRecordReader withFilter{tests::DataDir / "spec_example.bam",
+                               BamRecordReaderConfig{
+                                   .DecodeWorkers = 0,
+                                   .TagFilter = KeepTags{TagKey{'N', 'M'}},
+                               }};
+
+    while (true) {
+        const auto full{noFilter.ReadRecord()};
+        const auto filtered{withFilter.ReadRecord()};
+        ASSERT_EQ(full.has_value(), filtered.has_value());
+        if (!full.has_value()) {
+            break;
+        }
+        // Core fields match
+        EXPECT_EQ(full->Name(), filtered->Name());
+        EXPECT_EQ(full->Pos(), filtered->Pos());
+        // Filtered record should only have the NM tag (if it was present originally)
+        if (full->Tags().Contains(TagKey{'N', 'M'})) {
+            EXPECT_TRUE(filtered->Tags().Contains(TagKey{'N', 'M'}));
+        }
+        // Filtered record should NOT have other tags like RG
+        if (full->Tags().Contains(TagKey{'R', 'G'})) {
+            EXPECT_FALSE(filtered->Tags().Contains(TagKey{'R', 'G'}));
+        }
+    }
+}
+
 TEST(BamRecordReader, EarlyDestruction)
 {
     const auto path = tests::DataDir / "many_records.bam";

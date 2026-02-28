@@ -406,5 +406,57 @@ TEST(BamRawReader, WhitelistAndChunkingMutuallyExclusive)
     EXPECT_THROW(BamRawReader(path, config), std::invalid_argument);
 }
 
+TEST(BamRawReader, RecordLimitStopsEarly)
+{
+    BamRawReader reader{tests::DataDir / "spec_example.bam", BamRawReaderConfig{.RecordLimit = 2}};
+    std::size_t count{0};
+    for ([[maybe_unused]] const auto& rec : reader.Records()) {
+        ++count;
+    }
+    EXPECT_EQ(count, 2u);
+}
+
+TEST(BamRawReader, SeekAndTell)
+{
+    BamRawReader reader{tests::DataDir / "spec_example.bam"};
+    const auto first{reader.ReadRecord()};
+    ASSERT_TRUE(first.has_value());
+    const std::string firstName{std::string{first->Name()}};
+
+    const VirtualOffset pos{reader.Tell()};
+
+    // Read past more records
+    reader.ReadRecord();
+    reader.ReadRecord();
+
+    // Seek back
+    reader.Seek(VirtualOffset{0, 0});
+
+    // First seek to a known position doesn't guarantee same record due to how
+    // virtual offsets work, so just verify Seek+Tell round-trip
+    reader.Seek(pos);
+    const VirtualOffset pos2{reader.Tell()};
+    EXPECT_EQ(pos.Value(), pos2.Value());
+}
+
+TEST(BamRawReader, QueryEmptyRegion)
+{
+    const auto baiPath = tests::DataDir / "spec_example.bam.bai";
+    const auto bamPath = tests::DataDir / "spec_example.bam";
+    if (!std::filesystem::exists(baiPath)) {
+        GTEST_SKIP() << "spec_example.bam.bai not found";
+    }
+
+    BamRawReader reader{bamPath};
+    const auto index = BaiIndex::FromFile(baiPath);
+
+    // Query a region far beyond any records
+    std::size_t count{0};
+    for ([[maybe_unused]] const auto& rec : reader.Query(index, 0, 100000, 200000)) {
+        ++count;
+    }
+    EXPECT_EQ(count, 0u);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

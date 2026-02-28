@@ -89,8 +89,8 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
         if (!bytesRead.has_value() || (*bytesRead == 0)) {
             break;
         }
-        data.insert(std::end(data), std::begin(blockBuf),
-                    std::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
+        data.insert(std::ranges::end(data), std::ranges::begin(blockBuf),
+                    std::ranges::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
     }
 
     // Validate minimum size for header
@@ -146,8 +146,8 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
         if (!bytesRead.has_value() || (*bytesRead == 0)) {
             break;
         }
-        data.insert(std::end(data), std::begin(blockBuf),
-                    std::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
+        data.insert(std::ranges::end(data), std::ranges::begin(blockBuf),
+                    std::ranges::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
     }
 
     // Validate minimum size for header
@@ -268,7 +268,7 @@ std::vector<std::int64_t> ZmwIndex::Find(std::int32_t zmw) const
     BuildIndex();
 
     const auto it{zmwIndex_.find(zmw)};
-    if (it == std::end(zmwIndex_)) {
+    if (it == std::ranges::end(zmwIndex_)) {
         return {};
     }
 
@@ -286,7 +286,7 @@ std::vector<std::int64_t> ZmwIndex::Find(ZmwIdentity id) const
 
     const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
     const auto it{identityIndex_.find(key)};
-    if (it == std::end(identityIndex_)) {
+    if (it == std::ranges::end(identityIndex_)) {
         return {};
     }
 
@@ -307,7 +307,7 @@ std::vector<std::int64_t> ZmwIndex::Find(std::span<const ZmwIdentity> ids) const
     for (const ZmwIdentity& id : ids) {
         const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
         const auto it{identityIndex_.find(key)};
-        if (it != std::end(identityIndex_)) {
+        if (it != std::ranges::end(identityIndex_)) {
             for (const std::ptrdiff_t idx : it->second) {
                 result.push_back(offsets_[idx]);
             }
@@ -340,7 +340,7 @@ std::int64_t ZmwIndex::FirstOffset(std::int32_t zmw) const
     BuildIndex();
 
     const auto it{zmwIndex_.find(zmw)};
-    if (it == std::end(zmwIndex_)) {
+    if (it == std::ranges::end(zmwIndex_)) {
         throw std::runtime_error{std::format("ZMW not found: {}", zmw)};
     }
     // First entry is the lowest file-order index (indices are inserted in order)
@@ -353,7 +353,7 @@ std::int64_t ZmwIndex::FirstOffset(ZmwIdentity id) const
 
     const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
     const auto it{identityIndex_.find(key)};
-    if (it == std::end(identityIndex_)) {
+    if (it == std::ranges::end(identityIndex_)) {
         throw std::runtime_error{
             std::format("ZMW identity not found: rgId={} zmw={}", id.rgId, id.zmw)};
     }

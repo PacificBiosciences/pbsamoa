@@ -8,10 +8,14 @@
 #include <pbsamoa/io/BamRawReader.hpp>
 
 #include <algorithm>
+#include <filesystem>
+#include <format>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
+#include <cassert>
 #include <cstdint>
 
 namespace PacBio {
@@ -184,42 +188,45 @@ void BaiIndex::ToFile(const std::filesystem::path& path) const
     if (!file.is_open()) {
         throw std::runtime_error{"Cannot create BAI file: " + path.string()};
     }
+    file.exceptions(std::ios::failbit | std::ios::badbit);
 
-    // Magic
-    file.write("BAI\1", 4);
+    try {
+        // Magic
+        file.write("BAI\1", 4);
 
-    // n_ref
-    const std::int32_t nRef = std::ssize(references_);
-    WriteI32LE(file, nRef);
+        // n_ref
+        const std::int32_t nRef = std::ssize(references_);
+        WriteI32LE(file, nRef);
 
-    for (const ReferenceIndex& ref : references_) {
-        // n_bin
-        const std::int32_t nBin = std::ssize(ref.bins);
-        WriteI32LE(file, nBin);
+        for (const ReferenceIndex& ref : references_) {
+            // n_bin
+            const std::int32_t nBin = std::ssize(ref.bins);
+            WriteI32LE(file, nBin);
 
-        for (const auto& [binNumber, chunks] : ref.bins) {
-            WriteU32LE(file, binNumber);
-            const std::int32_t nChunks = std::ssize(chunks);
-            WriteI32LE(file, nChunks);
-            for (const Chunk& chunk : chunks) {
-                WriteU64LE(file, chunk.Begin.Value());
-                WriteU64LE(file, chunk.End.Value());
+            for (const auto& [binNumber, chunks] : ref.bins) {
+                WriteU32LE(file, binNumber);
+                const std::int32_t nChunks = std::ssize(chunks);
+                WriteI32LE(file, nChunks);
+                for (const Chunk& chunk : chunks) {
+                    WriteU64LE(file, chunk.Begin.Value());
+                    WriteU64LE(file, chunk.End.Value());
+                }
+            }
+
+            // n_intv
+            const std::int32_t nIntv = std::ssize(ref.linearIndex);
+            WriteI32LE(file, nIntv);
+            for (const VirtualOffset& offset : ref.linearIndex) {
+                WriteU64LE(file, offset.Value());
             }
         }
 
-        // n_intv
-        const std::int32_t nIntv = std::ssize(ref.linearIndex);
-        WriteI32LE(file, nIntv);
-        for (const VirtualOffset& offset : ref.linearIndex) {
-            WriteU64LE(file, offset.Value());
-        }
-    }
-
-    // n_no_coor
-    WriteU64LE(file, unmappedCount_);
-
-    if (!file.good()) {
-        throw std::runtime_error{"Failed writing BAI file: " + path.string()};
+        // n_no_coor
+        WriteU64LE(file, unmappedCount_);
+    } catch (...) {
+        file.close();
+        std::filesystem::remove(path);
+        throw;
     }
 }
 
@@ -304,6 +311,15 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
 
         const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
         if (hdrSize > 0) {
+            // Validate sort order — BAI indexing requires coordinate-sorted input
+            auto headerResult{SamHeader::FromBamHeaderBlock(
+                std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+            if (headerResult.has_value() && headerResult->SortOrder() != "coordinate") {
+                throw std::runtime_error{
+                    std::format("BaiIndex::Build requires coordinate-sorted BAM, got SO:{}",
+                                headerResult->SortOrder())};
+            }
+
             // Get n_ref from the header
             const std::uint32_t lText{ReadU32LE(std::data(headerBuf) + 4)};
             nRef = ReadU32LE(std::data(headerBuf) + 8 + lText);
@@ -396,28 +412,37 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         std::size_t pos{0};
         for (const BlockSegment& seg : segments) {
             if (accumPos < pos + seg.byteCount) {
-                const std::uint16_t within = seg.withinBlockStart + (accumPos - pos);
-                return VirtualOffset{seg.blockOffset, within};
+                const std::size_t within{seg.withinBlockStart + (accumPos - pos)};
+                assert(within <= std::numeric_limits<std::uint16_t>::max());
+                return VirtualOffset{seg.blockOffset, static_cast<std::uint16_t>(within)};
             }
             pos += seg.byteCount;
         }
         // Past end — return the next block position
         if (!std::empty(segments)) {
             const BlockSegment& last{segments.back()};
-            return VirtualOffset{last.blockOffset, static_cast<std::uint16_t>(
-                                                       last.withinBlockStart + last.byteCount)};
+            const std::size_t pastEnd{last.withinBlockStart + last.byteCount};
+            assert(pastEnd <= std::numeric_limits<std::uint16_t>::max());
+            return VirtualOffset{last.blockOffset, static_cast<std::uint16_t>(pastEnd)};
         }
         return VirtualOffset{};
     };
 
     std::size_t accumPos{0};
 
+    const auto ensureBytes = [&](std::size_t n) -> bool {
+        while ((std::size(recordAccum) - accumPos) < n) {
+            if (!readMoreData()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     while (true) {
         // Ensure we have at least 4 bytes for block_size
-        while (std::size(recordAccum) - accumPos < 4) {
-            if (!readMoreData()) {
-                goto done;
-            }
+        if (!ensureBytes(4)) {
+            break;
         }
 
         const std::uint32_t blockSize{ReadU32LE(std::data(recordAccum) + accumPos)};
@@ -428,10 +453,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         const std::size_t totalRecordBytes{4 + blockSize};
 
         // Ensure we have the complete record
-        while (std::size(recordAccum) - accumPos < totalRecordBytes) {
-            if (!readMoreData()) {
-                goto done;  // truncated record at EOF
-            }
+        if (!ensureBytes(totalRecordBytes)) {
+            break;
         }
 
         // Record virtual offset = position of the block_size field
@@ -516,7 +539,9 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
                 if ((consumed < accumPos) && (segIdx < std::ssize(segments))) {
                     // The segment at segIdx straddles accumPos
                     const std::size_t skipInSeg{accumPos - consumed};
-                    segments[segIdx].withinBlockStart += skipInSeg;
+                    const std::size_t newWithin{segments[segIdx].withinBlockStart + skipInSeg};
+                    assert(newWithin <= std::numeric_limits<std::uint16_t>::max());
+                    segments[segIdx].withinBlockStart = static_cast<std::uint16_t>(newWithin);
                     segments[segIdx].byteCount -= skipInSeg;
                 } else if (consumed > accumPos) {
                     // This shouldn't happen if segments are contiguous
@@ -532,7 +557,6 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         }
     }
 
-done:
     // Merge chunks within each bin
     for (ReferenceIndex& ref : index.references_) {
         for (auto& [binNum, chunks] : ref.bins) {

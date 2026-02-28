@@ -76,7 +76,7 @@ int Runner(int argc, char** argv)
 
     const std::filesystem::path baiPath{bamPath.string() + ".bai"};
     if (!std::filesystem::exists(baiPath)) {
-        throw std::runtime_error{"index file not found: " + baiPath.string()};
+        throw std::runtime_error{std::format("index file not found: {}", baiPath.string())};
     }
     const BaiIndex index{BaiIndex::FromFile(baiPath)};
 
@@ -87,7 +87,8 @@ int Runner(int argc, char** argv)
 
     const std::int32_t refId{header.ReferenceId(region->refName)};
     if (refId < 0) {
-        throw std::runtime_error{"reference '" + region->refName + "' not found in BAM header"};
+        throw std::runtime_error{
+            std::format("reference '{}' not found in BAM header", region->refName)};
     }
 
     for (const auto& view : reader.Query(index, refId, region->beg, region->end)) {

@@ -99,7 +99,7 @@ TEST(ProgramRecord, WithChaining)
 
 TEST(SamHeader, ParseMinimalHeader)
 {
-    const SamHeader header = SamHeader::FromText("@HD\tVN:1.6\n");
+    const SamHeader header = *SamHeader::FromText("@HD\tVN:1.6\n");
 
     EXPECT_EQ(header.Version(), "1.6");
     EXPECT_TRUE(std::empty(header.ReferenceSequences()));
@@ -113,7 +113,7 @@ TEST(SamHeader, ParseSpecExample)
     const std::string text =
         "@HD\tVN:1.6\tSO:coordinate\n"
         "@SQ\tSN:ref\tLN:45\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.Version(), "1.6");
     EXPECT_EQ(header.SortOrder(), "coordinate");
@@ -130,7 +130,7 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
         "@SQ\tSN:chr1\tLN:248956422\n"
         "@SQ\tSN:chr2\tLN:242193529\n"
         "@SQ\tSN:chrM\tLN:16569\tTP:circular\tSP:Homo sapiens\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReferenceSequences()), 3U);
     EXPECT_EQ(header.ReferenceSequences()[0].Name(), "chr1");
@@ -150,7 +150,7 @@ TEST(SamHeader, ParseReadGroups)
         "@HD\tVN:1.6\n"
         "@RG\tID:rg1\tSM:sample1\tPL:ILLUMINA\n"
         "@RG\tID:rg2\tSM:sample2\tPL:PACBIO\tLB:lib2\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReadGroups()), 2U);
     EXPECT_EQ(header.ReadGroups()[0].Id(), "rg1");
@@ -170,7 +170,7 @@ TEST(SamHeader, ParseProgramRecords)
         "@HD\tVN:1.6\n"
         "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\tCL:bwa mem ref.fa reads.fq\n"
         "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\tCL:samtools sort\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ProgramRecords()), 2U);
     EXPECT_EQ(header.ProgramRecords()[0].Id(), "bwa");
@@ -190,7 +190,7 @@ TEST(SamHeader, ParseComments)
         "@HD\tVN:1.6\n"
         "@CO\tThis is a comment\n"
         "@CO\tAnother comment line\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.Comments()), 2U);
     EXPECT_EQ(header.Comments()[0], "This is a comment");
@@ -201,7 +201,7 @@ TEST(SamHeader, ParseNoHdLine)
 {
     // Spec says @HD is optional
     const std::string text = "@SQ\tSN:ref\tLN:100\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_TRUE(std::empty(header.Version()));
     ASSERT_EQ(std::size(header.ReferenceSequences()), 1U);
@@ -210,7 +210,7 @@ TEST(SamHeader, ParseNoHdLine)
 
 TEST(SamHeader, ParseEmptyHeader)
 {
-    const SamHeader header = SamHeader::FromText("");
+    const SamHeader header = *SamHeader::FromText("");
 
     EXPECT_TRUE(std::empty(header.Version()));
     EXPECT_TRUE(std::empty(header.ReferenceSequences()));
@@ -219,7 +219,7 @@ TEST(SamHeader, ParseEmptyHeader)
 TEST(SamHeader, ParseGroupingOrder)
 {
     const std::string text = "@HD\tVN:1.6\tGO:query\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.GroupOrder(), "query");
 }
@@ -227,7 +227,7 @@ TEST(SamHeader, ParseGroupingOrder)
 TEST(SamHeader, ParseSubSort)
 {
     const std::string text = "@HD\tVN:1.6\tSO:coordinate\tSS:coordinate:queryname\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.SortOrder(), "coordinate");
     EXPECT_EQ(header.SubSort(), "coordinate:queryname");
@@ -236,7 +236,7 @@ TEST(SamHeader, ParseSubSort)
 TEST(SamHeader, ParseToleratesTrailingNewlines)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tSN:ref\tLN:45\n\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.Version(), "1.6");
     ASSERT_EQ(std::size(header.ReferenceSequences()), 1U);
@@ -245,7 +245,7 @@ TEST(SamHeader, ParseToleratesTrailingNewlines)
 TEST(SamHeader, ParseToleratesNoTrailingNewline)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tSN:ref\tLN:45";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.Version(), "1.6");
     ASSERT_EQ(std::size(header.ReferenceSequences()), 1U);
@@ -254,7 +254,7 @@ TEST(SamHeader, ParseToleratesNoTrailingNewline)
 TEST(SamHeader, ParseSqWithAlternativeNames)
 {
     const std::string text = "@SQ\tSN:MT\tLN:16569\tAN:chrMT,M,chrM\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReferenceSequences()), 1U);
     const std::string* an = header.ReferenceSequences()[0].GetTag("AN");
@@ -265,25 +265,25 @@ TEST(SamHeader, ParseSqWithAlternativeNames)
 TEST(SamHeader, RejectsInvalidSqMissingLn)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tSN:ref\n";
-    EXPECT_THROW(SamHeader::FromText(text), std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromText(text).has_value());
 }
 
 TEST(SamHeader, RejectsInvalidSqMissingSn)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tLN:100\n";
-    EXPECT_THROW(SamHeader::FromText(text), std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromText(text).has_value());
 }
 
 TEST(SamHeader, RejectsInvalidRgMissingId)
 {
     const std::string text = "@HD\tVN:1.6\n@RG\tSM:sample\n";
-    EXPECT_THROW(SamHeader::FromText(text), std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromText(text).has_value());
 }
 
 TEST(SamHeader, RejectsInvalidPgMissingId)
 {
     const std::string text = "@HD\tVN:1.6\n@PG\tPN:tool\n";
-    EXPECT_THROW(SamHeader::FromText(text), std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromText(text).has_value());
 }
 
 // --- SamHeader serialization tests ---
@@ -391,7 +391,7 @@ TEST(SamHeader, RoundTripSpecExample)
     const std::string original =
         "@HD\tVN:1.6\tSO:coordinate\n"
         "@SQ\tSN:ref\tLN:45\n";
-    const SamHeader header = SamHeader::FromText(original);
+    const SamHeader header = *SamHeader::FromText(original);
     const std::string serialized = header.ToText();
     EXPECT_EQ(serialized, original);
 }
@@ -406,7 +406,7 @@ TEST(SamHeader, RoundTripFullHeader)
         "@PG\tID:bwa\tPN:bwa\tVN:0.7.17\n"
         "@PG\tID:samtools\tPN:samtools\tVN:1.17\tPP:bwa\n"
         "@CO\tGenerated by test\n";
-    const SamHeader header = SamHeader::FromText(original);
+    const SamHeader header = *SamHeader::FromText(original);
     const std::string serialized = header.ToText();
     EXPECT_EQ(serialized, original);
 }
@@ -416,7 +416,7 @@ TEST(SamHeader, RoundTripNoHdLine)
     // No @HD → serialization should still produce a valid header
     // Convention: omit @HD entirely if version is empty
     const std::string original = "@SQ\tSN:ref\tLN:100\n";
-    const SamHeader header = SamHeader::FromText(original);
+    const SamHeader header = *SamHeader::FromText(original);
     const std::string serialized = header.ToText();
     EXPECT_EQ(serialized, original);
 }
@@ -440,7 +440,7 @@ TEST(SamHeader, ReferenceNameToId)
         "@SQ\tSN:chr1\tLN:248956422\n"
         "@SQ\tSN:chr2\tLN:242193529\n"
         "@SQ\tSN:chrM\tLN:16569\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.ReferenceId("chr1"), 0);
     EXPECT_EQ(header.ReferenceId("chr2"), 1);
@@ -455,7 +455,7 @@ TEST(SamHeader, ReferenceIdToName)
         "@HD\tVN:1.6\n"
         "@SQ\tSN:chr1\tLN:248956422\n"
         "@SQ\tSN:chr2\tLN:242193529\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     EXPECT_EQ(header.ReferenceName(0), "chr1");
     EXPECT_EQ(header.ReferenceName(1), "chr2");
@@ -465,7 +465,7 @@ TEST(SamHeader, ReferenceIdToName)
 TEST(SamHeader, ReferenceIdToNameBoundsCheck)
 {
     const std::string text = "@SQ\tSN:ref\tLN:100\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
 
     // Out of bounds should throw
     EXPECT_THROW(header.ReferenceName(1), std::out_of_range);
@@ -477,7 +477,7 @@ TEST(SamHeader, ReferenceCount)
     const std::string text =
         "@SQ\tSN:chr1\tLN:100\n"
         "@SQ\tSN:chr2\tLN:200\n";
-    const SamHeader header = SamHeader::FromText(text);
+    const SamHeader header = *SamHeader::FromText(text);
     EXPECT_EQ(header.NumReferences(), 2);
 }
 
@@ -561,7 +561,7 @@ TEST(SamHeader, ParseBamHeaderBlock)
     const std::string headerText = "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:ref\tLN:45\n";
     const std::vector<std::pair<std::string, std::int32_t>> refs = {{"ref", 45}};
     const std::vector<std::byte> data = BuildBamHeader(headerText, refs);
-    const SamHeader header = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
+    const SamHeader header = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
 
     EXPECT_EQ(header.Version(), "1.6");
     EXPECT_EQ(header.SortOrder(), "coordinate");
@@ -581,7 +581,7 @@ TEST(SamHeader, ParseBamHeaderBlockMultipleRefs)
         {"chr2", 2000},
     };
     const std::vector<std::byte> data = BuildBamHeader(headerText, refs);
-    const SamHeader header = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
+    const SamHeader header = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
 
     ASSERT_EQ(header.NumReferences(), 2);
     EXPECT_EQ(header.ReferenceId("chr1"), 0);
@@ -596,7 +596,7 @@ TEST(SamHeader, ParseBamHeaderBlockNoSqInText)
         {"chr1", 1000},
     };
     const std::vector<std::byte> data = BuildBamHeader(headerText, refs);
-    const SamHeader header = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
+    const SamHeader header = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
 
     // Should use binary dict as authoritative source
     ASSERT_EQ(header.NumReferences(), 1);
@@ -610,8 +610,7 @@ TEST(SamHeader, ParseBamHeaderBlockBadMagic)
     // Pad enough to read l_text
     data.resize(12, std::byte{0});
 
-    EXPECT_THROW(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}),
-                 std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}).has_value());
 }
 
 TEST(SamHeader, ParseBamHeaderBlockTruncated)
@@ -620,8 +619,7 @@ TEST(SamHeader, ParseBamHeaderBlockTruncated)
     const std::vector<std::byte> data = {std::byte{'B'}, std::byte{'A'}, std::byte{'M'},
                                          std::byte{1}};
 
-    EXPECT_THROW(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}),
-                 std::runtime_error);
+    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}).has_value());
 }
 
 TEST(SamHeader, ParseBamHeaderBlockEmptyHeaderText)
@@ -629,7 +627,7 @@ TEST(SamHeader, ParseBamHeaderBlockEmptyHeaderText)
     const std::string headerText;
     const std::vector<std::pair<std::string, std::int32_t>> refs = {{"ref", 100}};
     const std::vector<std::byte> data = BuildBamHeader(headerText, refs);
-    const SamHeader header = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
+    const SamHeader header = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
 
     ASSERT_EQ(header.NumReferences(), 1);
     EXPECT_EQ(header.ReferenceSequences()[0].Name(), "ref");
@@ -644,7 +642,7 @@ TEST(SamHeader, ParseBamHeaderBlockNullPaddedText)
 
     const std::vector<std::pair<std::string, std::int32_t>> refs;
     const std::vector<std::byte> data = BuildBamHeader(headerText, refs);
-    const SamHeader header = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
+    const SamHeader header = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data});
 
     EXPECT_EQ(header.Version(), "1.6");
 }
@@ -666,7 +664,7 @@ TEST(SamHeader, ParseFromRealBamFile)
 
     // Parse the BAM header from decompressed bytes
     const SamHeader header =
-        SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
+        *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
 
     // The spec example BAM has: @HD VN:1.6 SO:coordinate, @SQ SN:ref LN:45
     EXPECT_EQ(header.Version(), "1.6");
@@ -688,7 +686,7 @@ TEST(SamHeader, ParseHeaderOnlyBam)
     ASSERT_TRUE(bytesRead.has_value());
     ASSERT_GT(*bytesRead, 0U);
     const SamHeader header =
-        SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
+        *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
 
     // Header-only BAM should parse without error
     EXPECT_FALSE(std::empty(header.Version()));
@@ -710,7 +708,7 @@ TEST(SamHeader, BamBinaryRoundTrip)
     const std::vector<std::byte> binary = header.ToBamHeaderBlock();
 
     // Parse back
-    const SamHeader parsed = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
+    const SamHeader parsed = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
 
     EXPECT_EQ(parsed.Version(), "1.6");
     EXPECT_EQ(parsed.SortOrder(), "coordinate");
@@ -727,7 +725,7 @@ TEST(SamHeader, BamBinaryRoundTripEmptyHeader)
 {
     const SamHeader header;
     const std::vector<std::byte> binary = header.ToBamHeaderBlock();
-    const SamHeader parsed = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
+    const SamHeader parsed = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
 
     EXPECT_EQ(parsed.NumReferences(), 0);
     EXPECT_TRUE(std::empty(parsed.Version()));
@@ -756,11 +754,11 @@ TEST(SamHeader, BamBinaryFromRealFileRoundTrip)
     const std::optional<std::size_t> bytesRead = reader.ReadBlock(buffer);
     ASSERT_TRUE(bytesRead.has_value());
     const SamHeader original =
-        SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
+        *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
 
     // Serialize and re-parse
     const std::vector<std::byte> binary = original.ToBamHeaderBlock();
-    const SamHeader reparsed = SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
+    const SamHeader reparsed = *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{binary});
 
     EXPECT_EQ(reparsed.Version(), original.Version());
     EXPECT_EQ(reparsed.SortOrder(), original.SortOrder());

@@ -255,6 +255,7 @@ struct BgzfPipelineState
     std::condition_variable readyCv;
     std::atomic<bool> done{false};
     std::atomic<bool> pipelineError{false};
+    mutable std::mutex errorMutex;
     std::exception_ptr errorPtr;
 
     // Per-worker decompressors (indexed by ThreadIndex)
@@ -1067,8 +1068,12 @@ void BgzfPipelineState::ParseHeader()
         // Check if we have the complete header
         const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
         if (hdrSize > 0) {
-            header = SamHeader::FromBamHeaderBlock(
-                std::span<const std::byte>{std::data(headerBuf), hdrSize});
+            auto headerResult{SamHeader::FromBamHeaderBlock(
+                std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+            if (!headerResult.has_value()) {
+                throw std::runtime_error{std::move(headerResult.error())};
+            }
+            header = std::move(*headerResult);
 
             // Save leftover bytes after header
             const std::size_t leftover{headerLen - hdrSize};
@@ -1094,8 +1099,12 @@ void BgzfPipelineState::ParseHeader()
     }
     const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
     if (hdrSize > 0) {
-        header = SamHeader::FromBamHeaderBlock(
-            std::span<const std::byte>{std::data(headerBuf), hdrSize});
+        auto headerResult{SamHeader::FromBamHeaderBlock(
+            std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+        if (!headerResult.has_value()) {
+            throw std::runtime_error{std::move(headerResult.error())};
+        }
+        header = std::move(*headerResult);
         headerParsed = true;
     } else {
         throw std::runtime_error{"Incomplete BAM header"};
@@ -1434,7 +1443,10 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
             }
         }
     } catch (...) {
-        errorPtr = std::current_exception();
+        {
+            const std::lock_guard lock{errorMutex};
+            errorPtr = std::current_exception();
+        }
         pipelineError.store(true, std::memory_order_release);
     }
 
@@ -1523,7 +1535,10 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
                 counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
                 return result;
             }
-            std::rethrow_exception(errorPtr);
+            {
+                const std::lock_guard lock{errorMutex};
+                std::rethrow_exception(errorPtr);
+            }
         }
 
         if (done.load(std::memory_order_acquire)) {
@@ -1556,6 +1571,8 @@ void BgzfPipelineState::Seek(VirtualOffset offset)
 
     // Reset sync file position
     syncFile.clear();
+    // Within-block offset intentionally discarded; callers (BamRawReader::Query)
+    // scan past unwanted records within the target block.
     syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
     syncBlockOffset = offset.BlockOffset();
 
@@ -1563,7 +1580,7 @@ void BgzfPipelineState::Seek(VirtualOffset offset)
     headerEndFileOffset = offset.BlockOffset();
     initialBytes.clear();
 
-    // Reset pipeline state
+    // Reset pipeline state — safe without lock: pipeline threads joined by StopPipeline()
     done.store(false, std::memory_order_relaxed);
     pipelineError.store(false, std::memory_order_relaxed);
     errorPtr = nullptr;
@@ -1737,8 +1754,12 @@ void BgzfReader::Impl::ParseHeaderSync()
 
         const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
         if (hdrSize > 0) {
-            syncHeader = SamHeader::FromBamHeaderBlock(
-                std::span<const std::byte>{std::data(headerBuf), hdrSize});
+            auto headerResult{SamHeader::FromBamHeaderBlock(
+                std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+            if (!headerResult.has_value()) {
+                throw std::runtime_error{std::move(headerResult.error())};
+            }
+            syncHeader = std::move(*headerResult);
 
             const std::size_t remaining{headerLen - hdrSize};
             recordBuf.resize(std::ranges::max(remaining, MAX_DECOMPRESSED_BLOCK_SIZE));
@@ -1759,8 +1780,12 @@ void BgzfReader::Impl::ParseHeaderSync()
 
     const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
     if (hdrSize > 0) {
-        syncHeader = SamHeader::FromBamHeaderBlock(
-            std::span<const std::byte>{std::data(headerBuf), hdrSize});
+        auto headerResult{SamHeader::FromBamHeaderBlock(
+            std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+        if (!headerResult.has_value()) {
+            throw std::runtime_error{std::move(headerResult.error())};
+        }
+        syncHeader = std::move(*headerResult);
         recordBuf.resize(MAX_DECOMPRESSED_BLOCK_SIZE);
         recordBufSize = 0;
         recordBufPos = 0;

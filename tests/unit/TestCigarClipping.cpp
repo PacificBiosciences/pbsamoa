@@ -10,7 +10,7 @@ TEST(CigarClipping, ClipToQuery_AllMatch_TrimBothEnds)
 {
     // 10M, query [100,110), clip to [102,108)
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToQuery(cigar, 102, 108, 100, 110, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 102, 108, 100, 110, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "6M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -20,7 +20,7 @@ TEST(CigarClipping, ClipToQuery_AllMatch_TrimBothEnds)
 TEST(CigarClipping, ClipToQuery_AllMatch_NoClip)
 {
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToQuery(cigar, 100, 110, 100, 110, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 100, 110, 100, 110, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "10M");
     EXPECT_EQ(result.clipOffset, 0U);
     EXPECT_EQ(result.clipLength, 10U);
@@ -35,7 +35,7 @@ TEST(CigarClipping, ClipToQuery_WithInsertion)
     // Clip [104,110) => remove 4 from front
     // Front: eat 3M (ref+=3), eat 1 of 2I => remaining 1I + 5M
     const auto cigar{ParseCigar("3M2I5M")};
-    const auto result{ClipCigarToQuery(cigar, 104, 110, 100, 110, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 104, 110, 100, 110, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "1I5M");
     EXPECT_EQ(result.clipOffset, 4U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -48,7 +48,7 @@ TEST(CigarClipping, ClipToQuery_WithDeletion)
     // Clip [102,108) => remove 2 from front
     // Front: eat 2 of 3M (ref+=2) => 1M2D5M
     const auto cigar{ParseCigar("3M2D5M")};
-    const auto result{ClipCigarToQuery(cigar, 102, 108, 100, 108, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 102, 108, 100, 108, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "1M2D5M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -60,7 +60,7 @@ TEST(CigarClipping, ClipToQuery_WithSoftClips)
     // 2S3M1I4M2S, query=12, origQuery=[98,110)
     // Clip [100,108) => remove 2 front (2S), remove 2 back (2S)
     const auto cigar{ParseCigar("2S3M1I4M2S")};
-    const auto result{ClipCigarToQuery(cigar, 100, 108, 98, 110, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 100, 108, 98, 110, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "3M1I4M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 8U);
@@ -75,7 +75,7 @@ TEST(CigarClipping, ClipToQuery_Reverse)
     // Result: trim 3 from back of CIGAR => 7M
     // clipOffset = 0 (nothing removed from front)
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToQuery(cigar, 103, 110, 100, 110, 50, true)};
+    const auto result{ClipCigarToQuery(*cigar, 103, 110, 100, 110, 50, true)};
     EXPECT_EQ(CigarToString(result.cigar), "7M");
     EXPECT_EQ(result.clipOffset, 0U);
     EXPECT_EQ(result.clipLength, 7U);
@@ -87,7 +87,7 @@ TEST(CigarClipping, ClipToQuery_Reverse_Symmetric)
     // 10M, reverse, clip [102,108) => frontRemove=2, backRemove=2
     // After swap: still frontRemove=2, backRemove=2
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToQuery(cigar, 102, 108, 100, 110, 50, true)};
+    const auto result{ClipCigarToQuery(*cigar, 102, 108, 100, 110, 50, true)};
     EXPECT_EQ(CigarToString(result.cigar), "6M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -100,7 +100,7 @@ TEST(CigarClipping, ClipToQuery_DeletionExposedAtFront)
     // Clip [100,102) => frontRemove=0, backRemove=1
     // Back: eat 1 of 3M => 2D2M
     const auto cigar{ParseCigar("2D3M")};
-    const auto result{ClipCigarToQuery(cigar, 100, 102, 100, 103, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 100, 102, 100, 103, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "2D2M");
     EXPECT_EQ(result.clipOffset, 0U);
     EXPECT_EQ(result.clipLength, 2U);
@@ -113,7 +113,7 @@ TEST(CigarClipping, ClipToQuery_DeletionStranded)
     // Front: eat 3M (ref+=3), then 2D is non-query-consuming so skip (ref+=2), eat 1 of 5M (ref+=1)
     // Result: 4M
     const auto cigar{ParseCigar("3M2D5M")};
-    const auto result{ClipCigarToQuery(cigar, 104, 108, 100, 108, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 104, 108, 100, 108, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "4M");
     EXPECT_EQ(result.clipOffset, 4U);
     EXPECT_EQ(result.clipLength, 4U);
@@ -127,7 +127,7 @@ TEST(CigarClipping, ClipToQuery_HardClips)
     // Front: 3H non-query, non-ref => skip. eat 1 of 5M (ref+=1)
     // Back: 3H non-query => pop. eat 1 of 4M => 3M
     const auto cigar{ParseCigar("3H5M3H")};
-    const auto result{ClipCigarToQuery(cigar, 101, 104, 100, 105, 50, false)};
+    const auto result{ClipCigarToQuery(*cigar, 101, 104, 100, 105, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "3M");
     EXPECT_EQ(result.clipOffset, 1U);
     EXPECT_EQ(result.clipLength, 3U);
@@ -138,7 +138,7 @@ TEST(CigarClipping, ClipToReference_AllMatch_TrimBothEnds)
 {
     // 10M at pos 50, clip to [52, 58)
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToReference(cigar, 52, 58, 50, false)};
+    const auto result{ClipCigarToReference(*cigar, 52, 58, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "6M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -148,7 +148,7 @@ TEST(CigarClipping, ClipToReference_AllMatch_TrimBothEnds)
 TEST(CigarClipping, ClipToReference_AllMatch_NoClip)
 {
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToReference(cigar, 50, 60, 50, false)};
+    const auto result{ClipCigarToReference(*cigar, 50, 60, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "10M");
     EXPECT_EQ(result.clipOffset, 0U);
     EXPECT_EQ(result.clipLength, 10U);
@@ -162,7 +162,7 @@ TEST(CigarClipping, ClipToReference_WithInsertion_Retained)
     // Front: eat 3M (query+=3, ref-=3), insertion doesn't consume ref so stays
     // Result: 2I5M, clipOffset=3, clipLength=7
     const auto cigar{ParseCigar("3M2I5M")};
-    const auto result{ClipCigarToReference(cigar, 53, 58, 50, false)};
+    const auto result{ClipCigarToReference(*cigar, 53, 58, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "2I5M");
     EXPECT_EQ(result.clipOffset, 3U);
     EXPECT_EQ(result.clipLength, 7U);
@@ -176,7 +176,7 @@ TEST(CigarClipping, ClipToReference_WithDeletion)
     // Front: eat 3M (query+=3, ref-=3), eat 1 of 2D (ref-=1) => 1D remaining
     // Result so far: 1D5M. Back: eat 2 of 5M => 1D3M
     const auto cigar{ParseCigar("3M2D5M")};
-    const auto result{ClipCigarToReference(cigar, 54, 58, 50, false)};
+    const auto result{ClipCigarToReference(*cigar, 54, 58, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "1D3M");
     EXPECT_EQ(result.clipOffset, 3U);
     EXPECT_EQ(result.clipLength, 3U);
@@ -191,7 +191,7 @@ TEST(CigarClipping, ClipToReference_SoftClipsDropped)
     // Back: 2S non-ref => pop (query+=2), eat 1 of 7M
     // Result: 6M, clipOffset=3 (2 soft + 1 match), clipLength=6
     const auto cigar{ParseCigar("2S8M2S")};
-    const auto result{ClipCigarToReference(cigar, 51, 57, 50, false)};
+    const auto result{ClipCigarToReference(*cigar, 51, 57, 50, false)};
     EXPECT_EQ(CigarToString(result.cigar), "6M");
     EXPECT_EQ(result.clipOffset, 3U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -205,7 +205,7 @@ TEST(CigarClipping, ClipToReference_ExciseFlankingInserts)
     // Leading 2I removed (query+=2), trailing 2I removed (query+=2)
     // Result: 3M, clipOffset=2, clipLength=3
     const auto cigar{ParseCigar("2I3M2I")};
-    const auto result{ClipCigarToReference(cigar, 50, 53, 50, false, true)};
+    const auto result{ClipCigarToReference(*cigar, 50, 53, 50, false, true)};
     EXPECT_EQ(CigarToString(result.cigar), "3M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 3U);
@@ -219,7 +219,7 @@ TEST(CigarClipping, ClipToReference_ExciseFlankingInserts_AfterRefClip)
     // Front: eat 5M (query+=5, ref-=5). Now leading op is 2I => excise (query+=2)
     // Result: 3M, clipOffset=7, clipLength=3
     const auto cigar{ParseCigar("5M2I3M")};
-    const auto result{ClipCigarToReference(cigar, 55, 58, 50, false, true)};
+    const auto result{ClipCigarToReference(*cigar, 55, 58, 50, false, true)};
     EXPECT_EQ(CigarToString(result.cigar), "3M");
     EXPECT_EQ(result.clipOffset, 7U);
     EXPECT_EQ(result.clipLength, 3U);
@@ -233,7 +233,7 @@ TEST(CigarClipping, ClipToReference_Reverse)
     // Back: eat 2 ref => query removed from back = 2
     // Reverse swap: clipOffset = queryRemovedBack = 2
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToReference(cigar, 52, 58, 50, true)};
+    const auto result{ClipCigarToReference(*cigar, 52, 58, 50, true)};
     EXPECT_EQ(CigarToString(result.cigar), "6M");
     EXPECT_EQ(result.clipOffset, 2U);
     EXPECT_EQ(result.clipLength, 6U);
@@ -246,7 +246,7 @@ TEST(CigarClipping, ClipToReference_Reverse_Asymmetric)
     // queryRemovedFront = 3, queryRemovedBack = 0
     // After reverse swap: clipOffset = 0 (back_original=0), clipLength = 7
     const auto cigar{ParseCigar("10M")};
-    const auto result{ClipCigarToReference(cigar, 53, 60, 50, true)};
+    const auto result{ClipCigarToReference(*cigar, 53, 60, 50, true)};
     EXPECT_EQ(CigarToString(result.cigar), "7M");
     EXPECT_EQ(result.clipOffset, 0U);
     EXPECT_EQ(result.clipLength, 7U);

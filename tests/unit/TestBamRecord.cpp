@@ -39,7 +39,7 @@ TEST(BamRecord, SettersAndGetters)
         .RefId(0)
         .Pos(6)
         .MapQ(30)
-        .Cigar(ParseCigar("8M2I4M1D3M"))
+        .Cigar(*ParseCigar("8M2I4M1D3M"))
         .NextRefId(0)
         .NextPos(36)
         .Tlen(39)
@@ -95,7 +95,7 @@ TEST(BamRecord, IsReverse)
 TEST(BamRecord, ReferenceEnd)
 {
     BamRecord rec;
-    rec.Pos(6).Cigar(ParseCigar("8M2I4M1D3M"));
+    rec.Pos(6).Cigar(*ParseCigar("8M2I4M1D3M"));
     // RefLen = 8+4+1+3 = 16, end = 6 + 16 = 22
     EXPECT_EQ(rec.ReferenceEnd(), 22);
 }
@@ -108,7 +108,7 @@ TEST(BamRecord, SerializeToBamBasic)
         .RefId(0)
         .Pos(6)
         .MapQ(30)
-        .Cigar(ParseCigar("4M"))
+        .Cigar(*ParseCigar("4M"))
         .NextRefId(0)
         .NextPos(36)
         .Tlen(39)
@@ -153,7 +153,7 @@ TEST(BamRecord, SerializeToBamRoundTrip)
         .RefId(0)
         .Pos(9)
         .MapQ(40)
-        .Cigar(ParseCigar("4M"))
+        .Cigar(*ParseCigar("4M"))
         .Sequence("ACGT")
         .Qualities({30, 30, 30, 30});
 

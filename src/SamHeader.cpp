@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <expected>
 #include <format>
 #include <stdexcept>
 #include <utility>
@@ -92,7 +93,7 @@ void ReferenceSequence::SetTag(std::string key, std::string value)
     }
 }
 
-const std::vector<std::pair<std::string, std::string>>& ReferenceSequence::CustomTags() const
+std::span<const std::pair<std::string, std::string>> ReferenceSequence::CustomTags() const
 {
     return customTags_;
 }
@@ -127,7 +128,7 @@ void ReadGroup::SetTag(std::string key, std::string value)
     }
 }
 
-const std::vector<std::pair<std::string, std::string>>& ReadGroup::CustomTags() const
+std::span<const std::pair<std::string, std::string>> ReadGroup::CustomTags() const
 {
     return customTags_;
 }
@@ -162,7 +163,7 @@ void ProgramRecord::SetTag(std::string key, std::string value)
     }
 }
 
-const std::vector<std::pair<std::string, std::string>>& ProgramRecord::CustomTags() const
+std::span<const std::pair<std::string, std::string>> ProgramRecord::CustomTags() const
 {
     return customTags_;
 }
@@ -171,7 +172,7 @@ const std::vector<std::pair<std::string, std::string>>& ProgramRecord::CustomTag
 
 SamHeader::SamHeader() = default;
 
-SamHeader SamHeader::FromText(std::string_view text)
+std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
 {
     SamHeader header;
     const std::vector<std::string_view> lines = Split(text, '\n');
@@ -213,7 +214,7 @@ SamHeader SamHeader::FromText(std::string_view text)
                         std::data(value), std::data(value) + std::size(value), parsed)};
                     const std::errc ec = parseResult.ec;
                     if (ec != std::errc{}) {
-                        throw std::runtime_error{"Invalid LN value in @SQ line"};
+                        return std::unexpected{"Invalid LN value in @SQ line"};
                     }
                     length = parsed;
                 } else {
@@ -222,10 +223,10 @@ SamHeader SamHeader::FromText(std::string_view text)
             }
 
             if (std::empty(name)) {
-                throw std::runtime_error{"Missing required SN field in @SQ line"};
+                return std::unexpected{"Missing required SN field in @SQ line"};
             }
             if (length < 0) {
-                throw std::runtime_error{"Missing required LN field in @SQ line"};
+                return std::unexpected{"Missing required LN field in @SQ line"};
             }
 
             ReferenceSequence ref{std::move(name), length};
@@ -248,7 +249,7 @@ SamHeader SamHeader::FromText(std::string_view text)
             }
 
             if (std::empty(id)) {
-                throw std::runtime_error{"Missing required ID field in @RG line"};
+                return std::unexpected{"Missing required ID field in @RG line"};
             }
 
             ReadGroup rg{std::move(id)};
@@ -271,7 +272,7 @@ SamHeader SamHeader::FromText(std::string_view text)
             }
 
             if (std::empty(id)) {
-                throw std::runtime_error{"Missing required ID field in @PG line"};
+                return std::unexpected{"Missing required ID field in @PG line"};
             }
 
             ProgramRecord pg{std::move(id)};
@@ -293,21 +294,21 @@ SamHeader SamHeader::FromText(std::string_view text)
     return header;
 }
 
-SamHeader SamHeader::FromBamHeaderBlock(std::span<const std::byte> data)
+std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<const std::byte> data)
 {
     // Minimum: magic(4) + l_text(4) + n_ref(4) = 12 bytes
     if (std::size(data) < 12) {
-        throw std::runtime_error{"BAM header block too short"};
+        return std::unexpected{"BAM header block too short"};
     }
 
     // Validate magic: BAM\1
     if ((data[0] != std::byte{'B'}) || (data[1] != std::byte{'A'}) || (data[2] != std::byte{'M'}) ||
         (data[3] != std::byte{1})) {
-        throw std::runtime_error{"Invalid BAM magic bytes"};
+        return std::unexpected{"Invalid BAM magic bytes"};
     }
     const std::uint32_t lText = ReadLittleEndian<std::uint32_t>(data, 4);
     if (std::size(data) < 8 + lText + 4) {
-        throw std::runtime_error{"BAM header block truncated in header text"};
+        return std::unexpected{"BAM header block truncated in header text"};
     }
 
     // Parse SAM header text (may be NUL-padded)
@@ -318,7 +319,11 @@ SamHeader SamHeader::FromBamHeaderBlock(std::span<const std::byte> data)
         headerText.remove_suffix(1);
     }
 
-    SamHeader header{FromText(headerText)};
+    auto headerResult{FromText(headerText)};
+    if (!headerResult.has_value()) {
+        return std::unexpected{std::move(headerResult.error())};
+    }
+    SamHeader header{std::move(*headerResult)};
 
     // Parse binary reference dictionary
     std::size_t offset = 8 + lText;
@@ -331,13 +336,13 @@ SamHeader SamHeader::FromBamHeaderBlock(std::span<const std::byte> data)
 
     for (std::uint32_t i = 0; i < nRef; ++i) {
         if (offset + 4 > std::size(data)) {
-            throw std::runtime_error{"BAM header block truncated in reference dictionary"};
+            return std::unexpected{"BAM header block truncated in reference dictionary"};
         }
         const std::uint32_t lName = ReadLittleEndian<std::uint32_t>(data, offset);
         offset += 4;
 
         if (offset + lName + 4 > std::size(data)) {
-            throw std::runtime_error{"BAM header block truncated in reference name"};
+            return std::unexpected{"BAM header block truncated in reference name"};
         }
 
         // Name is NUL-terminated, lName includes the NUL
@@ -499,7 +504,7 @@ void SamHeader::SetGroupOrder(std::string groupOrder) { groupOrder_ = std::move(
 
 void SamHeader::SetSubSort(std::string subSort) { subSort_ = std::move(subSort); }
 
-const std::vector<ReferenceSequence>& SamHeader::ReferenceSequences() const { return references_; }
+std::span<const ReferenceSequence> SamHeader::ReferenceSequences() const { return references_; }
 
 std::vector<ReferenceSequence>& SamHeader::ReferenceSequences() { return references_; }
 
@@ -508,19 +513,19 @@ void SamHeader::AddReferenceSequence(ReferenceSequence seq)
     references_.push_back(std::move(seq));
 }
 
-const std::vector<ReadGroup>& SamHeader::ReadGroups() const { return readGroups_; }
+std::span<const ReadGroup> SamHeader::ReadGroups() const { return readGroups_; }
 
 std::vector<ReadGroup>& SamHeader::ReadGroups() { return readGroups_; }
 
 void SamHeader::AddReadGroup(ReadGroup rg) { readGroups_.push_back(std::move(rg)); }
 
-const std::vector<ProgramRecord>& SamHeader::ProgramRecords() const { return programRecords_; }
+std::span<const ProgramRecord> SamHeader::ProgramRecords() const { return programRecords_; }
 
 std::vector<ProgramRecord>& SamHeader::ProgramRecords() { return programRecords_; }
 
 void SamHeader::AddProgramRecord(ProgramRecord pg) { programRecords_.push_back(std::move(pg)); }
 
-const std::vector<std::string>& SamHeader::Comments() const { return comments_; }
+std::span<const std::string> SamHeader::Comments() const { return comments_; }
 
 void SamHeader::AddComment(std::string comment) { comments_.push_back(std::move(comment)); }
 
@@ -534,8 +539,7 @@ void SamHeader::BuildNameIndex() const
     nameToId_.clear();
     nameToId_.reserve(std::size(references_));
     for (std::size_t i{0}; i < std::size(references_); ++i) {
-        const std::int32_t refId{static_cast<std::int32_t>(i)};
-        nameToId_.emplace(std::string{references_[i].Name()}, refId);
+        nameToId_.emplace(std::string{references_[i].Name()}, static_cast<std::int32_t>(i));
     }
     nameIndexSize_ = std::size(references_);
 }
@@ -546,7 +550,7 @@ std::int32_t SamHeader::ReferenceId(std::string_view name) const
         return -1;
     }
     BuildNameIndex();
-    const auto it = nameToId_.find(std::string{name});
+    const auto it = nameToId_.find(name);
     if (it == std::ranges::end(nameToId_)) {
         return -1;
     }

@@ -70,8 +70,8 @@ struct BamRawReader::Impl
         const std::ptrdiff_t endIdx{(chunkNum == totalChunks) ? numZmws
                                                               : std::lround(chunkSize * chunkNum)};
 
-        const std::vector<ZmwIdentity> chunkZmws{std::begin(unique) + startIdx,
-                                                 std::begin(unique) + endIdx};
+        const std::span<const ZmwIdentity> chunkZmws{std::data(unique) + startIdx,
+                                                     static_cast<std::size_t>(endIdx - startIdx)};
         const std::vector<std::int64_t> chunkOffsets{index.Find(chunkZmws)};
 
         recordLimit = std::size(chunkOffsets);

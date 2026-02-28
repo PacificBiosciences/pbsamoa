@@ -303,5 +303,81 @@ TEST_F(ZmiWriterTest, OpenThrowsWhenNeitherExists)
     EXPECT_THROW(ZmwIndex::Open(noSuchBam), std::runtime_error);
 }
 
+TEST_F(ZmiWriterTest, FirstOffsetByZmw)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+        writer.AddRecord(100, 42, 2000);
+        writer.AddRecord(100, 99, 3000);
+    }
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_EQ(index.FirstOffset(42), 1000);
+    EXPECT_EQ(index.FirstOffset(99), 3000);
+}
+
+TEST_F(ZmiWriterTest, FirstOffsetByIdentity)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+        writer.AddRecord(200, 42, 4000);
+    }
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_EQ(index.FirstOffset(ZmwIdentity{100, 42}), 1000);
+    EXPECT_EQ(index.FirstOffset(ZmwIdentity{200, 42}), 4000);
+}
+
+TEST_F(ZmiWriterTest, FirstOffsetThrowsForMissing)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+    }
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_THROW(index.FirstOffset(9999), std::runtime_error);
+    EXPECT_THROW(index.FirstOffset(ZmwIdentity{999, 9999}), std::runtime_error);
+}
+
+TEST_F(ZmiBamWriterTest, WriteRawRecord)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    // First write a BamRecord, read back as RawRecord, write to a second file
+    const std::filesystem::path tmpBam2{tmpBamPath_.string() + ".copy.bam"};
+    {
+        ZmiBamWriter writer1{tmpBamPath_, header};
+        BamRecord rec;
+        rec.Name("movie/42/0_100")
+            .Flag(0)
+            .RefId(0)
+            .Pos(0)
+            .MapQ(30)
+            .Cigar({CigarOp{CigarOpType::M, 4}})
+            .Sequence("ACGT")
+            .Qualities({30, 30, 30, 30});
+        writer1.Write(rec);
+    }
+
+    // Read back as RawRecord and write to second file
+    {
+        BamRawReader reader{tmpBamPath_};
+        ZmiBamWriter writer2{tmpBam2, reader.Header()};
+        for (const auto& raw : reader.Records()) {
+            writer2.Write(raw);
+        }
+    }
+
+    // Verify second file has the record
+    BamRawReader reader2{tmpBam2};
+    const auto rec2{reader2.ReadRecord()};
+    ASSERT_TRUE(rec2.has_value());
+    EXPECT_EQ(rec2->Name(), "movie/42/0_100");
+    EXPECT_FALSE(reader2.ReadRecord().has_value());
+
+    std::filesystem::remove(tmpBam2);
+    std::filesystem::remove(std::filesystem::path{tmpBam2.string() + ".zmi"});
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

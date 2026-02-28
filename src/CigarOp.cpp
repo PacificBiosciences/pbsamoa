@@ -2,16 +2,16 @@
 
 #include <array>
 #include <charconv>
+#include <expected>
 #include <format>
-#include <stdexcept>
 
 namespace PacBio {
 namespace Samoa {
 
-std::vector<CigarOp> ParseCigar(std::string_view text)
+std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view text)
 {
     if (std::empty(text) || text == "*") {
-        return {};
+        return std::vector<CigarOp>{};
     }
 
     std::vector<CigarOp> result;
@@ -25,18 +25,18 @@ std::vector<CigarOp> ParseCigar(std::string_view text)
         const std::errc ec{parseResult.ec};
         if ((ec != std::errc{}) || (ptr == end)) {
             if (ec != std::errc{}) {
-                throw std::runtime_error{"Invalid CIGAR: bad integer"};
+                return std::unexpected{"Invalid CIGAR: bad integer"};
             }
-            throw std::runtime_error{"Invalid CIGAR: missing op character"};
+            return std::unexpected{"Invalid CIGAR: missing op character"};
         }
 
         const std::optional<CigarOpType> opType{CharToCigarOp(*ptr)};
         if (!opType.has_value()) {
-            throw std::runtime_error{std::string{"Invalid CIGAR op: "} + *ptr};
+            return std::unexpected{std::format("Invalid CIGAR op: {}", *ptr)};
         }
 
         if (length == 0) {
-            throw std::runtime_error{"Invalid CIGAR: operation length must be >= 1"};
+            return std::unexpected{"Invalid CIGAR: operation length must be >= 1"};
         }
         result.emplace_back(*opType, length);
         pos = ptr + 1;
