@@ -38,7 +38,7 @@ TEST(TagKey, ToString)
 
 TEST(TagValue, CharType)
 {
-    const TagValue val{char{'A'}};
+    const TagValue val{'A'};
     ASSERT_TRUE(std::holds_alternative<char>(val));
     EXPECT_EQ(std::get<char>(val), 'A');
 }
@@ -160,35 +160,35 @@ std::vector<std::byte> MakeBamIntTag(char c1, char c2, char type, std::int64_t v
 
     switch (type) {
         case 'c': {
-            const std::int8_t v{static_cast<std::int8_t>(value)};
+            const std::int8_t v = value;
             result.push_back(static_cast<std::byte>(v));
             break;
         }
         case 'C': {
-            const std::uint8_t v{static_cast<std::uint8_t>(value)};
+            const std::uint8_t v = value;
             result.push_back(static_cast<std::byte>(v));
             break;
         }
         case 's': {
-            const std::int16_t v{static_cast<std::int16_t>(value)};
+            const std::int16_t v = value;
             const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
             result.insert(std::ranges::end(result), p, p + 2);
             break;
         }
         case 'S': {
-            const std::uint16_t v{static_cast<std::uint16_t>(value)};
+            const std::uint16_t v = value;
             const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
             result.insert(std::ranges::end(result), p, p + 2);
             break;
         }
         case 'i': {
-            const std::int32_t v{static_cast<std::int32_t>(value)};
+            const std::int32_t v = value;
             const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
             result.insert(std::ranges::end(result), p, p + 4);
             break;
         }
         case 'I': {
-            const std::uint32_t v{static_cast<std::uint32_t>(value)};
+            const std::uint32_t v = value;
             const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
             result.insert(std::ranges::end(result), p, p + 4);
             break;
@@ -412,7 +412,7 @@ TEST(TagSerialize, ToSamString)
 
 TEST(TagSerialize, ToSamChar)
 {
-    const std::string result{SerializeTagToSam(TagKey{'X', 'S'}, TagValue{char{'+'}})};
+    const std::string result{SerializeTagToSam(TagKey{'X', 'S'}, TagValue{'+'})};
     EXPECT_EQ(result, "XS:A:+");
 }
 
@@ -439,7 +439,7 @@ TEST(TagSerialize, BamRoundTripMixed)
     TagMap original;
     original.Set(TagKey{'N', 'M'}, TagValue{std::int64_t{1}});
     original.Set(TagKey{'R', 'G'}, TagValue{std::string{"group1"}});
-    original.Set(TagKey{'X', 'S'}, TagValue{char{'+'}});
+    original.Set(TagKey{'X', 'S'}, TagValue{'+'});
     original.Set(TagKey{'Z', 'S'}, TagValue{1.5f});
 
     const std::vector<std::byte> bamBytes{SerializeTagsToBam(original)};

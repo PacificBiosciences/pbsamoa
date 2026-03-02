@@ -18,6 +18,7 @@ project(
 ############
 
 cpp = meson.get_compiler('cpp')
+c = meson.get_compiler('c')
 cpp_flags = cpp.get_supported_arguments(
     # stupid warning https://gcc.gnu.org/bugzilla/show_bug.cgi?id=96868#c3
     '-Wno-missing-field-initializers',
@@ -51,6 +52,24 @@ libdeflate_dep = dependency(
 )
 
 deps = [libdeflate_dep, dependency('threads')]
+
+# Native CRAM implementation intentionally does not depend on htslib.
+bzip2_dep = dependency('bzip2', required: false, include_type: 'system')
+if bzip2_dep.found()
+    deps += bzip2_dep
+    add_project_arguments('-DPBSAMOA_HAVE_BZIP2=1', language: ['cpp'])
+endif
+
+liblzma_dep = dependency('liblzma', required: false, include_type: 'system')
+if liblzma_dep.found()
+    deps += liblzma_dep
+    add_project_arguments('-DPBSAMOA_HAVE_LZMA=1', language: ['cpp'])
+endif
+
+libm_dep = c.find_library('m', required: false)
+if libm_dep.found()
+    deps += libm_dep
+endif
 
 ###########
 # headers #

@@ -118,7 +118,7 @@ struct BamRecordReader::Impl
                     break;
                 }
 
-                const std::int32_t n{static_cast<std::int32_t>(batch->RecordCount())};
+                const std::int32_t n = batch->RecordCount();
                 std::vector<BamRecord> owned(n);
 
                 // Time the parallel decode

@@ -17,16 +17,16 @@ namespace Samoa {
 
 namespace {
 
-std::uint32_t ReadU32(const std::byte* data)
+std::uint32_t ReadU32(std::span<const std::byte> data)
 {
     std::uint32_t value{0};
-    std::ranges::copy_n(data, sizeof(value), reinterpret_cast<std::byte*>(&value));
+    std::ranges::copy_n(std::data(data), sizeof(value), reinterpret_cast<std::byte*>(&value));
     return value;
 }
 
-void WriteU32(std::byte* data, std::uint32_t value)
+void WriteU32(std::span<std::byte> data, std::uint32_t value)
 {
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&value), sizeof(value), data);
+    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&value), sizeof(value), std::data(data));
 }
 
 // Build a buffer containing multiple serialized records (with block_size
@@ -66,7 +66,7 @@ std::vector<std::byte> BuildMultiRecordBuffer(std::vector<std::uint32_t>& record
         recordOffsets.push_back(std::size(buffer) + 4);
 
         std::vector<std::byte> tmp(4);
-        WriteU32(std::data(tmp), blockSize);
+        WriteU32(tmp, blockSize);
         buffer.insert(std::ranges::end(buffer), std::ranges::begin(tmp), std::ranges::end(tmp));
         buffer.insert(std::ranges::end(buffer), std::ranges::begin(recBytes),
                       std::ranges::end(recBytes));
@@ -86,7 +86,8 @@ TEST(RawRecordBatch, ConstructAndIterate)
     std::vector<RawRecordBatch::RecordExtent> extents;
     for (std::size_t i{0}; i < std::size(offsets); ++i) {
         const std::uint32_t dataOffset{offsets[i]};
-        const std::uint32_t blockSize{ReadU32(std::data(buffer) + dataOffset - 4)};
+        const std::uint32_t blockSize{
+            ReadU32(std::span<const std::byte>{std::data(buffer) + dataOffset - 4, 4})};
         extents.push_back({dataOffset, blockSize});
     }
 
@@ -109,7 +110,8 @@ TEST(RawRecordBatch, RecordFieldAccess)
     std::vector<RawRecordBatch::RecordExtent> extents;
     for (std::size_t i{0}; i < std::size(offsets); ++i) {
         const std::uint32_t dataOffset{offsets[i]};
-        const std::uint32_t blockSize{ReadU32(std::data(buffer) + dataOffset - 4)};
+        const std::uint32_t blockSize{
+            ReadU32(std::span<const std::byte>{std::data(buffer) + dataOffset - 4, 4})};
         extents.push_back({dataOffset, blockSize});
     }
 
@@ -143,7 +145,8 @@ TEST(RawRecordBatch, RecordCount)
     std::vector<RawRecordBatch::RecordExtent> extents;
     for (std::size_t i{0}; i < std::size(offsets); ++i) {
         const std::uint32_t dataOffset{offsets[i]};
-        const std::uint32_t blockSize{ReadU32(std::data(buffer) + dataOffset - 4)};
+        const std::uint32_t blockSize{
+            ReadU32(std::span<const std::byte>{std::data(buffer) + dataOffset - 4, 4})};
         extents.push_back({dataOffset, blockSize});
     }
 
@@ -160,7 +163,8 @@ TEST(RawRecordBatch, BufferSize)
     std::vector<RawRecordBatch::RecordExtent> extents;
     for (std::size_t i{0}; i < std::size(offsets); ++i) {
         const std::uint32_t dataOffset{offsets[i]};
-        const std::uint32_t blockSize{ReadU32(std::data(buffer) + dataOffset - 4)};
+        const std::uint32_t blockSize{
+            ReadU32(std::span<const std::byte>{std::data(buffer) + dataOffset - 4, 4})};
         extents.push_back({dataOffset, blockSize});
     }
 

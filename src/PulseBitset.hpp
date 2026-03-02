@@ -21,7 +21,7 @@ namespace Samoa {
 class PulseBitset
 {
 public:
-    static constexpr std::size_t NPOS{static_cast<std::size_t>(-1)};
+    static constexpr std::size_t NPOS = -1;
 
     /// \brief Construct from a pulse-call string.
     /// \param[in] pulseCalls  The `pc` tag value where uppercase = basecalled.
@@ -115,7 +115,7 @@ public:
 
         std::size_t remaining{n};
         for (std::size_t b{0}; b < std::size(blocks_); ++b) {
-            const std::size_t pop{static_cast<std::size_t>(std::popcount(blocks_[b]))};
+            const std::size_t pop = std::popcount(blocks_[b]);
             if (remaining < pop) {
                 // The target bit is in this block
                 std::uint64_t word{blocks_[b]};

@@ -136,7 +136,7 @@ std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
         }
 
         const auto raw{rec->RawData()};
-        const std::uint32_t offset{static_cast<std::uint32_t>(std::size(batchBuffer))};
+        const std::uint32_t offset = std::size(batchBuffer);
         batchBuffer.insert(std::ranges::end(batchBuffer), std::ranges::begin(raw),
                            std::ranges::end(raw));
         extents.push_back(

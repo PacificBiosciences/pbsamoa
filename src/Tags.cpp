@@ -1,9 +1,13 @@
 #include <pbsamoa/core/Tags.hpp>
 
+#include "CramInternal.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <format>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,10 +28,15 @@ void WriteI8(std::vector<std::byte>& out, std::int8_t v)
     out.push_back(static_cast<std::byte>(v));
 }
 
-void WriteBytes(std::vector<std::byte>& out, const void* data, std::size_t n)
+void WriteBytes(std::vector<std::byte>& out, std::span<const std::byte> bytes)
 {
-    const std::byte* p{static_cast<const std::byte*>(data)};
-    out.insert(std::ranges::end(out), p, p + n);
+    out.insert(std::ranges::end(out), std::ranges::begin(bytes), std::ranges::end(bytes));
+}
+
+template <typename T>
+void WriteBytes(std::vector<std::byte>& out, const T& value)
+{
+    WriteBytes(out, std::as_bytes(std::span{&value, 1}));
 }
 
 char SmallestIntType(std::int64_t v)
@@ -58,6 +67,14 @@ T ReadPlain(const std::byte* data)
     return value;
 }
 
+void RequirePayloadSize(char type, std::span<const std::byte> payload, std::size_t expected)
+{
+    if (std::size(payload) != expected) {
+        throw std::runtime_error{std::format("Tags: type '{}' requires {} payload byte(s), got {}",
+                                             type, expected, std::size(payload))};
+    }
+}
+
 struct BamSerializeVisitor
 {
     std::vector<std::byte>& result;
@@ -81,22 +98,22 @@ struct BamSerializeVisitor
                 break;
             case 's': {
                 const std::int16_t sv = v;
-                WriteBytes(result, &sv, 2);
+                WriteBytes(result, sv);
                 break;
             }
             case 'S': {
                 const std::uint16_t sv = v;
-                WriteBytes(result, &sv, 2);
+                WriteBytes(result, sv);
                 break;
             }
             case 'i': {
                 const std::int32_t sv = v;
-                WriteBytes(result, &sv, 4);
+                WriteBytes(result, sv);
                 break;
             }
             case 'I': {
                 const std::uint32_t sv = v;
-                WriteBytes(result, &sv, 4);
+                WriteBytes(result, sv);
                 break;
             }
             default:
@@ -107,7 +124,7 @@ struct BamSerializeVisitor
     void operator()(float v) const
     {
         result.push_back(static_cast<std::byte>('f'));
-        WriteBytes(result, &v, 4);
+        WriteBytes(result, v);
     }
 
     void operator()(std::string_view v) const
@@ -133,7 +150,7 @@ struct BamSerializeVisitor
         result.push_back(static_cast<std::byte>('B'));
         result.push_back(static_cast<std::byte>(v.ElementType()));
         const std::uint32_t count{v.Count()};
-        WriteBytes(result, &count, 4);
+        WriteBytes(result, count);
         const std::span<const std::byte> data{v.Data()};
         result.insert(std::ranges::end(result), std::ranges::begin(data), std::ranges::end(data));
     }
@@ -211,6 +228,91 @@ struct SamSerializeVisitor
 };
 
 }  // namespace
+
+TagValue DecodeTagValueFromBamPayload(char type, std::span<const std::byte> payload)
+{
+    switch (type) {
+        case 'A':
+            RequirePayloadSize(type, payload, 1);
+            return TagValue{static_cast<char>(std::to_integer<std::uint8_t>(payload.front()))};
+        case 'c':
+            RequirePayloadSize(type, payload, 1);
+            return TagValue{std::int64_t{
+                static_cast<std::int8_t>(std::to_integer<std::uint8_t>(payload.front()))}};
+        case 'C':
+            RequirePayloadSize(type, payload, 1);
+            return TagValue{std::int64_t{std::to_integer<std::uint8_t>(payload.front())}};
+        case 's':
+            RequirePayloadSize(type, payload, 2);
+            return TagValue{std::int64_t{ReadPlain<std::int16_t>(payload.data())}};
+        case 'S':
+            RequirePayloadSize(type, payload, 2);
+            return TagValue{std::int64_t{ReadPlain<std::uint16_t>(payload.data())}};
+        case 'i':
+            RequirePayloadSize(type, payload, 4);
+            return TagValue{std::int64_t{ReadPlain<std::int32_t>(payload.data())}};
+        case 'I':
+            RequirePayloadSize(type, payload, 4);
+            return TagValue{std::int64_t{ReadPlain<std::uint32_t>(payload.data())}};
+        case 'f':
+            RequirePayloadSize(type, payload, 4);
+            return TagValue{ReadPlain<float>(payload.data())};
+        case 'Z': {
+            std::size_t textLen = std::size(payload);
+            if (textLen > 0 && payload[textLen - 1] == std::byte{0}) {
+                --textLen;
+            }
+            return TagValue{std::string{reinterpret_cast<const char*>(payload.data()), textLen}};
+        }
+        case 'H': {
+            std::size_t textLen = std::size(payload);
+            if (textLen > 0 && payload[textLen - 1] == std::byte{0}) {
+                --textLen;
+            }
+            return TagValue{
+                HexString{std::string{reinterpret_cast<const char*>(payload.data()), textLen}}};
+        }
+        case 'B': {
+            if (std::size(payload) < 5) {
+                throw std::runtime_error{"Tags: type 'B' payload too short"};
+            }
+            const char elemType = static_cast<char>(std::to_integer<std::uint8_t>(payload[0]));
+            const auto count = ReadPlain<std::uint32_t>(payload.data() + 1);
+
+            TagArray arr{elemType};
+            const auto elemSize = arr.ElementSize();
+            if (elemSize == 0) {
+                throw std::runtime_error{
+                    std::format("Tags: unsupported B-array element type '{}'", elemType)};
+            }
+
+            const auto dataSize = static_cast<std::size_t>(count) * elemSize;
+            const auto expectedSize = static_cast<std::size_t>(5) + dataSize;
+            RequirePayloadSize(type, payload, expectedSize);
+
+            arr.Resize(count);
+            std::ranges::copy_n(payload.data() + 5, dataSize, arr.MutableData().data());
+            return TagValue{std::move(arr)};
+        }
+        default:
+            throw std::runtime_error{std::format("Tags: unsupported BAM tag type '{}'", type)};
+    }
+}
+
+EncodedTagValuePayload EncodeTagValueToBamPayload(const TagValue& value)
+{
+    std::vector<std::byte> serialized;
+    std::visit(BamSerializeVisitor{serialized}, value);
+    if (std::empty(serialized)) {
+        throw std::runtime_error{"Tags: empty serialized tag payload"};
+    }
+
+    EncodedTagValuePayload result;
+    result.Type = static_cast<char>(std::to_integer<std::uint8_t>(serialized.front()));
+    serialized.erase(std::begin(serialized));
+    result.Payload = std::move(serialized);
+    return result;
+}
 
 // --- TagKey ---
 
@@ -627,20 +729,23 @@ void SerializeBArrayUInt8(const std::byte* data, std::uint32_t count, std::strin
     out.resize_and_overwrite(
         startPos + maxChars,
         [data, count, startPos](char* buf, std::size_t /*bufSize*/) -> std::size_t {
-            // NOLINTNEXTLINE(misc-const-correctness) dest is incremented via *dest++
             char* dest{buf + startPos};
+            const auto appendChar = [&dest](const char c) {
+                *dest = c;
+                ++dest;
+            };
             for (std::uint32_t i{0}; i < count; ++i) {
                 const unsigned v = static_cast<std::uint8_t>(data[i]);
-                *dest++ = ',';
+                appendChar(',');
                 if (v >= 100) {
-                    *dest++ = '0' + v / 100;
-                    *dest++ = '0' + (v / 10) % 10;
-                    *dest++ = '0' + v % 10;
+                    appendChar('0' + v / 100);
+                    appendChar('0' + (v / 10) % 10);
+                    appendChar('0' + v % 10);
                 } else if (v >= 10) {
-                    *dest++ = '0' + v / 10;
-                    *dest++ = '0' + v % 10;
+                    appendChar('0' + v / 10);
+                    appendChar('0' + v % 10);
                 } else {
-                    *dest++ = '0' + v;
+                    appendChar('0' + v);
                 }
             }
             return dest - buf;
@@ -656,24 +761,27 @@ void SerializeBArrayInt8(const std::byte* data, std::uint32_t count, std::string
     out.resize_and_overwrite(
         startPos + maxChars,
         [data, count, startPos](char* buf, std::size_t /*bufSize*/) -> std::size_t {
-            // NOLINTNEXTLINE(misc-const-correctness) dest is incremented via *dest++
             char* dest{buf + startPos};
+            const auto appendChar = [&dest](const char c) {
+                *dest = c;
+                ++dest;
+            };
             for (std::uint32_t i{0}; i < count; ++i) {
                 const int v{static_cast<std::int8_t>(data[i])};
-                *dest++ = ',';
+                appendChar(',');
                 const int absV{(v < 0) ? -v : v};
                 if (v < 0) {
-                    *dest++ = '-';
+                    appendChar('-');
                 }
                 if (absV >= 100) {
-                    *dest++ = '0' + absV / 100;
-                    *dest++ = '0' + (absV / 10) % 10;
-                    *dest++ = '0' + absV % 10;
+                    appendChar('0' + absV / 100);
+                    appendChar('0' + (absV / 10) % 10);
+                    appendChar('0' + absV % 10);
                 } else if (absV >= 10) {
-                    *dest++ = '0' + absV / 10;
-                    *dest++ = '0' + absV % 10;
+                    appendChar('0' + absV / 10);
+                    appendChar('0' + absV % 10);
                 } else {
-                    *dest++ = '0' + absV;
+                    appendChar('0' + absV);
                 }
             }
             return dest - buf;
@@ -908,55 +1016,67 @@ struct BamSizeVisitor
     }
 };
 
-void WriteBytesRaw(std::byte*& dest, const void* data, std::size_t n)
+void WriteBytesRaw(std::byte*& dest, std::span<const std::byte> bytes)
 {
-    std::ranges::copy_n(static_cast<const std::byte*>(data), n, dest);
-    dest += n;
+    std::ranges::copy_n(std::data(bytes), std::size(bytes), dest);
+    dest += std::size(bytes);
+}
+
+template <typename T>
+void WriteBytesRaw(std::byte*& dest, const T& value)
+{
+    WriteBytesRaw(dest, std::as_bytes(std::span{&value, 1}));
 }
 
 struct BamAppendVisitor
 {
     std::byte*& dest;
 
+    void AppendByte(const std::byte v) const
+    {
+        *dest = v;
+        ++dest;
+    }
+
     void operator()(char v) const
     {
-        *dest++ = static_cast<std::byte>('A');
-        *dest++ = static_cast<std::byte>(v);
+        AppendByte(static_cast<std::byte>('A'));
+        AppendByte(static_cast<std::byte>(v));
     }
 
     void operator()(std::int64_t v) const
     {
         const char bamType{SmallestIntType(v)};
-        *dest++ = static_cast<std::byte>(bamType);
+        AppendByte(static_cast<std::byte>(bamType));
         switch (bamType) {
             case 'c': {
                 const std::int8_t sv = v;
-                *dest++ = static_cast<std::byte>(sv);
+                AppendByte(static_cast<std::byte>(sv));
                 break;
             }
             case 'C': {
                 const std::uint8_t sv = v;
-                *dest++ = static_cast<std::byte>(sv);
+                AppendByte(static_cast<std::byte>(sv));
                 break;
             }
             case 's': {
                 const std::int16_t sv = v;
-                WriteBytesRaw(dest, &sv, 2);
+                WriteBytesRaw(dest, sv);
                 break;
             }
             case 'S': {
                 const std::uint16_t sv = v;
-                WriteBytesRaw(dest, &sv, 2);
+                WriteBytesRaw(dest, sv);
                 break;
             }
             case 'i': {
                 const std::int32_t sv = v;
-                WriteBytesRaw(dest, &sv, 4);
+                WriteBytesRaw(dest, sv);
                 break;
             }
             case 'I': {
                 const std::uint32_t sv = v;
-                WriteBytesRaw(dest, &sv, 4);
+                WriteBytesRaw(dest, sv);
                 break;
             }
             default:
@@ -966,34 +1086,34 @@ struct BamAppendVisitor
 
     void operator()(float v) const
     {
-        *dest++ = static_cast<std::byte>('f');
-        WriteBytesRaw(dest, &v, 4);
+        AppendByte(static_cast<std::byte>('f'));
+        WriteBytesRaw(dest, v);
     }
 
     void operator()(std::string_view v) const
     {
-        *dest++ = static_cast<std::byte>('Z');
+        AppendByte(static_cast<std::byte>('Z'));
         for (const char ch : v) {
-            *dest++ = static_cast<std::byte>(ch);
+            AppendByte(static_cast<std::byte>(ch));
         }
-        *dest++ = std::byte{0};
+        AppendByte(std::byte{0});
     }
 
     void operator()(const HexString& v) const
     {
-        *dest++ = static_cast<std::byte>('H');
+        AppendByte(static_cast<std::byte>('H'));
         for (const char ch : v.value) {
-            *dest++ = static_cast<std::byte>(ch);
+            AppendByte(static_cast<std::byte>(ch));
         }
-        *dest++ = std::byte{0};
+        AppendByte(std::byte{0});
     }
 
     void operator()(const TagArray& v) const
     {
-        *dest++ = static_cast<std::byte>('B');
-        *dest++ = static_cast<std::byte>(v.ElementType());
+        AppendByte(static_cast<std::byte>('B'));
+        AppendByte(static_cast<std::byte>(v.ElementType()));
         const std::uint32_t count{v.Count()};
-        WriteBytesRaw(dest, &count, 4);
+        WriteBytesRaw(dest, count);
         const std::span<const std::byte> data{v.Data()};
         std::ranges::copy_n(std::data(data), std::size(data), dest);
         dest += std::size(data);
@@ -1014,9 +1134,13 @@ std::size_t SerializedBamSize(const TagMap& tags)
 
 void AppendTagsToBam(const TagMap& tags, std::byte* dest)
 {
+    const auto appendByte = [&dest](const std::byte value) {
+        *dest = value;
+        ++dest;
+    };
     for (const auto& [key, value] : tags.Entries()) {
-        *dest++ = static_cast<std::byte>(key.First());
-        *dest++ = static_cast<std::byte>(key.Second());
+        appendByte(static_cast<std::byte>(key.First()));
+        appendByte(static_cast<std::byte>(key.Second()));
         std::visit(BamAppendVisitor{dest}, value);
     }
 }

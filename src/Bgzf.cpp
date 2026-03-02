@@ -1,6 +1,7 @@
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include "BinaryUtils.hpp"
+#include "LibdeflateUtils.hpp"
 
 #include <parallel/ThreadPool.h>
 #include <rigtorp/SPSCQueue.hpp>
@@ -14,7 +15,6 @@
 #include <condition_variable>
 #include <exception>
 #include <fstream>
-#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -29,27 +29,8 @@ namespace Samoa {
 
 namespace detail {
 
-// --- libdeflate RAII wrappers (named linkage required for struct fields) ---
-
-struct LibdeflateDecompressorDeleter
-{
-    void operator()(libdeflate_decompressor* decompressor) const
-    {
-        libdeflate_free_decompressor(decompressor);
-    }
-};
-
-using DecompressorPtr = std::unique_ptr<libdeflate_decompressor, LibdeflateDecompressorDeleter>;
-
-struct LibdeflateCompressorDeleter
-{
-    void operator()(libdeflate_compressor* compressor) const
-    {
-        libdeflate_free_compressor(compressor);
-    }
-};
-
-using CompressorPtr = std::unique_ptr<libdeflate_compressor, LibdeflateCompressorDeleter>;
+using DecompressorPtr = LibdeflateDecompressorPtr;
+using CompressorPtr = LibdeflateCompressorPtr;
 
 /// \brief Entry describing one compressed BGZF payload within a batch buffer.
 struct CompressedEntry
@@ -568,7 +549,7 @@ struct BgzfWriter::Impl
     void PackerLoop(std::stop_token stopToken)
     {
         try {
-            const std::size_t batchLimit{static_cast<std::size_t>(config.BlocksPerBatch)};
+            const std::size_t batchLimit = config.BlocksPerBatch;
             std::vector<detail::UncompressedBlock> batch{};
             batch.reserve(batchLimit);
             std::size_t emptyPollCount{0};
@@ -610,8 +591,7 @@ struct BgzfWriter::Impl
 
                             const std::uint32_t crc{
                                 libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
-                            const std::uint32_t isize{
-                                static_cast<std::uint32_t>(std::size(block.data))};
+                            const std::uint32_t isize = std::size(block.data);
                             result.blocks.push_back(detail::CompressedBatch::Block{
                                 .cdata = {std::begin(cbuf), std::begin(cbuf) + compSize},
                                 .crc32 = crc,
@@ -719,7 +699,7 @@ struct BgzfWriter::Impl
         if (blockSize > 65536U) {
             throw std::runtime_error{"BgzfWriter: block size exceeds BGZF maximum"};
         }
-        const std::uint16_t bsize{static_cast<std::uint16_t>(blockSize - 1U)};
+        const std::uint16_t bsize = blockSize - 1U;
 
         const std::array<std::uint8_t, 18> frameHeader{
             GZIP_ID1,
@@ -1066,7 +1046,8 @@ void BgzfPipelineState::ParseHeader()
         headerLen += actualOut;
 
         // Check if we have the complete header
-        const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+        const std::size_t hdrSize{
+            ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
         if (hdrSize > 0) {
             auto headerResult{SamHeader::FromBamHeaderBlock(
                 std::span<const std::byte>{std::data(headerBuf), hdrSize})};
@@ -1097,7 +1078,8 @@ void BgzfPipelineState::ParseHeader()
     if (headerLen == 0) {
         throw std::runtime_error{"Empty BAM file: no BGZF blocks"};
     }
-    const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+    const std::size_t hdrSize{
+        ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
     if (hdrSize > 0) {
         auto headerResult{SamHeader::FromBamHeaderBlock(
             std::span<const std::byte>{std::data(headerBuf), hdrSize})};
@@ -1209,7 +1191,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
             std::uint64_t batchCompressedBytes{0};
 
             for (std::size_t b{0}; b < BLOCKS_PER_BATCH && !stopToken.stop_requested(); ++b) {
-                const std::uint64_t blockOffset{static_cast<std::uint64_t>(file.tellg())};
+                const std::uint64_t blockOffset = file.tellg();
 
                 // Time file reads
                 const auto readStart{std::chrono::steady_clock::now()};
@@ -1697,7 +1679,7 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> 
     }
 
     const std::size_t blockSize{info->blockSize};
-    const std::size_t headerSize{static_cast<std::size_t>(BGZF_HEADER_SIZE)};
+    const std::size_t headerSize = BGZF_HEADER_SIZE;
     const std::size_t remaining{blockSize - headerSize};
     if (std::size(compressedBuf) < blockSize) {
         compressedBuf.resize(blockSize);
@@ -1752,7 +1734,8 @@ void BgzfReader::Impl::ParseHeaderSync()
         std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
         headerLen += *bytesRead;
 
-        const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+        const std::size_t hdrSize{
+            ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
         if (hdrSize > 0) {
             auto headerResult{SamHeader::FromBamHeaderBlock(
                 std::span<const std::byte>{std::data(headerBuf), hdrSize})};
@@ -1778,7 +1761,8 @@ void BgzfReader::Impl::ParseHeaderSync()
         throw std::runtime_error{"Empty BAM file: no BGZF blocks"};
     }
 
-    const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+    const std::size_t hdrSize{
+        ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
     if (hdrSize > 0) {
         auto headerResult{SamHeader::FromBamHeaderBlock(
             std::span<const std::byte>{std::data(headerBuf), hdrSize})};

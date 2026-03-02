@@ -138,13 +138,13 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
         throw std::invalid_argument{
             "BamRecord::SerializeToBam: read name exceeds BAM limit of 254 characters"};
     }
-    const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(name_) + 1)};  // +NUL
+    const std::uint8_t nameLen = std::size(name_) + 1;  // +NUL
     if (std::size(cigar_) > std::numeric_limits<std::uint16_t>::max()) {
         throw std::invalid_argument{
             "BamRecord::SerializeToBam: CIGAR exceeds BAM limit of 65535 operations"};
     }
-    const std::uint16_t nCigarOp{static_cast<std::uint16_t>(std::size(cigar_))};
-    const std::uint32_t seqLen{static_cast<std::uint32_t>(std::size(sequence_))};
+    const std::uint16_t nCigarOp = std::size(cigar_);
+    const std::uint32_t seqLen = std::size(sequence_);
     if (!std::empty(qualities_) && (std::size(qualities_) != seqLen)) {
         throw std::invalid_argument{
             std::format("BamRecord::SerializeToBam: quality length ({}) != sequence length ({})",
@@ -247,7 +247,7 @@ BamRecord& BamRecord::Clip(ClipType type, std::int32_t start, std::int32_t end,
 
     // Get query start/end from tags (default to 0/seqLen for CCS/transcript)
     std::int32_t origQStart{0};
-    std::int32_t origQEnd{static_cast<std::int32_t>(origSeqLen)};
+    std::int32_t origQEnd = origSeqLen;
     if (const auto* qs{tags_.Get(TagKey{'q', 's'})}) {
         origQStart = static_cast<std::int32_t>(std::get<std::int64_t>(*qs));
     }

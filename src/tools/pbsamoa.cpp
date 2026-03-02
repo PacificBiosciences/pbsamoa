@@ -2,6 +2,7 @@
 #include "bai-query/BaiQuery.hpp"
 #include "bench/Bench.hpp"
 #include "chunk/Chunk.hpp"
+#include "convert/Convert.hpp"
 #include "dump/Dump.hpp"
 #include "zmi-build/ZmiBuild.hpp"
 #include "zmi-query/ZmiQuery.hpp"
@@ -24,6 +25,7 @@ void PrintUsage()
                "Commands:\n"
                "  dump       Convert BAM to SAM text on stdout\n"
                "  chunk      Dump a chunk of BAM records as SAM text\n"
+               "  convert    Convert BAM/SAM to CRAM format\n"
                "  bai-build  Build BAI index for a BAM file\n"
                "  bai-query  Query BAM records by genomic region\n"
                "  zmi-build  Copy BAM and build ZMI index alongside\n"
@@ -32,6 +34,7 @@ void PrintUsage()
                "\n"
                "Examples:\n"
                "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
+               "  pbsamoa convert    input.bam output.cram  Convert BAM/SAM to CRAM\n"
                "  pbsamoa bai-build  input.bam              Build BAI index\n"
                "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
                "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
@@ -59,6 +62,9 @@ int main(int argc, char* argv[])
     }
     if (cmd == "chunk") {
         return ChunkTool::Runner(argc - 2, argv + 2);
+    }
+    if (cmd == "convert") {
+        return Convert::Runner(argc - 2, argv + 2);
     }
     if (cmd == "bai-build") {
         return BaiBuild::Runner(argc - 2, argv + 2);

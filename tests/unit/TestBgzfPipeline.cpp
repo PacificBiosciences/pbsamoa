@@ -291,7 +291,7 @@ TEST(BgzfReaderBam, ParseHeaderMatchesBamRawReader)
     const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
 
     const BamRawReader syncReader{path};
-    BgzfReader pipeline{path, 4};
+    const BgzfReader pipeline{path, 4};
 
     EXPECT_EQ(pipeline.Header().NumReferences(), syncReader.Header().NumReferences());
     EXPECT_EQ(pipeline.Header().Version(), syncReader.Header().Version());

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/imgs/samoa_logo.png" alt="samoa logo" width="250px"/>
   <h1><i>pbsamoa</i> — SAM Open Alternative</h1>
-  <p>A C++23 library for reading and writing SAM/BAM files.</p>
+  <p>A C++23 library for reading and writing SAM/BAM/CRAM files.</p>
   <p>Continue to <a href="docs/README.md">documentation</a> of this early draft.</p>
 </div>
 
@@ -9,8 +9,9 @@
 
 Built on a decade of bioinformatics experience, _pbsamoa_ is inspired by the work of the _SAM/BAM
 Format Specification Working Group_ and _htslib_. It focuses on pipelined I/O for maximum
-throughput, deterministic chunking of inputs, and flexible record filtering. The "open" reflects our
-commitment to developing this library in the open.
+throughput, deterministic chunking of inputs, and flexible record filtering. Native CRAM v3.x
+reader/writer support includes CRAI interop and configurable block/data-series compression methods.
+The "open" reflects our commitment to developing this library in the open.
 
 ## Quick Start
 

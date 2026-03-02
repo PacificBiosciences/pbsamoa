@@ -130,10 +130,10 @@ void ClipSingleModType(char canonicalBase, std::span<const std::int32_t> skips,
                        std::vector<std::int32_t>& newSkips)
 {
     // Count canonical bases before and within the clip window
-    const std::int32_t basesBeforeClip{static_cast<std::int32_t>(
-        std::ranges::count(sequence.substr(0, clipOffset), canonicalBase))};
-    const std::int32_t basesInClip{static_cast<std::int32_t>(
-        std::ranges::count(sequence.substr(clipOffset, clipLength), canonicalBase))};
+    const std::int32_t basesBeforeClip =
+        std::ranges::count(sequence.substr(0, clipOffset), canonicalBase);
+    const std::int32_t basesInClip =
+        std::ranges::count(sequence.substr(clipOffset, clipLength), canonicalBase);
 
     // Build prefix sums: prefixSum[i] = total canonical bases seen up to
     // and including modification site i.
@@ -152,10 +152,8 @@ void ClipSingleModType(char canonicalBase, std::span<const std::int32_t> skips,
     const auto startIt{std::ranges::lower_bound(prefixSum, basesBeforeClip + 1)};
     const auto endIt{std::ranges::upper_bound(prefixSum, basesBeforeClip + basesInClip)};
 
-    const std::size_t startIdx{
-        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), startIt))};
-    const std::size_t endIdx{
-        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), endIt))};
+    const std::size_t startIdx = std::ranges::distance(prefixSum.begin(), startIt);
+    const std::size_t endIdx = std::ranges::distance(prefixSum.begin(), endIt);
 
     frontRemoved = startIdx;
     retained = endIdx - startIdx;
@@ -391,8 +389,7 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
     const auto suffixIt{std::ranges::upper_bound(suffixSum, suffixSize)};
 
     // Convert to pair indices in the original array
-    const std::size_t beginRun{
-        static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), prefixIt))};
+    const std::size_t beginRun = std::ranges::distance(prefixSum.begin(), prefixIt);
     const std::size_t endRun{
         numRuns - static_cast<std::size_t>(std::ranges::distance(suffixSum.begin(), suffixIt))};
 

@@ -24,7 +24,7 @@ std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> raw
                         std::size(rawData))};
     }
 
-    const std::uint32_t blockSize{static_cast<std::uint32_t>(std::size(rawData))};
+    const std::uint32_t blockSize = std::size(rawData);
 
     std::vector<std::byte> combined{};
     combined.resize(4U + std::size(rawData));

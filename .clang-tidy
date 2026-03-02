@@ -46,6 +46,8 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.TypeAliasCase
     value: CamelCase
+  - key: readability-identifier-naming.TypeAliasIgnoredRegexp
+    value: '^is_transparent$'
   - key: readability-identifier-naming.FunctionCase
     value: CamelCase
   - key: readability-identifier-naming.MethodCase

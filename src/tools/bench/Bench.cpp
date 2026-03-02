@@ -102,11 +102,11 @@ void BenchWrite(const std::filesystem::path& srcPath)
 
 void PrintBgzfMetrics(const BgzfMetrics& m)
 {
-    const double mbRead{static_cast<double>(m.BytesRead) / (1024.0 * 1024.0)};
-    const double mbDecomp{static_cast<double>(m.BytesDecompressed) / (1024.0 * 1024.0)};
-    const double ioMs{static_cast<double>(m.IoReadNs) / 1e6};
-    const double decompMs{static_cast<double>(m.DecompressNs) / 1e6};
-    const double parseMs{static_cast<double>(m.RecordParseNs) / 1e6};
+    const double mbRead = m.BytesRead / (1024.0 * 1024.0);
+    const double mbDecomp = m.BytesDecompressed / (1024.0 * 1024.0);
+    const double ioMs = 1.0 * m.IoReadNs / 1e6;
+    const double decompMs = 1.0 * m.DecompressNs / 1e6;
+    const double parseMs = 1.0 * m.RecordParseNs / 1e6;
 
     std::println("    bgzf: {:.1f} MB compressed, {:.1f} MB decompressed, {} blocks", mbRead,
                  mbDecomp, m.BlocksRead);
@@ -120,8 +120,8 @@ void PrintBgzfMetrics(const BgzfMetrics& m)
 
 void PrintDecodeMetrics(const DecodeMetrics& m)
 {
-    const double decodeMs{static_cast<double>(m.DecodeNs) / 1e6};
-    const double batchReadMs{static_cast<double>(m.BatchReadNs) / 1e6};
+    const double decodeMs = 1.0 * m.DecodeNs / 1e6;
+    const double batchReadMs = 1.0 * m.BatchReadNs / 1e6;
 
     std::println("    decode: {} batches, {} records", m.BatchesDecoded, m.RecordsDecoded);
     std::println("    timing: decode {:.1f}ms, batch_read {:.1f}ms", decodeMs, batchReadMs);
@@ -222,16 +222,7 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
 
 std::size_t ResolveNumWorkers(std::int32_t requested)
 {
-    constexpr std::int32_t MAX_AUTO_WORKERS{8};
-    constexpr std::int32_t MAX_PARSE_WORKERS{10};
-
-    const std::int32_t hwThreads{
-        static_cast<std::int32_t>(std::ranges::max(std::thread::hardware_concurrency(), 1U))};
-
-    if (requested < 0) {
-        return static_cast<std::size_t>(std::ranges::min(hwThreads, MAX_AUTO_WORKERS));
-    }
-    return static_cast<std::size_t>(std::ranges::min(requested, MAX_PARSE_WORKERS));
+    return Tools::ResolveNumWorkers(requested, /*explicitCap=*/10);
 }
 
 }  // namespace

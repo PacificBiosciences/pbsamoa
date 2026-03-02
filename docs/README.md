@@ -1,8 +1,8 @@
 # pbsamoa : SAM Open Alternative
 
-A C++23 library for reading and writing SAM/BAM files, with BAI index
-support. Built for throughput: parallel BGZF decompression, zero-copy record
-views, and batch processing with memory budgets.
+A C++23 library for reading and writing SAM/BAM/CRAM files, with BAI/CRAI
+index support. Built for throughput: parallel BGZF decompression, zero-copy
+record views, and batch processing with memory budgets.
 
 External dependencies: [libdeflate](https://github.com/ebiggers/libdeflate).
 
@@ -77,6 +77,37 @@ PacBio::Samoa::BamWriter writer{"output.bam", reader.Header()};
 for (const auto& view : reader.Records()) {
     writer.Write(view);  // zero-copy passthrough
 }
+```
+
+### Read a CRAM file
+
+```cpp
+#include <pbsamoa/io/CramReader.hpp>
+#include <print>
+
+PacBio::Samoa::CramReader reader{"input.cram"};
+for (const auto& record : reader.Records()) {
+    std::println("{}", record.Name());
+}
+```
+
+### Write a CRAM file
+
+```cpp
+#include <pbsamoa/io/BamRecordReader.hpp>
+#include <pbsamoa/io/CramWriter.hpp>
+
+PacBio::Samoa::BamRecordReader reader{"input.bam"};
+PacBio::Samoa::CramWriter writer{
+    "output.cram",
+    reader.Header(),
+    PacBio::Samoa::CramWriterConfig{.WriteCrai = true},
+};
+
+for (const auto& record : reader.Records()) {
+    writer.Write(record);
+}
+writer.Close();
 ```
 
 ### Region query with BAI index

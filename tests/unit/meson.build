@@ -22,6 +22,8 @@ test_exe = executable(
         'TestBgzfWriter.cpp',
         'TestCigarClipping.cpp',
         'TestCigarOp.cpp',
+        'TestCram.cpp',
+        'TestCraiIndex.cpp',
         'TestMetrics.cpp',
         'TestPulseBitset.cpp',
         'TestRawRecord.cpp',

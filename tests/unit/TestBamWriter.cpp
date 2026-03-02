@@ -300,7 +300,7 @@ TEST_F(BamWriterTest, ConstructWithConfig)
     writer.Write(MakeTestRecord());
     writer.Close();
 
-    BamRawReader reader{tmpPath};
+    const BamRawReader reader{tmpPath};
     EXPECT_EQ(reader.Header().Version(), "1.6");
 }
 

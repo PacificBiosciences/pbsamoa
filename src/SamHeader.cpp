@@ -477,7 +477,7 @@ std::string SamHeader::ToText() const
     }
 
     // @CO lines
-    for (const std::string& comment : comments_) {
+    for (const std::string_view comment : comments_) {
         result += "@CO\t";
         result += comment;
         result += '\n';

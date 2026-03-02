@@ -1,7 +1,7 @@
 # API Reference
 
 All types live in `namespace PacBio::Samoa`. Headers are under
-`include/pbsamoa/`, organized into `core/`, `io/`, and `index/`
+`include/pbsamoa/`, organized into `core/`, `io/`, `index/`, and `cram/`
 subdirectories.
 
 ---
@@ -190,6 +190,120 @@ for (const auto& record : reader.Records()) {
 ```cpp
 ReaderMetrics m = reader.GetMetrics();
 // m.Bgzf.BytesRead, m.Decode.RecordsDecoded, m.TotalRecordsRead, ...
+```
+
+---
+
+## CramReader
+
+```cpp
+#include <pbsamoa/io/CramReader.hpp>
+```
+
+Reads CRAM v3.x files and yields owned `BamRecord` objects.
+
+### Construction
+
+```cpp
+// Default config
+CramReader reader{"input.cram"};
+
+// With explicit reference FASTA and parallel decompression
+CramReader reader{"input.cram", CramReaderConfig{
+    .ReferencePath = "ref.fa",
+    .DecompressionWorkers = 4,
+}};
+```
+
+`CramReaderConfig` fields:
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `ReferencePath` | `{}` | Optional FASTA path for reference-based slices |
+| `DecompressionWorkers` | `0` | CRAM block decompression threads (`0` = synchronous) |
+
+### Header access
+
+```cpp
+const SamHeader& header = reader.Header();
+```
+
+### Single-record reading
+
+```cpp
+while (auto record = reader.ReadRecord()) {
+    // record is an owned BamRecord
+}
+```
+
+### Range iteration
+
+```cpp
+for (const auto& record : reader.Records()) {
+    // process record
+}
+```
+
+### Region query with CRAI
+
+```cpp
+#include <pbsamoa/index/CraiIndex.hpp>
+
+const CraiIndex index = CraiIndex::FromFile("input.cram.crai");
+const std::int32_t refId = reader.Header().ReferenceId("chr1");
+const auto records = reader.Query(index, refId, 1000, 2000);  // [beg,end), 0-based
+```
+
+Use `refId = -1` for unmapped query rows.
+
+---
+
+## CramWriter
+
+```cpp
+#include <pbsamoa/io/CramWriter.hpp>
+```
+
+Writes CRAM v3.0/v3.1 files from `BamRecord` and `RawRecord` input.
+
+### Construction
+
+```cpp
+// Default config
+CramWriter writer{"output.cram", header};
+
+// Tuned config with CRAI sidecar
+CramWriter writer{"output.cram", header, CramWriterConfig{
+    .BlockCompressionMethod = CramBlockMethod::RANS4X8,
+    .RecordsPerSlice = 10000,
+    .WriteCrai = true,
+    .CompressionWorkers = 4,
+}};
+```
+
+`CramWriterConfig` fields:
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `BlockCompressionMethod` | `CramBlockMethod` | `GZIP` | Default block method |
+| `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}` | Per-data-series method overrides |
+| `RecordsPerSlice` | `int32_t` | `10000` | Max records per slice |
+| `MajorVersion` | `uint8_t` | `3` | CRAM major version (`3` only) |
+| `MinorVersion` | `uint8_t` | `0` | CRAM minor version (`0` or `1`) |
+| `WriteCrai` | `bool` | `false` | Write `<output>.crai` sidecar |
+| `CraiPath` | `optional<path>` | `{}` | CRAI output path override |
+| `CompressionWorkers` | `size_t` | `0` | CRAM block compression threads (`0` = synchronous) |
+
+### Writing records
+
+```cpp
+std::vector<BamRecord> records = /* ... */;
+for (const auto& record : records) {
+    writer.Write(record);
+}
+writer.Write(rawRecord);
+writer.WriteBatch(rawBatch);
+writer.Close();
 ```
 
 ---
@@ -518,6 +632,23 @@ index.ToFile("sorted.bam.bai");
 | `NumReferences()` | Number of reference sequences in the index |
 | `MappedCount()`   | Total mapped reads (from metadata bin)     |
 | `UnmappedCount()` | Total unmapped reads (from metadata bin)   |
+
+---
+
+## CraiIndex
+
+```cpp
+#include <pbsamoa/index/CraiIndex.hpp>
+```
+
+CRAM index: read and query gzip-compressed CRAI entries.
+
+```cpp
+const CraiIndex index = CraiIndex::FromFile("input.cram.crai");
+const auto& all = index.Entries();
+const auto chr1 = index.EntriesForReference(0);
+const auto unmapped = index.EntriesForReference(-1);
+```
 
 ---
 

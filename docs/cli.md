@@ -1,29 +1,78 @@
 # CLI Tools
 
-pbsamoa ships a multi-tool binary with subcommands for common BAM/SAM
-operations and BGZF utilities.
+pbsamoa ships a multi-tool binary with subcommands for BAM/SAM/CRAM workflows,
+indexing, and performance benchmarking.
 
 ## pbsamoa
 
-### dump — BAM/SAM to text
+### dump — BAM/SAM/CRAM to SAM text
 
-Convert a BAM or SAM file to human-readable SAM text on stdout.
+Convert BAM, SAM, or CRAM input to SAM text on stdout.
 
 ```sh
 pbsamoa dump input.bam
-pbsamoa dump input.bam > output.sam
+pbsamoa dump input.sam
+pbsamoa dump input.cram
+pbsamoa dump input.cram > output.sam
 ```
 
 Options:
 
-|         Flag         | Alias |                            Description                            |
-| -------------------- | ----- | ----------------------------------------------------------------- |
-| `--bgzf-threads N`   | `-j`  | BGZF decompression worker threads (default: auto, max 8)          |
-| `--format-threads N` |       | SAM formatting thread pool size (default: max(hw_concurrency, 4)) |
+| Flag | Alias | Description |
+| ---- | ----- | ----------- |
+| `--bgzf-threads N` | `-j` | Decompression worker threads (default: auto, max 10) |
+| `--format-threads N` | | SAM formatting thread pool size for BAM input (default: `max(hw_concurrency, 4)`) |
+| `--reference ref.fa` | | Reference FASTA for reference-based CRAM decoding |
+| `--region ref:start-end|*` | | CRAM-only region query (`*` selects unmapped) |
+| `--index file.crai` | | CRAM-only CRAI path override (requires `--region`) |
+
+Notes:
+
+- `--region` and `--index` are only supported for CRAM input.
+- If `--region` is set and `--index` is omitted, `dump` loads `<input>.crai`.
 
 Environment:
 
-- `PBSAMOA_METRICS=1` — Print per-second pipeline metrics and a final summary to stderr.
+- `PBSAMOA_METRICS=1` — Print per-second pipeline metrics and a final summary to stderr for BAM dump pipeline.
+
+### convert — BAM/SAM to CRAM
+
+Convert BAM or SAM input to CRAM output.
+
+```sh
+pbsamoa convert input.bam output.cram
+pbsamoa convert input.sam output.cram
+```
+
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--records-per-slice N` | Maximum records per CRAM slice (default: `10000`) |
+| `--bgzf-threads N` | BAM input decompression workers (default: auto, max 16) |
+| `--convert-to-bam-record` | Opt in to decoding BAM input into `BamRecord` before CRAM write |
+| `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: auto, max 16). Also enables that mode when set explicitly |
+| `--compression-threads N` | CRAM block compression workers (default: auto, max 8) |
+| `--block-compression METHOD` | Default CRAM block method |
+| `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable) |
+| `--write-crai` | Write samtools-compatible `<output>.crai` |
+
+Supported `METHOD` values:
+
+- `raw`, `gzip`, `bzip2`, `lzma`, `rans4x8`, `rans4x16`, `arith`, `fqzcomp`, `tok`
+- Numeric method IDs `0` through `8`
+
+Supported `SERIES` values:
+
+- `BF`, `CF`, `RI`, `RL`, `AP`, `RG`, `RN`, `MF`, `NS`, `NP`, `TS`, `NF`, `TL`, `FN`, `FC`, `FP`, `DL`, `BB`, `QQ`, `BS`, `IN`, `RS`, `PD`, `HC`, `SC`, `MQ`, `BA`, `QS`
+
+Notes:
+
+- Output must use `.cram` extension.
+- Input must use `.bam` or `.sam` extension.
+- Default block compression method is `rans4x8`.
+- BAM input defaults to `RawRecord` passthrough into `CramWriter`; use
+  `--convert-to-bam-record` to use the decoded `BamRecord` path.
 
 ### bai-query — region query
 
@@ -34,7 +83,7 @@ Expects a `.bai` file alongside the BAM (auto-detected as `<bam>.bai`).
 pbsamoa bai-query sorted.bam chr1:1000-2000
 ```
 
-Arguments: BAM path, region (ref:start-end, 1-based inclusive).
+Arguments: BAM path, region (`ref:start-end`, 1-based inclusive).
 
 ### bai-build — build BAI
 
@@ -84,7 +133,7 @@ pbsamoa bench input.bam
 
 Options:
 
-|         Flag         | Alias |                       Description                        |
-| -------------------- | ----- | -------------------------------------------------------- |
-| `--bgzf-threads N`   | `-j`  | BGZF decompression worker threads (default: auto, max 8) |
-| `--decode-threads N` |       | BamRecord decode worker threads (default: 4)             |
+| Flag | Alias | Description |
+| ---- | ----- | ----------- |
+| `--bgzf-threads N` | `-j` | BGZF decompression worker threads (default: auto, max 8) |
+| `--decode-threads N` | | BamRecord decode worker threads (default: 4) |

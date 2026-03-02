@@ -309,7 +309,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
         headerLen += *bytesRead;
 
-        const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+        const std::size_t hdrSize{
+            ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
         if (hdrSize > 0) {
             // Validate sort order — BAI indexing requires coordinate-sorted input
             auto headerResult{SamHeader::FromBamHeaderBlock(
@@ -362,10 +363,11 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     recordAccum.reserve(MAX_DECOMPRESSED_BLOCK_SIZE * 2);
 
     // Initialize with leftover data from header parsing
-    const std::size_t headerLeftover{headerLen -
-                                     ComputeHeaderSize(std::data(headerBuf), headerLen)};
+    const std::size_t headerLeftover{
+        headerLen - ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
     if (headerLeftover > 0) {
-        const std::size_t hdrSize{ComputeHeaderSize(std::data(headerBuf), headerLen)};
+        const std::size_t hdrSize{
+            ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
         recordAccum.insert(std::ranges::end(recordAccum), std::data(headerBuf) + hdrSize,
                            std::data(headerBuf) + hdrSize + headerLeftover);
     }

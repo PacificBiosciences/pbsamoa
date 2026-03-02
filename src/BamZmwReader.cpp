@@ -1,10 +1,11 @@
 #include <pbsamoa/io/BamZmwReader.hpp>
 
+#include "ZmwUtils.hpp"
+
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/index/ZmwIndex.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
-#include "ZmwUtils.hpp"
 
 #include <optional>
 #include <string>

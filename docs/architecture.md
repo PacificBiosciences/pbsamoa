@@ -6,8 +6,8 @@ below it.
 ```
 ┌────────────────────────────────────────────────────────┐
 │  API                                                   │
-│  BamRawReader  BamRecordReader  SamReader              │
-│  BamWriter  SamWriter  BaiIndex                        │
+│  BamRawReader  BamRecordReader  SamReader  CramReader  │
+│  BamWriter  SamWriter  CramWriter  BaiIndex  CraiIndex │
 │  BamZmwReader  ZmiBamWriter                            │
 ├────────────────────────────────────────────────────────┤
 │  Record                                                │
@@ -16,7 +16,8 @@ below it.
 │  CigarOp  SequenceView  TagMap  SamHeader              │
 ├────────────────────────────────────────────────────────┤
 │  Compression                                           │
-│  BgzfReader  BgzfWriter  VirtualOffset                 │
+│  BgzfReader  BgzfWriter  VirtualOffset  CramCodec      │
+│  CramCompression                                       │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -49,7 +50,16 @@ is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
 │                                                                        │
 │  SamWriter ─────► SamHeader                                            │
 │                                                                        │
+│  CramReader ──┬──► SamHeader                                           │
+│               ├──► CramCodec + CramCompression                         │
+│               └──► CraiIndex (for region query)                        │
+│                                                                        │
+│  CramWriter ──┬──► SamHeader                                           │
+│               ├──► CramCodec + CramCompression                         │
+│               └──► optional CRAI writer                                │
+│                                                                        │
 │  BaiIndex ──────► Chunk ──► VirtualOffset                              │
+│  CraiIndex ─────► CraiEntry                                            │
 │                                                                        │
 │  ZmiBamWriter ┬──► BamWriter                                           │
 │               └──► ZmiWriter ──► BgzfWriter                            │
@@ -104,6 +114,15 @@ Key relationships:
   the output file header. Accepts `BamRecord`, `RawRecord`, raw
   `span<const byte>`, and `RawRecordBatch` (via `WriteBatch()`).
 
+- **CramReader** owns CRAM container/slice decode state and produces owned
+  `BamRecord` objects. It supports optional reference-based decoding and
+  region queries via `CraiIndex`.
+
+- **CramWriter** encodes `BamRecord` and `RawRecord` input into CRAM
+  containers/slices with configurable block codecs and optional
+  per-data-series overrides. It can emit a samtools-compatible CRAI
+  sidecar during write.
+
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.
 
@@ -117,6 +136,10 @@ Key relationships:
 BAM files use BGZF (Blocked GZip Format) — a series of independently
 compressed gzip blocks, each at most 64 KiB decompressed. This enables
 random access via virtual offsets.
+
+CRAM uses container/slice structures and block-level codecs selected from
+CRAM v3.x methods (`raw`, `gzip`, `bzip2`, `lzma`, `rANS`, `arith`,
+`fqzcomp`, `name tokeniser`) via `CramCodec` + `CramCompression`.
 
 ### BgzfReader
 

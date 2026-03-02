@@ -20,3 +20,5 @@ _codeql_detected_source_root
 
 # Git worktrees
 /.worktrees/
+
+.planning/

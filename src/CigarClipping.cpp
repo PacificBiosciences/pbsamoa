@@ -245,7 +245,7 @@ ClipResult ClipCigarToReference(std::span<const CigarOp> cigar, std::int32_t ref
     }
 
     const std::size_t clipOffset{queryRemovedFront};
-    const std::size_t totalQuery{static_cast<std::size_t>(totalQueryLen)};
+    const std::size_t totalQuery = totalQueryLen;
     const std::size_t totalRemoved{queryRemovedFront + queryRemovedBack};
     const std::size_t clipLength{(totalRemoved <= totalQuery) ? (totalQuery - totalRemoved) : 0};
     const std::int32_t newPos{std::max(origRefPos, refStart)};

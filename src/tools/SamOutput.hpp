@@ -8,88 +8,80 @@
 #include <pbsamoa/core/Tags.hpp>
 
 #include <algorithm>
+#include <print>
 #include <span>
 #include <string>
 
 #include <cstdint>
-#include <cstdio>
 
 namespace PacBio {
 namespace Samoa {
 
 inline void WriteViewAsSam(const SamHeader& header, const RawRecord& view)
 {
-    std::fputs(std::string{view.Name()}.c_str(), stdout);
-    std::fputc('\t', stdout);
-
-    std::fprintf(stdout, "%u", view.Flag());
-    std::fputc('\t', stdout);
+    std::print("{}\t{}\t", view.Name(), view.Flag());
 
     const std::int32_t refId{view.RefId()};
     if (refId < 0) {
-        std::fputc('*', stdout);
+        std::print("*");
     } else {
-        std::fputs(std::string{header.ReferenceName(refId)}.c_str(), stdout);
+        std::print("{}", header.ReferenceName(refId));
     }
-    std::fputc('\t', stdout);
+    std::print("\t");
 
     const std::int32_t pos{view.Pos()};
-    std::fprintf(stdout, "%d", pos >= 0 ? pos + 1 : 0);
-    std::fputc('\t', stdout);
+    std::print("{}\t", pos >= 0 ? pos + 1 : 0);
 
-    std::fprintf(stdout, "%u", view.MapQ());
-    std::fputc('\t', stdout);
+    std::print("{}\t", view.MapQ());
 
     const CigarView cigar{view.CigarOps()};
     if (std::empty(cigar)) {
-        std::fputc('*', stdout);
+        std::print("*");
     } else {
-        std::fputs(CigarToString(cigar).c_str(), stdout);
+        std::print("{}", CigarToString(cigar));
     }
-    std::fputc('\t', stdout);
+    std::print("\t");
 
     const std::int32_t nextRefId{view.NextRefId()};
     if (nextRefId < 0) {
-        std::fputc('*', stdout);
+        std::print("*");
     } else if (nextRefId == refId) {
-        std::fputc('=', stdout);
+        std::print("=");
     } else {
-        std::fputs(std::string{header.ReferenceName(nextRefId)}.c_str(), stdout);
+        std::print("{}", header.ReferenceName(nextRefId));
     }
-    std::fputc('\t', stdout);
+    std::print("\t");
 
     const std::int32_t nextPos{view.NextPos()};
-    std::fprintf(stdout, "%d", nextPos >= 0 ? nextPos + 1 : 0);
-    std::fputc('\t', stdout);
+    std::print("{}\t", nextPos >= 0 ? nextPos + 1 : 0);
 
-    std::fprintf(stdout, "%d", view.Tlen());
-    std::fputc('\t', stdout);
+    std::print("{}\t", view.Tlen());
 
     const std::string seq{view.Seq().ToString()};
     if (std::empty(seq)) {
-        std::fputc('*', stdout);
+        std::print("*");
     } else {
-        std::fputs(seq.c_str(), stdout);
+        std::print("{}", seq);
     }
-    std::fputc('\t', stdout);
+    std::print("\t");
 
     const std::span<const std::uint8_t> qual{view.Qual()};
     const bool qualUnavailable{std::empty(qual) ||
                                std::ranges::all_of(qual, [](std::uint8_t q) { return q == 0xFF; })};
     if (qualUnavailable) {
-        std::fputc('*', stdout);
+        std::print("*");
     } else {
         for (const std::uint8_t q : qual) {
-            std::fputc(static_cast<unsigned char>(q + 33), stdout);
+            std::print("{}", static_cast<char>(q + 33));
         }
     }
 
     std::string tagBuf;
     SerializeRawTagsToSam(view.AuxData(), tagBuf);
     if (!std::empty(tagBuf)) {
-        std::fputs(tagBuf.c_str(), stdout);
+        std::print("{}", tagBuf);
     }
-    std::fputc('\n', stdout);
+    std::println();
 }
 
 }  // namespace Samoa

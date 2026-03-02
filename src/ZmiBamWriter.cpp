@@ -1,8 +1,9 @@
 #include <pbsamoa/io/ZmiBamWriter.hpp>
 
+#include "ZmwUtils.hpp"
+
 #include <pbsamoa/io/BamWriter.hpp>
 #include <pbsamoa/io/ZmiWriter.hpp>
-#include "ZmwUtils.hpp"
 
 #include <cstddef>
 #include <cstdint>
