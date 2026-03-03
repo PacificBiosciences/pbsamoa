@@ -19,6 +19,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -293,6 +294,16 @@ std::vector<std::byte> CramGzipDecompress(std::span<const std::byte> data, std::
     if (activeDecompressor == nullptr) {
         throw std::runtime_error("CramGzipDecompress: failed to allocate decompressor");
     }
+
+    static std::once_flag libdeflateDispatchInitialized;
+    std::call_once(libdeflateDispatchInitialized, [activeDecompressor, data, rawSize]() {
+        // libdeflate lazily initializes a global decompression dispatch function.
+        // Force that initialization once on a single thread before parallel decoding.
+        std::vector<std::byte> warmupOutput(rawSize);
+        std::size_t warmupOut = 0;
+        (void)libdeflate_gzip_decompress(activeDecompressor, data.data(), std::size(data),
+                                         warmupOutput.data(), rawSize, &warmupOut);
+    });
 
     std::vector<std::byte> output(rawSize);
     std::size_t actualOut = 0;
