@@ -13,7 +13,6 @@
 #include <string>
 #include <vector>
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -26,11 +25,15 @@ struct BamRawReader::Impl
     BgzfReader bgzf;
 
     // Chunking support
-    std::size_t recordLimit{0};  // 0 = unlimited
+    bool hasRecordLimit{false};
+    std::size_t recordLimit{0};
     std::size_t recordsRead{0};
 
     explicit Impl(const std::filesystem::path& p, BamRawReaderConfig config)
-        : path{p}, bgzf{p, config.BgzfWorkers}, recordLimit{config.RecordLimit}
+        : path{p}
+        , bgzf{p, config.BgzfWorkers}
+        , hasRecordLimit{config.RecordLimit > 0}
+        , recordLimit{config.RecordLimit}
     {
         // Validate mutual exclusion
         const bool hasChunking{(config.ChunkNum > 0) && (config.TotalChunks > 0)};
@@ -64,18 +67,25 @@ struct BamRawReader::Impl
             throw std::runtime_error{std::format("ZMW index is empty for: {}", path.string())};
         }
 
-        const double chunkSize{1.0 * numZmws / totalChunks};
-        const std::ptrdiff_t startIdx{(chunkNum == 1) ? 0
-                                                      : std::lround(chunkSize * (chunkNum - 1))};
-        const std::ptrdiff_t endIdx{(chunkNum == totalChunks) ? numZmws
-                                                              : std::lround(chunkSize * chunkNum)};
+        const std::ptrdiff_t startIdx{(numZmws * static_cast<std::ptrdiff_t>(chunkNum - 1)) /
+                                      totalChunks};
+        const std::ptrdiff_t endIdx{(numZmws * static_cast<std::ptrdiff_t>(chunkNum)) /
+                                    totalChunks};
+
+        hasRecordLimit = true;
+        recordsRead = 0;
+
+        if (startIdx >= endIdx) {
+            // This chunk has no assigned ZMWs.
+            recordLimit = 0;
+            return;
+        }
 
         const std::span<const ZmwIdentity> chunkZmws{std::data(unique) + startIdx,
                                                      static_cast<std::size_t>(endIdx - startIdx)};
         const std::vector<std::int64_t> chunkOffsets{index.Find(chunkZmws)};
 
         recordLimit = std::size(chunkOffsets);
-        recordsRead = 0;
 
         // Seek to the first record in this chunk
         const VirtualOffset startOffset(index.FirstOffset(unique[startIdx]));
@@ -100,7 +110,7 @@ const SamHeader& BamRawReader::Header() const { return impl_->bgzf.Header(); }
 
 std::optional<RawRecord> BamRawReader::ReadRecord()
 {
-    if ((impl_->recordLimit > 0) && (impl_->recordsRead >= impl_->recordLimit)) {
+    if (impl_->hasRecordLimit && (impl_->recordsRead >= impl_->recordLimit)) {
         return std::nullopt;
     }
 
@@ -113,12 +123,12 @@ std::optional<RawRecord> BamRawReader::ReadRecord()
 
 std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 {
-    if ((impl_->recordLimit > 0) && (impl_->recordsRead >= impl_->recordLimit)) {
+    if (impl_->hasRecordLimit && (impl_->recordsRead >= impl_->recordLimit)) {
         return std::nullopt;
     }
 
-    const std::size_t remaining{(impl_->recordLimit > 0) ? (impl_->recordLimit - impl_->recordsRead)
-                                                         : std::numeric_limits<std::size_t>::max()};
+    const std::size_t remaining{impl_->hasRecordLimit ? (impl_->recordLimit - impl_->recordsRead)
+                                                      : std::numeric_limits<std::size_t>::max()};
 
     std::vector<std::byte> batchBuffer;
     batchBuffer.reserve(limit.Value());

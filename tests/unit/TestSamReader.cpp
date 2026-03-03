@@ -269,6 +269,86 @@ TEST_F(SamReaderTempFile, NegativeTlen)
     EXPECT_EQ(record->Tlen(), -39);
 }
 
+TEST_F(SamReaderTempFile, ThrowsOnMapqOutOfRange)
+{
+    const auto path = WriteTempSam("bad_mapq.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t300\t3M\t*\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnTrailingJunkInNumericField)
+{
+    const auto path = WriteTempSam("bad_flag.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t99x\tref\t10\t30\t3M\t*\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnInvalidOptionalTag)
+{
+    const auto path = WriteTempSam("bad_tag.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t!!!\tNM:i:5x\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnSeqQualLengthMismatch)
+{
+    const auto path = WriteTempSam("bad_seq_qual_len.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t4M\t*\t0\t0\tACGT\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnQualityWithoutSequence)
+{
+    const auto path = WriteTempSam("bad_seq_missing_qual.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t4\t*\t0\t0\t*\t*\t0\t0\t*\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnInvalidQualityCharacter)
+{
+    const auto path = WriteTempSam("bad_qual_char.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t! !\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnUnknownRnameWithHeaderDictionary)
+{
+    const auto path = WriteTempSam("bad_rname.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tchrX\t10\t30\t3M\t*\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ThrowsOnUnknownRnextWithHeaderDictionary)
+{
+    const auto path = WriteTempSam("bad_rnext.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t3M\tchrY\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+}
+
 TEST_F(SamReaderTempFile, RangeInterfaceEmptyFile)
 {
     const auto path = WriteTempSam("empty2.sam", "");

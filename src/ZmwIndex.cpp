@@ -1,5 +1,6 @@
 #include <pbsamoa/index/ZmwIndex.hpp>
 
+#include "BinaryUtils.hpp"
 #include "ZmiInternal.hpp"
 
 #include <pbsamoa/core/Bgzf.hpp>
@@ -10,6 +11,8 @@
 #include <optional>
 #include <ranges>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include <cstddef>
@@ -55,23 +58,23 @@ constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536};
 // PBI format constants
 constexpr std::size_t PBI_HEADER_SIZE{32};
 constexpr std::array<char, 4> PBI_MAGIC{'P', 'B', 'I', '\1'};
+constexpr std::uint16_t PBI_FLAG_BASIC_DATA{0x0001U};
 
-template <typename T>
-T ReadLE(const std::byte* src)
+std::size_t CheckedMul(std::size_t lhs, std::size_t rhs, std::string_view what)
 {
-    T value{};
-    std::byte* dst{reinterpret_cast<std::byte*>(&value)};
-    std::ranges::copy_n(src, sizeof(value), dst);
-    return value;
+    if ((lhs != 0) && (rhs > (std::numeric_limits<std::size_t>::max() / lhs))) {
+        throw std::runtime_error{std::format("{} size overflows", what)};
+    }
+    return lhs * rhs;
 }
 
-std::uint16_t ReadLE16(const std::byte* src) { return ReadLE<std::uint16_t>(src); }
-
-std::int32_t ReadLE32Signed(const std::byte* src) { return ReadLE<std::int32_t>(src); }
-
-std::int64_t ReadLE64Signed(const std::byte* src) { return ReadLE<std::int64_t>(src); }
-
-std::uint32_t ReadLE32Unsigned(const std::byte* src) { return ReadLE<std::uint32_t>(src); }
+std::size_t CheckedAdd(std::size_t lhs, std::size_t rhs, std::string_view what)
+{
+    if (rhs > (std::numeric_limits<std::size_t>::max() - lhs)) {
+        throw std::runtime_error{std::format("{} size overflows", what)};
+    }
+    return lhs + rhs;
+}
 
 }  // namespace
 
@@ -104,14 +107,23 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
     }
 
     // Read entrySize from offset 8 (2 bytes LE)
-    const std::uint16_t entrySize{ReadLE16(std::data(data) + 8)};
+    const std::uint16_t entrySize{ReadU16LE(std::data(data) + 8)};
     if (entrySize < ZMI_ENTRY_MIN_SIZE) {
         throw std::runtime_error{std::format("ZMI entrySize too small: {}", entrySize)};
     }
+    const std::uint64_t numRecordsHeader{ReadU64LE(std::data(data) + 12)};
 
     // Iterate over entries starting at offset 64 with stride = entrySize
     const std::size_t dataSize{std::size(data)};
-    const std::size_t numEntries{(dataSize - detail::ZMI_HEADER_SIZE) / entrySize};
+    const std::size_t payloadSize{dataSize - detail::ZMI_HEADER_SIZE};
+    if ((payloadSize % entrySize) != 0) {
+        throw std::runtime_error{"ZMI file has truncated entry data"};
+    }
+    const std::size_t numEntries{payloadSize / entrySize};
+    if ((numRecordsHeader != 0U) && (numRecordsHeader != static_cast<std::uint64_t>(numEntries))) {
+        throw std::runtime_error{std::format("ZMI header numRecords mismatch: header={} entries={}",
+                                             numRecordsHeader, numEntries)};
+    }
 
     ZmwIndex index;
     index.rgIds_.reserve(numEntries);
@@ -121,9 +133,9 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
     for (std::size_t i{0}; i < numEntries; ++i) {
         const std::byte* entry{std::data(data) + detail::ZMI_HEADER_SIZE + (i * entrySize)};
 
-        const std::int32_t rgId{ReadLE32Signed(entry)};
-        const std::int32_t zmw{ReadLE32Signed(entry + 4)};
-        const std::int64_t virtualOffset{ReadLE64Signed(entry + 8)};
+        const std::int32_t rgId{ReadI32LE(entry)};
+        const std::int32_t zmw{ReadI32LE(entry + 4)};
+        const std::int64_t virtualOffset{ReadI64LE(entry + 8)};
 
         index.rgIds_.push_back(rgId);
         index.zmws_.push_back(zmw);
@@ -159,9 +171,13 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     if (std::memcmp(std::data(data), std::data(PBI_MAGIC), 4) != 0) {
         throw std::runtime_error{"PBI file has invalid magic bytes"};
     }
+    const std::uint16_t pbiFlags{ReadU16LE(std::data(data) + 8)};
+    if ((pbiFlags & PBI_FLAG_BASIC_DATA) == 0U) {
+        throw std::runtime_error{"PBI file missing BasicData section"};
+    }
 
     // Read numReads from offset 10 (uint32 LE)
-    const std::uint32_t numReads{ReadLE32Unsigned(std::data(data) + 10)};
+    const std::uint32_t numReads{ReadU32LE(std::data(data) + 10)};
 
     // BasicData columns start at offset 32 (end of header).
     // Columns are stored sequentially (not interleaved):
@@ -173,14 +189,22 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     //   ctxtFlag:   numReads × uint8   (skip)
     //   fileOffset: numReads × int64
 
-    const std::size_t int32ColBytes = numReads * sizeof(std::int32_t);
-    const std::size_t float32ColBytes = numReads * sizeof(float);
-    const std::size_t uint8ColBytes = numReads * sizeof(std::uint8_t);
-    const std::size_t int64ColBytes = numReads * sizeof(std::int64_t);
+    const std::size_t readsAsSize{numReads};
+    const std::size_t int32ColBytes{
+        CheckedMul(readsAsSize, sizeof(std::int32_t), "PBI int32 column")};
+    const std::size_t float32ColBytes{CheckedMul(readsAsSize, sizeof(float), "PBI float32 column")};
+    const std::size_t uint8ColBytes{
+        CheckedMul(readsAsSize, sizeof(std::uint8_t), "PBI uint8 column")};
+    const std::size_t int64ColBytes{
+        CheckedMul(readsAsSize, sizeof(std::int64_t), "PBI int64 column")};
 
     // Validate that we have enough data for all BasicData columns
-    const std::size_t requiredSize{PBI_HEADER_SIZE + (4 * int32ColBytes) + float32ColBytes +
-                                   uint8ColBytes + int64ColBytes};
+    std::size_t requiredSize{PBI_HEADER_SIZE};
+    requiredSize = CheckedAdd(requiredSize, CheckedMul(4, int32ColBytes, "PBI int32 columns"),
+                              "PBI total size");
+    requiredSize = CheckedAdd(requiredSize, float32ColBytes, "PBI total size");
+    requiredSize = CheckedAdd(requiredSize, uint8ColBytes, "PBI total size");
+    requiredSize = CheckedAdd(requiredSize, int64ColBytes, "PBI total size");
     if (std::size(data) < requiredSize) {
         throw std::runtime_error{"PBI file too small: incomplete BasicData section"};
     }
@@ -194,8 +218,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
 
     // Column 1: rgId (numReads × int32)
     for (std::uint32_t i{0}; i < numReads; ++i) {
-        index.rgIds_.push_back(
-            ReadLE32Signed(std::data(data) + offset + (i * sizeof(std::int32_t))));
+        index.rgIds_.push_back(ReadI32LE(std::data(data) + offset + (i * sizeof(std::int32_t))));
     }
     offset += int32ColBytes;
 
@@ -207,8 +230,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
 
     // Column 4: holeNumber (numReads × int32)
     for (std::uint32_t i{0}; i < numReads; ++i) {
-        index.zmws_.push_back(
-            ReadLE32Signed(std::data(data) + offset + (i * sizeof(std::int32_t))));
+        index.zmws_.push_back(ReadI32LE(std::data(data) + offset + (i * sizeof(std::int32_t))));
     }
     offset += int32ColBytes;
 
@@ -220,8 +242,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
 
     // Column 7: fileOffset (numReads × int64)
     for (std::uint32_t i{0}; i < numReads; ++i) {
-        index.offsets_.push_back(
-            ReadLE64Signed(std::data(data) + offset + (i * sizeof(std::int64_t))));
+        index.offsets_.push_back(ReadI64LE(std::data(data) + offset + (i * sizeof(std::int64_t))));
     }
 
     return index;
@@ -321,14 +342,13 @@ std::vector<ZmwIdentity> ZmwIndex::UniqueZmws() const
     std::vector<ZmwIdentity> result;
     result.reserve(std::size(zmws_));
 
-    std::int32_t lastRgId{std::numeric_limits<std::int32_t>::min()};
-    std::int32_t lastZmw{std::numeric_limits<std::int32_t>::min()};
-
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(std::size(zmws_));
     for (std::ptrdiff_t i{0}; i < std::ssize(zmws_); ++i) {
-        if ((rgIds_[i] != lastRgId) || (zmws_[i] != lastZmw)) {
-            lastRgId = rgIds_[i];
-            lastZmw = zmws_[i];
-            result.push_back(ZmwIdentity{lastRgId, lastZmw});
+        const ZmwIdentity id{rgIds_[i], zmws_[i]};
+        const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
+        if (seen.insert(key).second) {
+            result.push_back(id);
         }
     }
 

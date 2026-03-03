@@ -8,10 +8,14 @@
 #include <pbsamoa/io/BamRawReader.hpp>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -25,19 +29,90 @@ namespace {
 
 constexpr std::size_t BAI_LINEAR_INDEX_WINDOW{16384};  // 2^14 = 16 kbp
 
+void ReadExact(std::ifstream& in, std::span<std::byte> bytes, std::string_view fieldName)
+{
+    in.read(reinterpret_cast<char*>(std::data(bytes)),
+            static_cast<std::streamsize>(std::size(bytes)));
+    if (!in) {
+        throw std::runtime_error{std::format("Truncated BAI file reading {}", fieldName)};
+    }
+}
+
+std::uint32_t ReadU32LEFromFile(std::ifstream& in, std::string_view fieldName)
+{
+    std::array<std::byte, 4> bytes{};
+    ReadExact(in, bytes, fieldName);
+    return ReadU32LE(std::data(bytes));
+}
+
+std::int32_t ReadI32LEFromFile(std::ifstream& in, std::string_view fieldName)
+{
+    return std::bit_cast<std::int32_t>(ReadU32LEFromFile(in, fieldName));
+}
+
+std::uint64_t ReadU64LEFromFile(std::ifstream& in, std::string_view fieldName)
+{
+    std::array<std::byte, 8> bytes{};
+    ReadExact(in, bytes, fieldName);
+    return ReadU64LE(std::data(bytes));
+}
+
+std::optional<std::uint64_t> ReadOptionalU64LEFromFile(std::ifstream& in,
+                                                       std::string_view fieldName)
+{
+    std::array<std::byte, 8> bytes{};
+    in.read(reinterpret_cast<char*>(std::data(bytes)),
+            static_cast<std::streamsize>(std::size(bytes)));
+    const std::streamsize bytesRead{in.gcount()};
+    if (bytesRead == 0) {
+        return std::nullopt;
+    }
+    if (bytesRead != static_cast<std::streamsize>(std::size(bytes))) {
+        throw std::runtime_error{std::format("Truncated BAI file reading {}", fieldName)};
+    }
+    return ReadU64LE(std::data(bytes));
+}
+
+std::size_t CheckedNonNegativeCount(std::int32_t value, std::string_view fieldName)
+{
+    if (value < 0) {
+        throw std::runtime_error{
+            std::format("Invalid BAI file: {} must be >= 0, got {}", fieldName, value)};
+    }
+    return static_cast<std::size_t>(value);
+}
+
 void WriteU32LE(std::ofstream& out, std::uint32_t v)
 {
-    out.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    const std::array<std::byte, 4> bytes{
+        static_cast<std::byte>(v & 0xFFU),
+        static_cast<std::byte>((v >> 8U) & 0xFFU),
+        static_cast<std::byte>((v >> 16U) & 0xFFU),
+        static_cast<std::byte>((v >> 24U) & 0xFFU),
+    };
+    out.write(reinterpret_cast<const char*>(std::data(bytes)),
+              static_cast<std::streamsize>(std::size(bytes)));
 }
 
 void WriteI32LE(std::ofstream& out, std::int32_t v)
 {
-    out.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    WriteU32LE(out, std::bit_cast<std::uint32_t>(v));
 }
 
 void WriteU64LE(std::ofstream& out, std::uint64_t v)
 {
-    out.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    const std::array<std::byte, 8> bytes{
+        static_cast<std::byte>(v & 0xFFULL),
+        static_cast<std::byte>((v >> 8ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 16ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 24ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 32ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 40ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 48ULL) & 0xFFULL),
+        static_cast<std::byte>((v >> 56ULL) & 0xFFULL),
+    };
+    out.write(reinterpret_cast<const char*>(std::data(bytes)),
+              static_cast<std::streamsize>(std::size(bytes)));
 }
 
 /// \brief Merge overlapping/adjacent chunks. Input must be sorted by Begin.
@@ -98,83 +173,58 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
     }
 
     // Read magic
-    std::array<char, 4> magic{};
-    file.read(std::data(magic), 4);
-    if (!file.good() || magic[0] != 'B' || magic[1] != 'A' || magic[2] != 'I' || magic[3] != '\1') {
+    std::array<std::byte, 4> magic{};
+    ReadExact(file, magic, "magic");
+    if (magic[0] != static_cast<std::byte>('B') || magic[1] != static_cast<std::byte>('A') ||
+        magic[2] != static_cast<std::byte>('I') || magic[3] != static_cast<std::byte>('\1')) {
         throw std::runtime_error{"Invalid BAI magic in: " + path.string()};
     }
 
     // Read n_ref
-    std::int32_t nRef{};
-    file.read(reinterpret_cast<char*>(&nRef), sizeof(nRef));
-    if (!file.good()) {
-        throw std::runtime_error{"Truncated BAI file: " + path.string()};
-    }
+    const std::int32_t nRef{ReadI32LEFromFile(file, "n_ref")};
+    const std::size_t nRefCount{CheckedNonNegativeCount(nRef, "n_ref")};
 
     BaiIndex index;
-    index.references_.resize(nRef);
+    index.references_.resize(nRefCount);
 
-    for (std::int32_t r{0}; r < nRef; ++r) {
+    for (std::size_t r{0}; r < nRefCount; ++r) {
         ReferenceIndex& ref{index.references_[r]};
 
         // n_bin
-        std::int32_t nBin{};
-        file.read(reinterpret_cast<char*>(&nBin), sizeof(nBin));
-        if (!file.good()) {
-            throw std::runtime_error{"Truncated BAI file reading bins"};
-        }
+        const std::int32_t nBin{ReadI32LEFromFile(file, "n_bin")};
+        const std::size_t nBinCount{CheckedNonNegativeCount(nBin, "n_bin")};
 
-        for (std::int32_t b{0}; b < nBin; ++b) {
-            std::uint32_t binNumber{};
-            file.read(reinterpret_cast<char*>(&binNumber), sizeof(binNumber));
+        for (std::size_t b{0}; b < nBinCount; ++b) {
+            const std::uint32_t binNumber{ReadU32LEFromFile(file, "bin number")};
+            const std::int32_t nChunks{ReadI32LEFromFile(file, "n_chunks")};
+            const std::size_t nChunkCount{CheckedNonNegativeCount(nChunks, "n_chunks")};
 
-            std::int32_t nChunks{};
-            file.read(reinterpret_cast<char*>(&nChunks), sizeof(nChunks));
-
-            if (!file.good()) {
-                throw std::runtime_error{"Truncated BAI file reading chunks"};
-            }
-
-            std::vector<Chunk> chunks(nChunks);
-            for (std::int32_t c{0}; c < nChunks; ++c) {
-                std::uint64_t chunkBeg{};
-                std::uint64_t chunkEnd{};
-                file.read(reinterpret_cast<char*>(&chunkBeg), sizeof(chunkBeg));
-                file.read(reinterpret_cast<char*>(&chunkEnd), sizeof(chunkEnd));
-                chunks[c] = Chunk{VirtualOffset{chunkBeg}, VirtualOffset{chunkEnd}};
-            }
-
-            if (!file.good()) {
-                throw std::runtime_error{"Truncated BAI file reading chunk data"};
+            std::vector<Chunk> chunks;
+            chunks.reserve(nChunkCount);
+            for (std::size_t c{0}; c < nChunkCount; ++c) {
+                const std::uint64_t chunkBeg{ReadU64LEFromFile(file, "chunk begin")};
+                const std::uint64_t chunkEnd{ReadU64LEFromFile(file, "chunk end")};
+                chunks.push_back(Chunk{VirtualOffset{chunkBeg}, VirtualOffset{chunkEnd}});
             }
 
             ref.bins[binNumber] = std::move(chunks);
         }
 
         // n_intv
-        std::int32_t nIntv{};
-        file.read(reinterpret_cast<char*>(&nIntv), sizeof(nIntv));
-        if (!file.good()) {
-            throw std::runtime_error{"Truncated BAI file reading linear index"};
-        }
+        const std::int32_t nIntv{ReadI32LEFromFile(file, "n_intv")};
+        const std::size_t nIntvCount{CheckedNonNegativeCount(nIntv, "n_intv")};
 
-        ref.linearIndex.resize(nIntv);
-        for (std::int32_t i{0}; i < nIntv; ++i) {
-            std::uint64_t offset{};
-            file.read(reinterpret_cast<char*>(&offset), sizeof(offset));
+        ref.linearIndex.resize(nIntvCount);
+        for (std::size_t i{0}; i < nIntvCount; ++i) {
+            const std::uint64_t offset{ReadU64LEFromFile(file, "linear index offset")};
             ref.linearIndex[i] = VirtualOffset{offset};
-        }
-
-        if (!file.good()) {
-            throw std::runtime_error{"Truncated BAI file reading linear index data"};
         }
     }
 
     // Optional: read n_no_coor (unmapped count) at end of file
-    std::uint64_t nNoCoor{0};
-    file.read(reinterpret_cast<char*>(&nNoCoor), sizeof(nNoCoor));
-    if (file.good()) {
-        index.unmappedCount_ = nNoCoor;
+    const std::optional<std::uint64_t> nNoCoor{ReadOptionalU64LEFromFile(file, "n_no_coor")};
+    if (nNoCoor.has_value()) {
+        index.unmappedCount_ = *nNoCoor;
     }
 
     return index;
@@ -234,14 +284,20 @@ void BaiIndex::ToFile(const std::filesystem::path& path) const
 
 std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::int32_t end) const
 {
-    if ((refId < 0) || (refId >= std::ssize(references_))) {
+    if ((refId < 0) || (refId >= std::ssize(references_)) || (end <= beg) || (end <= 0)) {
+        return {};
+    }
+
+    const std::int32_t normalizedBeg{std::max<std::int32_t>(beg, 0)};
+    const std::int32_t normalizedEnd{std::max<std::int32_t>(end, 0)};
+    if (normalizedEnd <= normalizedBeg) {
         return {};
     }
 
     const ReferenceIndex& ref{references_[refId]};
 
     // 1. Get overlapping bins
-    const std::vector<std::uint16_t> overlappingBins{Reg2Bins(beg, end)};
+    const std::vector<std::uint16_t> overlappingBins{Reg2Bins(normalizedBeg, normalizedEnd)};
 
     // 2. Collect chunks from matching bins
     std::vector<Chunk> candidates;
@@ -258,7 +314,7 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
     }
 
     // 3. Linear index pruning: find minimum offset for the query start window
-    const std::size_t linearIdx = beg / BAI_LINEAR_INDEX_WINDOW;
+    const std::size_t linearIdx = normalizedBeg / BAI_LINEAR_INDEX_WINDOW;
     VirtualOffset minOffset;
     if (linearIdx < std::size(ref.linearIndex)) {
         minOffset = ref.linearIndex[linearIdx];

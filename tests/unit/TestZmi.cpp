@@ -10,11 +10,13 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <filesystem>
 #include <format>
 #include <ranges>
 #include <span>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <cstdint>
@@ -26,9 +28,13 @@ namespace {
 template <typename T>
 void WriteAt(std::span<std::byte> dst, std::size_t offset, T value)
 {
+    static_assert(std::is_integral_v<T>, "WriteAt requires an integral type");
+    using UnsignedT = std::make_unsigned_t<T>;
     std::span<std::byte> field{dst.subspan(offset, sizeof(value))};
-    const std::byte* src{reinterpret_cast<const std::byte*>(&value)};
-    std::ranges::copy_n(src, sizeof(value), std::begin(field));
+    const UnsignedT bits{std::bit_cast<UnsignedT>(value)};
+    for (std::size_t i{0}; i < sizeof(value); ++i) {
+        field[i] = static_cast<std::byte>((bits >> (8U * i)) & static_cast<UnsignedT>(0xFFU));
+    }
 }
 
 }  // namespace
@@ -125,6 +131,28 @@ TEST_F(ZmiWriterTest, UniqueZmws)
     EXPECT_EQ(unique[2].zmw, 42);
 
     EXPECT_EQ(index.NumZmws(), 3u);
+}
+
+TEST_F(ZmiWriterTest, UniqueZmwsRemovesNonConsecutiveDuplicates)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+        writer.AddRecord(100, 99, 2000);
+        writer.AddRecord(100, 42, 3000);  // duplicate identity, non-consecutive
+        writer.AddRecord(200, 7, 4000);
+        writer.AddRecord(100, 99, 5000);  // duplicate identity, non-consecutive
+    }
+
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    const auto unique{index.UniqueZmws()};
+
+    ASSERT_EQ(std::size(unique), 3u);
+    // Preserve first-seen file order while removing duplicates.
+    EXPECT_EQ(unique[0], (ZmwIdentity{100, 42}));
+    EXPECT_EQ(unique[1], (ZmwIdentity{100, 99}));
+    EXPECT_EQ(unique[2], (ZmwIdentity{200, 7}));
+    EXPECT_EQ(index.NumZmws(), std::size(unique));
 }
 
 class ZmiBamWriterTest : public ::testing::Test
@@ -280,6 +308,131 @@ TEST_F(ZmiWriterTest, FromPbiRoundTrip)
     EXPECT_EQ(exact[0], 2000);
 
     std::filesystem::remove(pbiPath);
+}
+
+TEST_F(ZmiWriterTest, FromPbiThrowsOnIncompleteBasicData)
+{
+    const std::filesystem::path pbiPath{
+        std::filesystem::temp_directory_path() /
+        std::format("pbsamoa_test_incomplete_{}.pbi",
+                    std::hash<std::thread::id>{}(std::this_thread::get_id()))};
+
+    {
+        std::vector<std::byte> raw(32, std::byte{0});
+        raw[0] = std::byte{'P'};
+        raw[1] = std::byte{'B'};
+        raw[2] = std::byte{'I'};
+        raw[3] = std::byte{'\1'};
+
+        const std::uint32_t version{0x030000};
+        const std::uint16_t flags{1};
+        const std::uint32_t numReads{1};
+        WriteAt(raw, 4, version);
+        WriteAt(raw, 8, flags);
+        WriteAt(raw, 10, numReads);
+
+        BgzfWriter bgzf{pbiPath};
+        bgzf.Write(raw);
+    }
+
+    EXPECT_THROW(ZmwIndex::FromPbi(pbiPath), std::runtime_error);
+    std::filesystem::remove(pbiPath);
+}
+
+TEST_F(ZmiWriterTest, FromPbiThrowsWhenBasicDataFlagMissing)
+{
+    const std::filesystem::path pbiPath{
+        std::filesystem::temp_directory_path() /
+        std::format("pbsamoa_test_flags_{}.pbi",
+                    std::hash<std::thread::id>{}(std::this_thread::get_id()))};
+
+    {
+        std::vector<std::byte> raw(32, std::byte{0});
+        raw[0] = std::byte{'P'};
+        raw[1] = std::byte{'B'};
+        raw[2] = std::byte{'I'};
+        raw[3] = std::byte{'\1'};
+
+        const std::uint32_t version{0x030000};
+        const std::uint16_t flags{0};  // BasicData missing
+        const std::uint32_t numReads{0};
+        WriteAt(raw, 4, version);
+        WriteAt(raw, 8, flags);
+        WriteAt(raw, 10, numReads);
+
+        BgzfWriter bgzf{pbiPath};
+        bgzf.Write(raw);
+    }
+
+    EXPECT_THROW(ZmwIndex::FromPbi(pbiPath), std::runtime_error);
+    std::filesystem::remove(pbiPath);
+}
+
+TEST_F(ZmiWriterTest, FromZmiThrowsOnTruncatedEntryData)
+{
+    {
+        std::vector<std::byte> raw(64, std::byte{0});
+        raw[0] = std::byte{'Z'};
+        raw[1] = std::byte{'M'};
+        raw[2] = std::byte{'I'};
+        raw[3] = std::byte{'\1'};
+
+        const std::uint32_t version{0x010000};
+        const std::uint16_t entrySize{16};
+        WriteAt(raw, 4, version);
+        WriteAt(raw, 8, entrySize);
+
+        // One complete entry (16 bytes)
+        const std::int32_t rgId{100};
+        const std::int32_t zmw{42};
+        const std::int64_t voffset{1000};
+        const std::size_t base{raw.size()};
+        raw.resize(base + 16, std::byte{0});
+        WriteAt(raw, base, rgId);
+        WriteAt(raw, base + 4, zmw);
+        WriteAt(raw, base + 8, voffset);
+
+        // Plus a truncated partial entry (4 bytes)
+        raw.resize(raw.size() + 4, std::byte{0});
+        WriteAt(raw, raw.size() - 4, std::int32_t{200});
+
+        BgzfWriter bgzf{tmpPath_};
+        bgzf.Write(raw);
+    }
+
+    EXPECT_THROW(ZmwIndex::FromZmi(tmpPath_), std::runtime_error);
+}
+
+TEST_F(ZmiWriterTest, FromZmiThrowsOnNumRecordsHeaderMismatch)
+{
+    {
+        std::vector<std::byte> raw(64, std::byte{0});
+        raw[0] = std::byte{'Z'};
+        raw[1] = std::byte{'M'};
+        raw[2] = std::byte{'I'};
+        raw[3] = std::byte{'\1'};
+
+        const std::uint32_t version{0x010000};
+        const std::uint16_t entrySize{16};
+        const std::uint64_t numRecords{2};  // mismatch: we'll write one entry
+        WriteAt(raw, 4, version);
+        WriteAt(raw, 8, entrySize);
+        WriteAt(raw, 12, numRecords);
+
+        const std::int32_t rgId{100};
+        const std::int32_t zmw{42};
+        const std::int64_t voffset{1000};
+        const std::size_t base{raw.size()};
+        raw.resize(base + 16, std::byte{0});
+        WriteAt(raw, base, rgId);
+        WriteAt(raw, base + 4, zmw);
+        WriteAt(raw, base + 8, voffset);
+
+        BgzfWriter bgzf{tmpPath_};
+        bgzf.Write(raw);
+    }
+
+    EXPECT_THROW(ZmwIndex::FromZmi(tmpPath_), std::runtime_error);
 }
 
 TEST_F(ZmiWriterTest, OpenAutoDetectsZmi)

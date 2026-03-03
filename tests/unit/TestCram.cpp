@@ -1767,7 +1767,7 @@ TEST_F(CramWriterReaderTest, FqzcompRecordsPerSliceRoundTripPreservesQualities)
         {
             CramWriter writer{tmpPath, header, config};
             for (std::size_t i = 0; i < totalRecords; ++i) {
-                const auto readLength = static_cast<std::size_t>(8 + (i % 11));
+                const auto readLength = 8U + (i % 11);
                 std::string sequence;
                 sequence.reserve(readLength);
                 for (std::size_t j = 0; j < readLength; ++j) {

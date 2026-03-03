@@ -1,14 +1,16 @@
 #include <pbsamoa/core/Tags.hpp>
 
+#include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <format>
-#include <span>
-#include <stdexcept>
+#include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <cstdio>
@@ -28,16 +30,41 @@ void WriteI8(std::vector<std::byte>& out, std::int8_t v)
     out.push_back(static_cast<std::byte>(v));
 }
 
-void WriteBytes(std::vector<std::byte>& out, std::span<const std::byte> bytes)
+void AppendU16LE(std::vector<std::byte>& out, std::uint16_t v)
 {
-    out.insert(std::ranges::end(out), std::ranges::begin(bytes), std::ranges::end(bytes));
+    out.push_back(static_cast<std::byte>(v & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 8U) & 0xFFU));
 }
 
-template <typename T>
-void WriteBytes(std::vector<std::byte>& out, const T& value)
+void AppendU32LE(std::vector<std::byte>& out, std::uint32_t v)
 {
-    WriteBytes(out, std::as_bytes(std::span{&value, 1}));
+    out.push_back(static_cast<std::byte>(v & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 8U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 16U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 24U) & 0xFFU));
 }
+
+void AppendI16LE(std::vector<std::byte>& out, std::int16_t v)
+{
+    AppendU16LE(out, std::bit_cast<std::uint16_t>(v));
+}
+
+void AppendI32LE(std::vector<std::byte>& out, std::int32_t v)
+{
+    AppendU32LE(out, std::bit_cast<std::uint32_t>(v));
+}
+
+void AppendF32LE(std::vector<std::byte>& out, float v)
+{
+    AppendU32LE(out, std::bit_cast<std::uint32_t>(v));
+}
+
+std::int16_t ReadI16LE(const std::byte* data)
+{
+    return std::bit_cast<std::int16_t>(ReadU16LE(data));
+}
+
+float ReadF32LE(const std::byte* data) { return std::bit_cast<float>(ReadU32LE(data)); }
 
 char SmallestIntType(std::int64_t v)
 {
@@ -59,12 +86,9 @@ char SmallestIntType(std::int64_t v)
     return 'i';
 }
 
-template <typename T>
-T ReadPlain(const std::byte* data)
+bool IsHexDigit(char c)
 {
-    T value{};
-    std::ranges::copy_n(data, sizeof(T), reinterpret_cast<std::byte*>(&value));
-    return value;
+    return ((c >= '0') && (c <= '9')) || ((c >= 'a') && (c <= 'f')) || ((c >= 'A') && (c <= 'F'));
 }
 
 void RequirePayloadSize(char type, std::span<const std::byte> payload, std::size_t expected)
@@ -98,22 +122,22 @@ struct BamSerializeVisitor
                 break;
             case 's': {
                 const std::int16_t sv = v;
-                WriteBytes(result, sv);
+                AppendI16LE(result, sv);
                 break;
             }
             case 'S': {
                 const std::uint16_t sv = v;
-                WriteBytes(result, sv);
+                AppendU16LE(result, sv);
                 break;
             }
             case 'i': {
                 const std::int32_t sv = v;
-                WriteBytes(result, sv);
+                AppendI32LE(result, sv);
                 break;
             }
             case 'I': {
                 const std::uint32_t sv = v;
-                WriteBytes(result, sv);
+                AppendU32LE(result, sv);
                 break;
             }
             default:
@@ -124,7 +148,7 @@ struct BamSerializeVisitor
     void operator()(float v) const
     {
         result.push_back(static_cast<std::byte>('f'));
-        WriteBytes(result, v);
+        AppendF32LE(result, v);
     }
 
     void operator()(std::string_view v) const
@@ -150,7 +174,7 @@ struct BamSerializeVisitor
         result.push_back(static_cast<std::byte>('B'));
         result.push_back(static_cast<std::byte>(v.ElementType()));
         const std::uint32_t count{v.Count()};
-        WriteBytes(result, count);
+        AppendU32LE(result, count);
         const std::span<const std::byte> data{v.Data()};
         result.insert(std::ranges::end(result), std::ranges::begin(data), std::ranges::end(data));
     }
@@ -202,7 +226,7 @@ struct SamSerializeVisitor
         for (std::size_t i{0}; i < count; ++i) {
             result += ',';
             if (elemType == 'f') {
-                const float fv{ReadPlain<float>(std::data(data) + (i * 4))};
+                const float fv{ReadF32LE(std::data(data) + (i * 4))};
                 std::format_to(std::back_inserter(result), "{:g}", fv);
             } else if (elemType == 'c') {
                 const std::int8_t iv{static_cast<std::int8_t>(data[i])};
@@ -211,16 +235,16 @@ struct SamSerializeVisitor
                 const std::uint8_t iv{static_cast<std::uint8_t>(data[i])};
                 std::format_to(std::back_inserter(result), "{}", iv);
             } else if (elemType == 's') {
-                const std::int16_t iv{ReadPlain<std::int16_t>(std::data(data) + (i * 2))};
+                const std::int16_t iv{ReadI16LE(std::data(data) + (i * 2))};
                 std::format_to(std::back_inserter(result), "{}", iv);
             } else if (elemType == 'S') {
-                const std::uint16_t iv{ReadPlain<std::uint16_t>(std::data(data) + (i * 2))};
+                const std::uint16_t iv{ReadU16LE(std::data(data) + (i * 2))};
                 std::format_to(std::back_inserter(result), "{}", iv);
             } else if (elemType == 'i') {
-                const std::int32_t iv{ReadPlain<std::int32_t>(std::data(data) + (i * 4))};
+                const std::int32_t iv{ReadI32LE(std::data(data) + (i * 4))};
                 std::format_to(std::back_inserter(result), "{}", iv);
             } else if (elemType == 'I') {
-                const std::uint32_t iv{ReadPlain<std::uint32_t>(std::data(data) + (i * 4))};
+                const std::uint32_t iv{ReadU32LE(std::data(data) + (i * 4))};
                 std::format_to(std::back_inserter(result), "{}", iv);
             }
         }
@@ -244,19 +268,19 @@ TagValue DecodeTagValueFromBamPayload(char type, std::span<const std::byte> payl
             return TagValue{std::int64_t{std::to_integer<std::uint8_t>(payload.front())}};
         case 's':
             RequirePayloadSize(type, payload, 2);
-            return TagValue{std::int64_t{ReadPlain<std::int16_t>(payload.data())}};
+            return TagValue{std::int64_t{ReadI16LE(payload.data())}};
         case 'S':
             RequirePayloadSize(type, payload, 2);
-            return TagValue{std::int64_t{ReadPlain<std::uint16_t>(payload.data())}};
+            return TagValue{std::int64_t{ReadU16LE(payload.data())}};
         case 'i':
             RequirePayloadSize(type, payload, 4);
-            return TagValue{std::int64_t{ReadPlain<std::int32_t>(payload.data())}};
+            return TagValue{std::int64_t{ReadI32LE(payload.data())}};
         case 'I':
             RequirePayloadSize(type, payload, 4);
-            return TagValue{std::int64_t{ReadPlain<std::uint32_t>(payload.data())}};
+            return TagValue{std::int64_t{ReadU32LE(payload.data())}};
         case 'f':
             RequirePayloadSize(type, payload, 4);
-            return TagValue{ReadPlain<float>(payload.data())};
+            return TagValue{ReadF32LE(payload.data())};
         case 'Z': {
             std::size_t textLen = std::size(payload);
             if (textLen > 0 && payload[textLen - 1] == std::byte{0}) {
@@ -277,7 +301,7 @@ TagValue DecodeTagValueFromBamPayload(char type, std::span<const std::byte> payl
                 throw std::runtime_error{"Tags: type 'B' payload too short"};
             }
             const char elemType = static_cast<char>(std::to_integer<std::uint8_t>(payload[0]));
-            const auto count = ReadPlain<std::uint32_t>(payload.data() + 1);
+            const auto count = ReadU32LE(payload.data() + 1);
 
             TagArray arr{elemType};
             const auto elemSize = arr.ElementSize();
@@ -358,35 +382,15 @@ void TagArray::AppendInt8(std::int8_t v) { data_.push_back(static_cast<std::byte
 
 void TagArray::AppendUInt8(std::uint8_t v) { data_.push_back(static_cast<std::byte>(v)); }
 
-void TagArray::AppendInt16(std::int16_t v)
-{
-    const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-    data_.insert(std::ranges::end(data_), p, p + 2);
-}
+void TagArray::AppendInt16(std::int16_t v) { AppendI16LE(data_, v); }
 
-void TagArray::AppendUInt16(std::uint16_t v)
-{
-    const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-    data_.insert(std::ranges::end(data_), p, p + 2);
-}
+void TagArray::AppendUInt16(std::uint16_t v) { AppendU16LE(data_, v); }
 
-void TagArray::AppendInt32(std::int32_t v)
-{
-    const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-    data_.insert(std::ranges::end(data_), p, p + 4);
-}
+void TagArray::AppendInt32(std::int32_t v) { AppendI32LE(data_, v); }
 
-void TagArray::AppendUInt32(std::uint32_t v)
-{
-    const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-    data_.insert(std::ranges::end(data_), p, p + 4);
-}
+void TagArray::AppendUInt32(std::uint32_t v) { AppendU32LE(data_, v); }
 
-void TagArray::AppendFloat(float v)
-{
-    const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-    data_.insert(std::ranges::end(data_), p, p + 4);
-}
+void TagArray::AppendFloat(float v) { AppendF32LE(data_, v); }
 
 // --- TagMap ---
 
@@ -489,35 +493,35 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
             if ((offset + 2) > std::size(data)) {
                 break;
             }
-            const std::int16_t v{ReadPlain<std::int16_t>(std::data(data) + offset)};
+            const std::int16_t v{ReadI16LE(std::data(data) + offset)};
             result.Append(key, TagValue{std::int64_t{v}});
             offset += 2;
         } else if (type == 'S') {
             if ((offset + 2) > std::size(data)) {
                 break;
             }
-            const std::uint16_t v{ReadPlain<std::uint16_t>(std::data(data) + offset)};
+            const std::uint16_t v{ReadU16LE(std::data(data) + offset)};
             result.Append(key, TagValue{std::int64_t{v}});
             offset += 2;
         } else if (type == 'i') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
-            const std::int32_t v{ReadPlain<std::int32_t>(std::data(data) + offset)};
+            const std::int32_t v{ReadI32LE(std::data(data) + offset)};
             result.Append(key, TagValue{std::int64_t{v}});
             offset += 4;
         } else if (type == 'I') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
-            const std::uint32_t v{ReadPlain<std::uint32_t>(std::data(data) + offset)};
+            const std::uint32_t v{ReadU32LE(std::data(data) + offset)};
             result.Append(key, TagValue{std::int64_t{v}});
             offset += 4;
         } else if (type == 'f') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
-            const float v{ReadPlain<float>(std::data(data) + offset)};
+            const float v{ReadF32LE(std::data(data) + offset)};
             result.Append(key, TagValue{v});
             offset += 4;
         } else if (type == 'Z') {
@@ -546,7 +550,7 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
             }
             const char elemType{static_cast<char>(data[offset])};
             offset += 1;
-            const std::uint32_t count{ReadPlain<std::uint32_t>(std::data(data) + offset)};
+            const std::uint32_t count{ReadU32LE(std::data(data) + offset)};
             offset += 4;
 
             TagArray arr{elemType};
@@ -588,7 +592,8 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
         std::int64_t v{0};
         const std::from_chars_result parseResult{
             std::from_chars(std::data(valueStr), std::data(valueStr) + std::size(valueStr), v)};
-        if (parseResult.ec != std::errc{}) {
+        if ((parseResult.ec != std::errc{}) ||
+            (parseResult.ptr != (std::data(valueStr) + std::size(valueStr)))) {
             return std::nullopt;
         }
         return std::pair{key, TagValue{v}};
@@ -596,76 +601,116 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
         float v{0.0f};
         const std::from_chars_result parseResult{
             std::from_chars(std::data(valueStr), std::data(valueStr) + std::size(valueStr), v)};
-        if (parseResult.ec != std::errc{}) {
+        if ((parseResult.ec != std::errc{}) ||
+            (parseResult.ptr != (std::data(valueStr) + std::size(valueStr)))) {
             return std::nullopt;
         }
         return std::pair{key, TagValue{v}};
     } else if (type == 'Z') {
         return std::pair{key, TagValue{std::string{valueStr}}};
     } else if (type == 'H') {
+        if ((std::size(valueStr) % 2) != 0) {
+            return std::nullopt;
+        }
+        if (!std::ranges::all_of(valueStr, IsHexDigit)) {
+            return std::nullopt;
+        }
         return std::pair{key, TagValue{HexString{std::string{valueStr}}}};
     } else if (type == 'B') {
         // Format: B:T,v1,v2,...
-        if (std::size(valueStr) < 1) {
+        if (std::size(valueStr) < 3) {
             return std::nullopt;
         }
         const char elemType{valueStr[0]};
+        if ((elemType != 'c') && (elemType != 'C') && (elemType != 's') && (elemType != 'S') &&
+            (elemType != 'i') && (elemType != 'I') && (elemType != 'f')) {
+            return std::nullopt;
+        }
+        if (valueStr[1] != ',') {
+            return std::nullopt;
+        }
+
         TagArray arr{elemType};
 
         // Parse comma-separated values after element type
-        std::size_t pos{1};  // skip element type char
+        std::size_t pos{2};  // skip element type + comma
         while (pos < std::size(valueStr)) {
-            if (valueStr[pos] == ',') {
-                ++pos;
-            }
-            if (pos >= std::size(valueStr)) {
-                break;
-            }
-
             // Find end of this value
             const std::size_t commaPos{valueStr.find(',', pos)};
             const std::size_t endPos{(commaPos != std::string_view::npos) ? commaPos
                                                                           : std::size(valueStr)};
             const std::string_view elem{valueStr.substr(pos, endPos - pos)};
+            if (std::empty(elem)) {
+                return std::nullopt;
+            }
 
             if (elemType == 'f') {
                 float v{0.0f};
                 const std::from_chars_result parseResult{
                     std::from_chars(std::data(elem), std::data(elem) + std::size(elem), v)};
-                if (parseResult.ec == std::errc{}) {
-                    arr.AppendFloat(v);
+                if ((parseResult.ec != std::errc{}) ||
+                    (parseResult.ptr != (std::data(elem) + std::size(elem)))) {
+                    return std::nullopt;
                 }
+                arr.AppendFloat(v);
             } else {
                 // Integer element types
                 std::int64_t v{0};
                 const std::from_chars_result parseResult{
                     std::from_chars(std::data(elem), std::data(elem) + std::size(elem), v)};
-                if (parseResult.ec == std::errc{}) {
-                    switch (elemType) {
-                        case 'c':
-                            arr.AppendInt8(v);
-                            break;
-                        case 'C':
-                            arr.AppendUInt8(v);
-                            break;
-                        case 's':
-                            arr.AppendInt16(v);
-                            break;
-                        case 'S':
-                            arr.AppendUInt16(v);
-                            break;
-                        case 'i':
-                            arr.AppendInt32(v);
-                            break;
-                        case 'I':
-                            arr.AppendUInt32(v);
-                            break;
-                        default:
-                            break;
-                    }
+                if ((parseResult.ec != std::errc{}) ||
+                    (parseResult.ptr != (std::data(elem) + std::size(elem)))) {
+                    return std::nullopt;
+                }
+
+                switch (elemType) {
+                    case 'c':
+                        if ((v < std::numeric_limits<std::int8_t>::min()) ||
+                            (v > std::numeric_limits<std::int8_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendInt8(v);
+                        break;
+                    case 'C':
+                        if ((v < std::numeric_limits<std::uint8_t>::min()) ||
+                            (v > std::numeric_limits<std::uint8_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendUInt8(v);
+                        break;
+                    case 's':
+                        if ((v < std::numeric_limits<std::int16_t>::min()) ||
+                            (v > std::numeric_limits<std::int16_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendInt16(v);
+                        break;
+                    case 'S':
+                        if ((v < std::numeric_limits<std::uint16_t>::min()) ||
+                            (v > std::numeric_limits<std::uint16_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendUInt16(v);
+                        break;
+                    case 'i':
+                        if ((v < std::numeric_limits<std::int32_t>::min()) ||
+                            (v > std::numeric_limits<std::int32_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendInt32(v);
+                        break;
+                    case 'I':
+                        if ((v < std::numeric_limits<std::uint32_t>::min()) ||
+                            (v > std::numeric_limits<std::uint32_t>::max())) {
+                            return std::nullopt;
+                        }
+                        arr.AppendUInt32(v);
+                        break;
+                    default:
+                        return std::nullopt;
                 }
             }
-            pos = endPos;
+            pos = (commaPos == std::string_view::npos) ? endPos : (endPos + 1);
         }
 
         return std::pair{key, TagValue{std::move(arr)}};
@@ -795,7 +840,16 @@ void SerializeBArrayInt(const std::byte* data, std::uint32_t count, std::string&
     std::array<char, 16> buf{};
     for (std::uint32_t i{0}; i < count; ++i) {
         out += ',';
-        const T v{ReadPlain<T>(data + i * sizeof(T))};
+        T v{};
+        if constexpr (std::is_same_v<T, std::int16_t>) {
+            v = ReadI16LE(data + i * sizeof(T));
+        } else if constexpr (std::is_same_v<T, std::uint16_t>) {
+            v = ReadU16LE(data + i * sizeof(T));
+        } else if constexpr (std::is_same_v<T, std::int32_t>) {
+            v = ReadI32LE(data + i * sizeof(T));
+        } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+            v = ReadU32LE(data + i * sizeof(T));
+        }
         const auto [ptr, ec]{std::to_chars(std::data(buf), std::data(buf) + std::size(buf), v)};
         out.append(std::data(buf), ptr);
     }
@@ -805,7 +859,7 @@ void SerializeBArrayFloat(const std::byte* data, std::uint32_t count, std::strin
 {
     for (std::uint32_t i{0}; i < count; ++i) {
         out += ',';
-        AppendFloatRaw(out, ReadPlain<float>(data + i * 4));
+        AppendFloatRaw(out, ReadF32LE(data + i * 4));
     }
 }
 
@@ -852,35 +906,35 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
                 break;
             }
             out += "i:";
-            AppendIntRaw(out, ReadPlain<std::int16_t>(std::data(data) + offset));
+            AppendIntRaw(out, ReadI16LE(std::data(data) + offset));
             offset += 2;
         } else if (type == 'S') {
             if ((offset + 2) > std::size(data)) {
                 break;
             }
             out += "i:";
-            AppendIntRaw(out, ReadPlain<std::uint16_t>(std::data(data) + offset));
+            AppendIntRaw(out, ReadU16LE(std::data(data) + offset));
             offset += 2;
         } else if (type == 'i') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
             out += "i:";
-            AppendIntRaw(out, ReadPlain<std::int32_t>(std::data(data) + offset));
+            AppendIntRaw(out, ReadI32LE(std::data(data) + offset));
             offset += 4;
         } else if (type == 'I') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
             out += "i:";
-            AppendIntRaw(out, ReadPlain<std::uint32_t>(std::data(data) + offset));
+            AppendIntRaw(out, ReadU32LE(std::data(data) + offset));
             offset += 4;
         } else if (type == 'f') {
             if ((offset + 4) > std::size(data)) {
                 break;
             }
             out += "f:";
-            AppendFloatRaw(out, ReadPlain<float>(std::data(data) + offset));
+            AppendFloatRaw(out, ReadF32LE(std::data(data) + offset));
             offset += 4;
         } else if (type == 'Z') {
             out += "Z:";
@@ -906,7 +960,7 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
             }
             const char elemType{static_cast<char>(data[offset])};
             offset += 1;
-            const std::uint32_t count{ReadPlain<std::uint32_t>(std::data(data) + offset)};
+            const std::uint32_t count{ReadU32LE(std::data(data) + offset)};
             offset += 4;
 
             out += "B:";
@@ -1016,17 +1070,31 @@ struct BamSizeVisitor
     }
 };
 
-void WriteBytesRaw(std::byte*& dest, std::span<const std::byte> bytes)
+void WriteU16Raw(std::byte*& dest, std::uint16_t v)
 {
-    std::ranges::copy_n(std::data(bytes), std::size(bytes), dest);
-    dest += std::size(bytes);
+    *dest++ = static_cast<std::byte>(v & 0xFFU);
+    *dest++ = static_cast<std::byte>((v >> 8U) & 0xFFU);
 }
 
-template <typename T>
-void WriteBytesRaw(std::byte*& dest, const T& value)
+void WriteU32Raw(std::byte*& dest, std::uint32_t v)
 {
-    WriteBytesRaw(dest, std::as_bytes(std::span{&value, 1}));
+    *dest++ = static_cast<std::byte>(v & 0xFFU);
+    *dest++ = static_cast<std::byte>((v >> 8U) & 0xFFU);
+    *dest++ = static_cast<std::byte>((v >> 16U) & 0xFFU);
+    *dest++ = static_cast<std::byte>((v >> 24U) & 0xFFU);
 }
+
+void WriteI16Raw(std::byte*& dest, std::int16_t v)
+{
+    WriteU16Raw(dest, std::bit_cast<std::uint16_t>(v));
+}
+
+void WriteI32Raw(std::byte*& dest, std::int32_t v)
+{
+    WriteU32Raw(dest, std::bit_cast<std::uint32_t>(v));
+}
+
+void WriteF32Raw(std::byte*& dest, float v) { WriteU32Raw(dest, std::bit_cast<std::uint32_t>(v)); }
 
 struct BamAppendVisitor
 {
@@ -1061,22 +1129,22 @@ struct BamAppendVisitor
             }
             case 's': {
                 const std::int16_t sv = v;
-                WriteBytesRaw(dest, sv);
+                WriteI16Raw(dest, sv);
                 break;
             }
             case 'S': {
                 const std::uint16_t sv = v;
-                WriteBytesRaw(dest, sv);
+                WriteU16Raw(dest, sv);
                 break;
             }
             case 'i': {
                 const std::int32_t sv = v;
-                WriteBytesRaw(dest, sv);
+                WriteI32Raw(dest, sv);
                 break;
             }
             case 'I': {
                 const std::uint32_t sv = v;
-                WriteBytesRaw(dest, sv);
+                WriteU32Raw(dest, sv);
                 break;
             }
             default:
@@ -1086,8 +1154,8 @@ struct BamAppendVisitor
 
     void operator()(float v) const
     {
-        AppendByte(static_cast<std::byte>('f'));
-        WriteBytesRaw(dest, v);
+        *dest++ = static_cast<std::byte>('f');
+        WriteF32Raw(dest, v);
     }
 
     void operator()(std::string_view v) const
@@ -1113,7 +1181,7 @@ struct BamAppendVisitor
         AppendByte(static_cast<std::byte>('B'));
         AppendByte(static_cast<std::byte>(v.ElementType()));
         const std::uint32_t count{v.Count()};
-        WriteBytesRaw(dest, count);
+        WriteU32Raw(dest, count);
         const std::span<const std::byte> data{v.Data()};
         std::ranges::copy_n(std::data(data), std::size(data), dest);
         dest += std::size(data);

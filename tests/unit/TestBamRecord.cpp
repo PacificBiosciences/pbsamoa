@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <bit>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,6 +14,24 @@
 
 namespace PacBio {
 namespace Samoa {
+
+namespace {
+
+std::uint16_t ReadU16LE(const std::byte* p)
+{
+    return std::to_integer<std::uint16_t>(p[0]) | (std::to_integer<std::uint16_t>(p[1]) << 8U);
+}
+
+std::uint32_t ReadU32LE(const std::byte* p)
+{
+    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint32_t>(p[3]) << 24U);
+}
+
+std::int32_t ReadI32LE(const std::byte* p) { return std::bit_cast<std::int32_t>(ReadU32LE(p)); }
+
+}  // namespace
 
 TEST(BamRecord, DefaultConstruction)
 {
@@ -119,30 +138,17 @@ TEST(BamRecord, SerializeToBamBasic)
     EXPECT_FALSE(std::empty(bam));
 
     // Verify fixed fields at known offsets
-    std::int32_t refId{0};
-    std::ranges::copy_n(std::data(bam), sizeof(refId), reinterpret_cast<std::byte*>(&refId));
-    EXPECT_EQ(refId, 0);
-
-    std::int32_t pos{0};
-    std::ranges::copy_n(std::data(bam) + 4, sizeof(pos), reinterpret_cast<std::byte*>(&pos));
-    EXPECT_EQ(pos, 6);
+    EXPECT_EQ(ReadI32LE(std::data(bam) + 0), 0);
+    EXPECT_EQ(ReadI32LE(std::data(bam) + 4), 6);
 
     const std::uint8_t nameLen{static_cast<std::uint8_t>(bam[8])};
     EXPECT_EQ(nameLen, 5U);  // "r001" + NUL
 
     EXPECT_EQ(static_cast<std::uint8_t>(bam[9]), 30U);  // mapq
 
-    std::uint16_t nCigar{0};
-    std::ranges::copy_n(std::data(bam) + 12, sizeof(nCigar), reinterpret_cast<std::byte*>(&nCigar));
-    EXPECT_EQ(nCigar, 1U);
-
-    std::uint16_t flag{0};
-    std::ranges::copy_n(std::data(bam) + 14, sizeof(flag), reinterpret_cast<std::byte*>(&flag));
-    EXPECT_EQ(flag, 99U);
-
-    std::uint32_t seqLen{0};
-    std::ranges::copy_n(std::data(bam) + 16, sizeof(seqLen), reinterpret_cast<std::byte*>(&seqLen));
-    EXPECT_EQ(seqLen, 4U);
+    EXPECT_EQ(ReadU16LE(std::data(bam) + 12), 1U);
+    EXPECT_EQ(ReadU16LE(std::data(bam) + 14), 99U);
+    EXPECT_EQ(ReadU32LE(std::data(bam) + 16), 4U);
 }
 
 TEST(BamRecord, SerializeToBamRoundTrip)
@@ -182,9 +188,7 @@ TEST(BamRecord, SerializeUnmappedRecord)
     const std::vector<std::byte> bam{rec.SerializeToBam()};
     EXPECT_FALSE(std::empty(bam));
 
-    std::int32_t refId{0};
-    std::ranges::copy_n(std::data(bam), sizeof(refId), reinterpret_cast<std::byte*>(&refId));
-    EXPECT_EQ(refId, -1);
+    EXPECT_EQ(ReadI32LE(std::data(bam) + 0), -1);
 }
 
 TEST(BamRecord, SerializeNoSequence)
@@ -193,10 +197,40 @@ TEST(BamRecord, SerializeNoSequence)
     rec.Name("noSeq").Flag(4).RefId(-1).Pos(-1);
 
     const std::vector<std::byte> bam{rec.SerializeToBam()};
+    EXPECT_EQ(ReadU32LE(std::data(bam) + 16), 0U);
+}
 
-    std::uint32_t seqLen{999};
-    std::ranges::copy_n(std::data(bam) + 16, sizeof(seqLen), reinterpret_cast<std::byte*>(&seqLen));
-    EXPECT_EQ(seqLen, 0U);
+TEST(BamRecord, SerializeToBamUsesLittleEndianFixedFields)
+{
+    BamRecord rec;
+    rec.Name("le")
+        .Flag(0x1234)
+        .RefId(0x01020304)
+        .Pos(0x0A0B0C0D)
+        .MapQ(0x1E)
+        .Cigar(*ParseCigar("1M"))
+        .NextRefId(0x11121314)
+        .NextPos(0x21222324)
+        .Tlen(0x31323334)
+        .Sequence("A")
+        .Qualities({30});
+
+    const std::vector<std::byte> bam{rec.SerializeToBam()};
+    ASSERT_GE(std::size(bam), 32u);
+
+    // refId
+    EXPECT_EQ(bam[0], static_cast<std::byte>(0x04));
+    EXPECT_EQ(bam[1], static_cast<std::byte>(0x03));
+    EXPECT_EQ(bam[2], static_cast<std::byte>(0x02));
+    EXPECT_EQ(bam[3], static_cast<std::byte>(0x01));
+    // pos
+    EXPECT_EQ(bam[4], static_cast<std::byte>(0x0D));
+    EXPECT_EQ(bam[5], static_cast<std::byte>(0x0C));
+    EXPECT_EQ(bam[6], static_cast<std::byte>(0x0B));
+    EXPECT_EQ(bam[7], static_cast<std::byte>(0x0A));
+    // flag
+    EXPECT_EQ(bam[14], static_cast<std::byte>(0x34));
+    EXPECT_EQ(bam[15], static_cast<std::byte>(0x12));
 }
 
 TEST(BamRecord, NameLengthValidation)

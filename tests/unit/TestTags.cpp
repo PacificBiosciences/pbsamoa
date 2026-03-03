@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <optional>
 #include <string>
 #include <utility>
@@ -150,6 +151,20 @@ TEST(TagFilter, KeepTags)
 
 namespace {
 
+void AppendU16LE(std::vector<std::byte>& out, std::uint16_t v)
+{
+    out.push_back(static_cast<std::byte>(v & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 8U) & 0xFFU));
+}
+
+void AppendU32LE(std::vector<std::byte>& out, std::uint32_t v)
+{
+    out.push_back(static_cast<std::byte>(v & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 8U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 16U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((v >> 24U) & 0xFFU));
+}
+
 // Helper: build raw BAM tag bytes for a single integer tag
 std::vector<std::byte> MakeBamIntTag(char c1, char c2, char type, std::int64_t value)
 {
@@ -170,27 +185,23 @@ std::vector<std::byte> MakeBamIntTag(char c1, char c2, char type, std::int64_t v
             break;
         }
         case 's': {
-            const std::int16_t v = value;
-            const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-            result.insert(std::ranges::end(result), p, p + 2);
+            const std::int16_t v{static_cast<std::int16_t>(value)};
+            AppendU16LE(result, std::bit_cast<std::uint16_t>(v));
             break;
         }
         case 'S': {
-            const std::uint16_t v = value;
-            const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-            result.insert(std::ranges::end(result), p, p + 2);
+            const std::uint16_t v{static_cast<std::uint16_t>(value)};
+            AppendU16LE(result, v);
             break;
         }
         case 'i': {
-            const std::int32_t v = value;
-            const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-            result.insert(std::ranges::end(result), p, p + 4);
+            const std::int32_t v{static_cast<std::int32_t>(value)};
+            AppendU32LE(result, std::bit_cast<std::uint32_t>(v));
             break;
         }
         case 'I': {
-            const std::uint32_t v = value;
-            const std::byte* p{reinterpret_cast<const std::byte*>(&v)};
-            result.insert(std::ranges::end(result), p, p + 4);
+            const std::uint32_t v{static_cast<std::uint32_t>(value)};
+            AppendU32LE(result, v);
             break;
         }
         default:
@@ -227,8 +238,7 @@ std::vector<std::byte> MakeBamFloatTag(char c1, char c2, float value)
     result.push_back(static_cast<std::byte>(c1));
     result.push_back(static_cast<std::byte>(c2));
     result.push_back(std::byte{'f'});
-    const std::byte* p{reinterpret_cast<const std::byte*>(&value)};
-    result.insert(std::ranges::end(result), p, p + 4);
+    AppendU32LE(result, std::bit_cast<std::uint32_t>(value));
     return result;
 }
 
@@ -311,12 +321,10 @@ TEST(TagBamParse, ArrayTypeBI)
     data.push_back(static_cast<std::byte>('I'));
 
     const std::uint32_t count{3};
-    const std::byte* cp{reinterpret_cast<const std::byte*>(&count)};
-    data.insert(std::ranges::end(data), cp, cp + 4);
+    AppendU32LE(data, count);
 
     for (const std::uint32_t val : {10U, 20U, 30U}) {
-        const std::byte* vp{reinterpret_cast<const std::byte*>(&val)};
-        data.insert(std::ranges::end(data), vp, vp + 4);
+        AppendU32LE(data, val);
     }
 
     const TagMap tags{ParseTagsFromBam(data)};
@@ -396,6 +404,20 @@ TEST(TagSamParse, InvalidFormat)
     EXPECT_FALSE(ParseTagFromSam("").has_value());
 }
 
+TEST(TagSamParse, RejectsTrailingJunkInNumericValue)
+{
+    EXPECT_FALSE(ParseTagFromSam("NM:i:5x").has_value());
+    EXPECT_FALSE(ParseTagFromSam("ZS:f:3.14abc").has_value());
+}
+
+TEST(TagSamParse, RejectsInvalidArrayElements)
+{
+    EXPECT_FALSE(ParseTagFromSam("XA:B:i,10,20x,30").has_value());
+    EXPECT_FALSE(ParseTagFromSam("XA:B:C,10,999").has_value());
+    EXPECT_FALSE(ParseTagFromSam("XA:B:Q,1,2").has_value());
+    EXPECT_FALSE(ParseTagFromSam("XA:B:i,").has_value());
+}
+
 // --- SAM Tag Serialization Tests ---
 
 TEST(TagSerialize, ToSamInteger)
@@ -414,6 +436,36 @@ TEST(TagSerialize, ToSamChar)
 {
     const std::string result{SerializeTagToSam(TagKey{'X', 'S'}, TagValue{'+'})};
     EXPECT_EQ(result, "XS:A:+");
+}
+
+TEST(TagSerialize, BamIntegerUsesLittleEndianEncoding)
+{
+    TagMap tags;
+    tags.Set(TagKey{'N', 'M'}, TagValue{std::int64_t{0x1234}});
+
+    const std::vector<std::byte> bam{SerializeTagsToBam(tags)};
+    ASSERT_EQ(std::size(bam), 5U);
+    EXPECT_EQ(bam[0], static_cast<std::byte>('N'));
+    EXPECT_EQ(bam[1], static_cast<std::byte>('M'));
+    EXPECT_EQ(bam[2], static_cast<std::byte>('S'));
+    EXPECT_EQ(bam[3], static_cast<std::byte>(0x34));
+    EXPECT_EQ(bam[4], static_cast<std::byte>(0x12));
+}
+
+TEST(TagSerialize, BamFloatUsesLittleEndianEncoding)
+{
+    TagMap tags;
+    tags.Set(TagKey{'Z', 'S'}, TagValue{1.0F});
+
+    const std::vector<std::byte> bam{SerializeTagsToBam(tags)};
+    ASSERT_EQ(std::size(bam), 7U);
+    EXPECT_EQ(bam[0], static_cast<std::byte>('Z'));
+    EXPECT_EQ(bam[1], static_cast<std::byte>('S'));
+    EXPECT_EQ(bam[2], static_cast<std::byte>('f'));
+    EXPECT_EQ(bam[3], static_cast<std::byte>(0x00));
+    EXPECT_EQ(bam[4], static_cast<std::byte>(0x00));
+    EXPECT_EQ(bam[5], static_cast<std::byte>(0x80));
+    EXPECT_EQ(bam[6], static_cast<std::byte>(0x3F));
 }
 
 // --- BAM Round-Trip Tests ---
@@ -459,6 +511,12 @@ TEST(TagSamParse, HexStringTag)
     EXPECT_EQ(result->first, TagKey('B', 'C'));
     ASSERT_TRUE(std::holds_alternative<HexString>(result->second));
     EXPECT_EQ(std::get<HexString>(result->second).value, "1AE1");
+}
+
+TEST(TagSamParse, RejectsInvalidHexStringTag)
+{
+    EXPECT_FALSE(ParseTagFromSam("BC:H:ABC").has_value());   // odd length
+    EXPECT_FALSE(ParseTagFromSam("BC:H:1AG1").has_value());  // non-hex char
 }
 
 TEST(TagSerialize, ToSamHexString)

@@ -7,6 +7,7 @@
 #include <pbsamoa/core/Tags.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -16,19 +17,27 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
 
 namespace detail {
 
-template <typename T>
-inline T ReadLength(const std::byte* p)
+inline std::uint16_t ReadU16LE(const std::byte* p)
 {
-    T value{};
-    std::ranges::copy_n(p, sizeof(T), reinterpret_cast<std::byte*>(&value));
-    return value;
+    return std::to_integer<std::uint16_t>(p[0]) | (std::to_integer<std::uint16_t>(p[1]) << 8U);
+}
+
+inline std::uint32_t ReadU32LE(const std::byte* p)
+{
+    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint32_t>(p[3]) << 24U);
+}
+
+inline std::int32_t ReadI32LE(const std::byte* p)
+{
+    return std::bit_cast<std::int32_t>(ReadU32LE(p));
 }
 
 }  // namespace detail
@@ -111,66 +120,54 @@ inline RawRecord::RawRecord(std::span<const std::byte> data)
         throw std::invalid_argument{
             "RawRecord: truncated record — variable-length fields exceed buffer size"};
     }
+    if (data_[32 + nameLen - 1] != std::byte{0}) {
+        throw std::invalid_argument{"RawRecord: read name is not NUL-terminated"};
+    }
 
-    // Copy cigar ops into an aligned buffer (BAM does not guarantee 4-byte alignment
-    // for the cigar data, so direct pointer aliasing would be UB for misaligned names).
+    // Decode CIGAR from little-endian uint32 words into aligned CigarOp objects.
     const std::uint16_t count{CigarOpCount()};
     if (count > 0) {
         cigar_.resize(count);
-        std::memcpy(cigar_.data(), std::data(data_) + CigarOffset(), count * sizeof(CigarOp));
+        const std::size_t offset{CigarOffset()};
+        for (std::uint16_t i = 0; i < count; ++i) {
+            const std::size_t byteOffset{offset + static_cast<std::size_t>(4U * i)};
+            cigar_[i] = CigarOp{detail::ReadU32LE(std::data(data_) + byteOffset)};
+        }
     }
 }
 
 // --- fixed fields ---
 
-inline std::int32_t RawRecord::RefId() const
-{
-    return detail::ReadLength<std::int32_t>(std::data(data_));
-}
+inline std::int32_t RawRecord::RefId() const { return detail::ReadI32LE(std::data(data_)); }
 
-inline std::int32_t RawRecord::Pos() const
-{
-    return detail::ReadLength<std::int32_t>(std::data(data_) + 4);
-}
+inline std::int32_t RawRecord::Pos() const { return detail::ReadI32LE(std::data(data_) + 4); }
 
 inline std::uint8_t RawRecord::NameLength() const { return static_cast<std::uint8_t>(data_[8]); }
 
 inline std::uint8_t RawRecord::MapQ() const { return static_cast<std::uint8_t>(data_[9]); }
 
-inline std::uint16_t RawRecord::Bin() const
-{
-    return detail::ReadLength<std::uint16_t>(std::data(data_) + 10);
-}
+inline std::uint16_t RawRecord::Bin() const { return detail::ReadU16LE(std::data(data_) + 10); }
 
 inline std::uint16_t RawRecord::CigarOpCount() const
 {
-    return detail::ReadLength<std::uint16_t>(std::data(data_) + 12);
+    return detail::ReadU16LE(std::data(data_) + 12);
 }
 
-inline std::uint16_t RawRecord::Flag() const
-{
-    return detail::ReadLength<std::uint16_t>(std::data(data_) + 14);
-}
+inline std::uint16_t RawRecord::Flag() const { return detail::ReadU16LE(std::data(data_) + 14); }
 
 inline std::uint32_t RawRecord::SeqLength() const
 {
-    return detail::ReadLength<std::uint32_t>(std::data(data_) + 16);
+    return detail::ReadU32LE(std::data(data_) + 16);
 }
 
 inline std::int32_t RawRecord::NextRefId() const
 {
-    return detail::ReadLength<std::int32_t>(std::data(data_) + 20);
+    return detail::ReadI32LE(std::data(data_) + 20);
 }
 
-inline std::int32_t RawRecord::NextPos() const
-{
-    return detail::ReadLength<std::int32_t>(std::data(data_) + 24);
-}
+inline std::int32_t RawRecord::NextPos() const { return detail::ReadI32LE(std::data(data_) + 24); }
 
-inline std::int32_t RawRecord::Tlen() const
-{
-    return detail::ReadLength<std::int32_t>(std::data(data_) + 28);
-}
+inline std::int32_t RawRecord::Tlen() const { return detail::ReadI32LE(std::data(data_) + 28); }
 
 // --- variable-length field offsets ---
 

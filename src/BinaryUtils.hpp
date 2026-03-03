@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 
@@ -28,17 +29,33 @@ inline std::uint16_t ReadU16LE(const std::byte* p)
 /// \brief Read a little-endian uint32 from raw bytes.
 inline std::uint32_t ReadU32LE(const std::byte* p)
 {
-    std::uint32_t v{};
-    std::ranges::copy_n(p, sizeof(v), reinterpret_cast<std::byte*>(&v));
-    return v;
+    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint32_t>(p[3]) << 24U);
 }
 
 /// \brief Read a little-endian int32 from raw bytes.
 inline std::int32_t ReadI32LE(const std::byte* p)
 {
-    std::int32_t v{};
-    std::ranges::copy_n(p, sizeof(v), reinterpret_cast<std::byte*>(&v));
-    return v;
+    return std::bit_cast<std::int32_t>(ReadU32LE(p));
+}
+
+/// \brief Read a little-endian uint64 from raw bytes.
+inline std::uint64_t ReadU64LE(const std::byte* p)
+{
+    return std::to_integer<std::uint64_t>(p[0]) | (std::to_integer<std::uint64_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint64_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint64_t>(p[3]) << 24U) |
+           (std::to_integer<std::uint64_t>(p[4]) << 32U) |
+           (std::to_integer<std::uint64_t>(p[5]) << 40U) |
+           (std::to_integer<std::uint64_t>(p[6]) << 48U) |
+           (std::to_integer<std::uint64_t>(p[7]) << 56U);
+}
+
+/// \brief Read a little-endian int64 from raw bytes.
+inline std::int64_t ReadI64LE(const std::byte* p)
+{
+    return std::bit_cast<std::int64_t>(ReadU64LE(p));
 }
 
 /// \brief Write a little-endian int32 to a byte vector.

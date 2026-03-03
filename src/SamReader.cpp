@@ -5,6 +5,7 @@
 
 #include <format>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,6 +43,10 @@ std::int32_t ParseInt32(std::string_view text, std::string_view field)
         throw std::runtime_error{
             std::format("SamReader: invalid integer '{}' for field {}", text, field)};
     }
+    if (ptr != (std::data(text) + std::size(text))) {
+        throw std::runtime_error{
+            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
+    }
     return value;
 }
 
@@ -54,6 +59,10 @@ std::uint16_t ParseUInt16(std::string_view text, std::string_view field)
         throw std::runtime_error{
             std::format("SamReader: invalid integer '{}' for field {}", text, field)};
     }
+    if (ptr != (std::data(text) + std::size(text))) {
+        throw std::runtime_error{
+            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
+    }
     return value;
 }
 
@@ -61,6 +70,10 @@ std::uint8_t ParseUInt8(std::string_view text, std::string_view field)
 {
     // from_chars doesn't support uint8_t on all platforms, parse as uint16_t
     const std::uint16_t v{ParseUInt16(text, field)};
+    if (v > std::numeric_limits<std::uint8_t>::max()) {
+        throw std::runtime_error{
+            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
+    }
     return static_cast<std::uint8_t>(v);
 }
 
@@ -160,7 +173,12 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     if (fields[2] == "*") {
         record.RefId(-1);
     } else {
-        record.RefId(impl_->header.ReferenceId(fields[2]));
+        const std::int32_t refId{impl_->header.ReferenceId(fields[2])};
+        if ((impl_->header.NumReferences() > 0) && (refId < 0)) {
+            throw std::runtime_error{std::format("SamReader: line {}: unknown RNAME '{}'",
+                                                 impl_->lineNumber, fields[2])};
+        }
+        record.RefId(refId);
     }
 
     // POS (1-based to 0-based)
@@ -188,7 +206,12 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     } else if (fields[6] == "=") {
         record.NextRefId(record.RefId());
     } else {
-        record.NextRefId(impl_->header.ReferenceId(fields[6]));
+        const std::int32_t nextRefId{impl_->header.ReferenceId(fields[6])};
+        if ((impl_->header.NumReferences() > 0) && (nextRefId < 0)) {
+            throw std::runtime_error{std::format("SamReader: line {}: unknown RNEXT '{}'",
+                                                 impl_->lineNumber, fields[6])};
+        }
+        record.NextRefId(nextRefId);
     }
 
     // PNEXT (1-based to 0-based)
@@ -201,6 +224,7 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     record.Tlen(ParseInt32(fields[8], "TLEN"));
 
     // SEQ
+    const bool seqMissing{fields[9] == "*"};
     if (fields[9] == "*") {
         record.Sequence(std::string{});
     } else {
@@ -208,13 +232,27 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     }
 
     // QUAL
-    if (fields[10] == "*") {
+    const bool qualMissing{fields[10] == "*"};
+    if (qualMissing) {
         record.Qualities(std::vector<std::uint8_t>{});
     } else {
+        if (seqMissing) {
+            throw std::runtime_error{std::format(
+                "SamReader: line {}: QUAL provided while SEQ is '*'", impl_->lineNumber)};
+        }
+
         std::vector<std::uint8_t> quals;
         quals.reserve(std::size(fields[10]));
         for (const char c : fields[10]) {
+            if ((c < 33) || (c > 126)) {
+                throw std::runtime_error{
+                    std::format("SamReader: line {}: invalid QUAL character", impl_->lineNumber)};
+            }
             quals.push_back(c - 33);
+        }
+        if (std::size(quals) != std::size(fields[9])) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: SEQ and QUAL lengths differ", impl_->lineNumber)};
         }
         record.Qualities(std::move(quals));
     }
@@ -223,9 +261,11 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     TagMap tags;
     for (std::size_t i{11}; i < std::size(fields); ++i) {
         const auto parsed = ParseTagFromSam(fields[i]);
-        if (parsed.has_value()) {
-            tags.Set(parsed->first, parsed->second);
+        if (!parsed.has_value()) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: invalid tag '{}'", impl_->lineNumber, fields[i])};
         }
+        tags.Set(parsed->first, parsed->second);
     }
     if (tags.Size() > 0) {
         record.Tags(std::move(tags));

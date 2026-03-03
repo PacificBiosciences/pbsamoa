@@ -6,6 +6,7 @@
 #include <libdeflate.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -467,13 +468,18 @@ CramBlock ParseBlock(std::span<const std::byte> data, std::size_t& bytesRead)
 
 std::vector<std::byte> SerializeBlock(const CramBlock& block)
 {
-    std::vector<std::byte> out;
-    out.reserve(32 + std::size(block.Data));
+    const auto dataSize = std::size(block.Data);
+    if (dataSize > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error("block: compressed size exceeds ITF8 range");
+    }
 
-    out.push_back(static_cast<std::byte>(std::to_underlying(block.Method)));
-    out.push_back(static_cast<std::byte>(std::to_underlying(block.ContentType)));
+    std::vector<std::byte> out;
+    out.reserve(32 + dataSize);
+    out.resize(2);
+    out[0] = static_cast<std::byte>(std::to_underlying(block.Method));
+    out[1] = static_cast<std::byte>(std::to_underlying(block.ContentType));
     WriteItf8(out, block.ContentId);
-    WriteItf8(out, static_cast<std::int32_t>(std::size(block.Data)));  // compressed size
+    WriteItf8(out, static_cast<std::int32_t>(dataSize));  // compressed size
     WriteItf8(out, block.RawSize);
 
     out.insert(std::end(out), std::begin(block.Data), std::end(block.Data));

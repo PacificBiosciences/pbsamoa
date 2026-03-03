@@ -5,7 +5,8 @@
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <array>
-#include <ranges>
+#include <bit>
+#include <type_traits>
 
 #include <cstdint>
 
@@ -17,8 +18,12 @@ namespace {
 template <typename T>
 void WriteLE(std::byte* dst, T value)
 {
-    const std::byte* src{reinterpret_cast<const std::byte*>(&value)};
-    std::ranges::copy_n(src, sizeof(value), dst);
+    static_assert(std::is_integral_v<T>, "WriteLE requires an integral type");
+    using UnsignedT = std::make_unsigned_t<T>;
+    const UnsignedT bits{std::bit_cast<UnsignedT>(value)};
+    for (std::size_t i{0}; i < sizeof(T); ++i) {
+        dst[i] = static_cast<std::byte>((bits >> (i * 8U)) & static_cast<UnsignedT>(0xFFU));
+    }
 }
 
 }  // namespace

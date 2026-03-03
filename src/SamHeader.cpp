@@ -1,6 +1,7 @@
 #include <pbsamoa/core/SamHeader.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <expected>
 #include <format>
@@ -38,19 +39,30 @@ std::pair<std::string_view, std::string_view> ParseTagValue(std::string_view fie
     return {field.substr(0, colon), field.substr(colon + 1)};
 }
 
-template <typename T>
-T ReadLittleEndian(std::span<const std::byte> data, std::size_t offset)
+std::uint32_t ReadU32LE(std::span<const std::byte> data, std::size_t offset)
 {
-    T value{};
-    std::ranges::copy_n(std::data(data) + offset, sizeof(T), reinterpret_cast<std::byte*>(&value));
-    return value;
+    const std::byte* p{std::data(data) + offset};
+    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint32_t>(p[3]) << 24U);
 }
 
-template <typename T>
-void WriteLittleEndian(std::vector<std::byte>& out, T value)
+std::int32_t ReadI32LE(std::span<const std::byte> data, std::size_t offset)
 {
-    const std::byte* bytes = reinterpret_cast<const std::byte*>(&value);
-    out.insert(std::ranges::end(out), bytes, bytes + sizeof(T));
+    return std::bit_cast<std::int32_t>(ReadU32LE(data, offset));
+}
+
+void WriteU32LE(std::vector<std::byte>& out, std::uint32_t value)
+{
+    out.push_back(static_cast<std::byte>(value & 0xFFU));
+    out.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
+    out.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
+}
+
+void WriteI32LE(std::vector<std::byte>& out, std::int32_t value)
+{
+    WriteU32LE(out, std::bit_cast<std::uint32_t>(value));
 }
 
 }  // namespace
@@ -306,7 +318,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         (data[3] != std::byte{1})) {
         return std::unexpected{"Invalid BAM magic bytes"};
     }
-    const std::uint32_t lText = ReadLittleEndian<std::uint32_t>(data, 4);
+    const std::uint32_t lText = ReadU32LE(data, 4);
     if (std::size(data) < 8 + lText + 4) {
         return std::unexpected{"BAM header block truncated in header text"};
     }
@@ -327,7 +339,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
 
     // Parse binary reference dictionary
     std::size_t offset = 8 + lText;
-    const std::uint32_t nRef = ReadLittleEndian<std::uint32_t>(data, offset);
+    const std::uint32_t nRef = ReadU32LE(data, offset);
     offset += 4;
 
     // Build references from binary dict (authoritative for name/length)
@@ -338,7 +350,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         if (offset + 4 > std::size(data)) {
             return std::unexpected{"BAM header block truncated in reference dictionary"};
         }
-        const std::uint32_t lName = ReadLittleEndian<std::uint32_t>(data, offset);
+        const std::uint32_t lName = ReadU32LE(data, offset);
         offset += 4;
 
         if (offset + lName + 4 > std::size(data)) {
@@ -349,7 +361,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         std::string name{reinterpret_cast<const char*>(std::data(data) + offset),
                          lName > 0 ? lName - 1 : 0};
         offset += lName;
-        const std::int32_t lRef = ReadLittleEndian<std::int32_t>(data, offset);
+        const std::int32_t lRef = ReadI32LE(data, offset);
         offset += 4;
 
         binaryRefs.emplace_back(std::move(name), lRef);
@@ -385,26 +397,26 @@ std::vector<std::byte> SamHeader::ToBamHeaderBlock() const
     // Header text
     const std::string text = ToText();
     const std::uint32_t textLen = std::size(text);
-    WriteLittleEndian<std::uint32_t>(result, textLen);
+    WriteU32LE(result, textLen);
     for (char c : text) {
         result.push_back(static_cast<std::byte>(c));
     }
 
     // Reference dictionary
     const std::uint32_t numRefs = std::size(references_);
-    WriteLittleEndian<std::uint32_t>(result, numRefs);
+    WriteU32LE(result, numRefs);
 
     for (const ReferenceSequence& ref : references_) {
         // l_name includes NUL terminator
         const std::uint32_t lName = std::size(ref.Name()) + 1;
-        WriteLittleEndian<std::uint32_t>(result, lName);
+        WriteU32LE(result, lName);
 
         for (char c : ref.Name()) {
             result.push_back(static_cast<std::byte>(c));
         }
         result.push_back(std::byte{0});  // NUL terminator
 
-        WriteLittleEndian<std::int32_t>(result, ref.Length());
+        WriteI32LE(result, ref.Length());
     }
 
     return result;

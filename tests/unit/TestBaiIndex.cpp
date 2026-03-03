@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -14,6 +15,26 @@
 
 namespace PacBio {
 namespace Samoa {
+
+namespace {
+
+void WriteU32LE(std::ofstream& out, std::uint32_t value)
+{
+    const char bytes[4] = {
+        static_cast<char>(value & 0xFFU),
+        static_cast<char>((value >> 8U) & 0xFFU),
+        static_cast<char>((value >> 16U) & 0xFFU),
+        static_cast<char>((value >> 24U) & 0xFFU),
+    };
+    out.write(bytes, 4);
+}
+
+void WriteI32LE(std::ofstream& out, std::int32_t value)
+{
+    WriteU32LE(out, std::bit_cast<std::uint32_t>(value));
+}
+
+}  // namespace
 
 TEST(Chunk, ConstructAndOverlaps)
 {
@@ -72,6 +93,64 @@ TEST(BaiIndex, LoadThrowsOnBadMagic)
     std::filesystem::remove(tmpPath);
 }
 
+TEST(BaiIndex, LoadThrowsOnNegativeReferenceCount)
+{
+    const auto tmpPath = std::filesystem::temp_directory_path() / "negative_n_ref.bai";
+    {
+        std::ofstream out{tmpPath, std::ios::binary};
+        out.write("BAI\1", 4);
+        WriteI32LE(out, -1);
+    }
+
+    EXPECT_THROW(BaiIndex::FromFile(tmpPath), std::runtime_error);
+    std::filesystem::remove(tmpPath);
+}
+
+TEST(BaiIndex, LoadThrowsOnNegativeChunkCount)
+{
+    const auto tmpPath = std::filesystem::temp_directory_path() / "negative_n_chunks.bai";
+    {
+        std::ofstream out{tmpPath, std::ios::binary};
+        out.write("BAI\1", 4);
+        WriteI32LE(out, 1);   // n_ref
+        WriteI32LE(out, 1);   // n_bin
+        WriteU32LE(out, 0);   // bin
+        WriteI32LE(out, -1);  // n_chunks
+    }
+
+    EXPECT_THROW(BaiIndex::FromFile(tmpPath), std::runtime_error);
+    std::filesystem::remove(tmpPath);
+}
+
+TEST(BaiIndex, LoadThrowsOnNegativeLinearIndexCount)
+{
+    const auto tmpPath = std::filesystem::temp_directory_path() / "negative_n_intv.bai";
+    {
+        std::ofstream out{tmpPath, std::ios::binary};
+        out.write("BAI\1", 4);
+        WriteI32LE(out, 1);   // n_ref
+        WriteI32LE(out, 0);   // n_bin
+        WriteI32LE(out, -1);  // n_intv
+    }
+
+    EXPECT_THROW(BaiIndex::FromFile(tmpPath), std::runtime_error);
+    std::filesystem::remove(tmpPath);
+}
+
+TEST(BaiIndex, LoadThrowsOnTruncatedOptionalNoCoorCount)
+{
+    const auto tmpPath = std::filesystem::temp_directory_path() / "truncated_n_no_coor.bai";
+    {
+        std::ofstream out{tmpPath, std::ios::binary};
+        out.write("BAI\1", 4);
+        WriteI32LE(out, 0);            // n_ref
+        WriteU32LE(out, 0x12345678U);  // partial n_no_coor (4/8 bytes)
+    }
+
+    EXPECT_THROW(BaiIndex::FromFile(tmpPath), std::runtime_error);
+    std::filesystem::remove(tmpPath);
+}
+
 TEST(BaiIndex, LoadThrowsOnNonexistent)
 {
     EXPECT_THROW(BaiIndex::FromFile("/nonexistent/path.bai"), std::runtime_error);
@@ -120,6 +199,19 @@ TEST(BaiIndex, QueryOutOfBoundsRefIdReturnsEmpty)
     const auto index = BaiIndex::FromFile(baiPath);
     EXPECT_TRUE(std::empty(index.Query(999, 0, 100)));
     EXPECT_TRUE(std::empty(index.Query(-1, 0, 100)));
+}
+
+TEST(BaiIndex, QueryInvalidRangesReturnEmpty)
+{
+    const auto baiPath = tests::DataDir / "spec_example.bam.bai";
+    if (!std::filesystem::exists(baiPath)) {
+        GTEST_SKIP() << "spec_example.bam.bai not found";
+    }
+    const auto index = BaiIndex::FromFile(baiPath);
+    EXPECT_TRUE(std::empty(index.Query(0, 10, 10)));
+    EXPECT_TRUE(std::empty(index.Query(0, 10, 5)));
+    EXPECT_TRUE(std::empty(index.Query(0, -10, 0)));
+    EXPECT_TRUE(std::empty(index.Query(0, -10, -1)));
 }
 
 TEST(BaiIndex, QueryChunksAreSorted)

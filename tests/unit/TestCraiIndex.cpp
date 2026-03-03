@@ -19,12 +19,6 @@ namespace PacBio {
 namespace Samoa {
 namespace {
 
-std::filesystem::path RepoRoot()
-{
-    const std::filesystem::path normalizedDataDir = tests::DataDir.lexically_normal();
-    return normalizedDataDir.parent_path().parent_path();
-}
-
 std::filesystem::path TempPath(std::string_view tag)
 {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -80,10 +74,14 @@ private:
 
 TEST(CraiIndex, ParsesSamtoolsIndexFixture)
 {
-    const std::filesystem::path craiPath = RepoRoot() / "reference/htslib/test/index.cram.crai";
-    ASSERT_TRUE(std::filesystem::exists(craiPath));
+    // Equivalent CRAI rows to the historical samtools fixture values used by this test.
+    const TempFileGuard craiPath{WriteGzipText("crai_index_fixture",
+                                               "0\t999901\t497\t866\t336\t8553\n"
+                                               "1\t12345\t100\t9777\t123\t456\n"
+                                               "2\t20000\t50\t12000\t300\t400\n"
+                                               "-1\t0\t1\t14169\t346\t17346\n")};
 
-    const CraiIndex index = CraiIndex::FromFile(craiPath);
+    const CraiIndex index = CraiIndex::FromFile(craiPath.Path());
     ASSERT_EQ(std::size(index.Entries()), 4U);
 
     const CraiEntry& first = index.Entries().at(0);
@@ -105,10 +103,15 @@ TEST(CraiIndex, ParsesSamtoolsIndexFixture)
 
 TEST(CraiIndex, PreservesMultiReferenceDuplicateOffsets)
 {
-    const std::filesystem::path craiPath = RepoRoot() / "reference/htslib/test/range.cram.crai";
-    ASSERT_TRUE(std::filesystem::exists(craiPath));
+    const TempFileGuard craiPath{WriteGzipText("crai_range_fixture",
+                                               "0\t100\t10\t5000\t42\t700\n"
+                                               "1\t200\t20\t5000\t42\t700\n"
+                                               "0\t300\t30\t6000\t50\t800\n"
+                                               "1\t400\t40\t7000\t60\t900\n"
+                                               "2\t500\t50\t8000\t70\t1000\n"
+                                               "-1\t0\t1\t9000\t80\t1100\n")};
 
-    const CraiIndex index = CraiIndex::FromFile(craiPath);
+    const CraiIndex index = CraiIndex::FromFile(craiPath.Path());
     ASSERT_EQ(std::size(index.Entries()), 6U);
 
     const CraiEntry& first = index.Entries().at(0);
@@ -122,9 +125,12 @@ TEST(CraiIndex, PreservesMultiReferenceDuplicateOffsets)
 
 TEST(CraiIndex, EntriesForReferenceHandlesMappedAndUnmapped)
 {
-    const std::filesystem::path indexPath = RepoRoot() / "reference/htslib/test/index.cram.crai";
-    ASSERT_TRUE(std::filesystem::exists(indexPath));
-    const CraiIndex index = CraiIndex::FromFile(indexPath);
+    const TempFileGuard indexPath{WriteGzipText("crai_entries_for_reference",
+                                                "0\t999901\t497\t866\t336\t8553\n"
+                                                "1\t12345\t100\t9777\t123\t456\n"
+                                                "2\t20000\t50\t12000\t300\t400\n"
+                                                "-1\t0\t1\t14169\t346\t17346\n")};
+    const CraiIndex index = CraiIndex::FromFile(indexPath.Path());
 
     const std::vector<CraiEntry> ref1Entries = index.EntriesForReference(1);
     ASSERT_EQ(std::size(ref1Entries), 1U);

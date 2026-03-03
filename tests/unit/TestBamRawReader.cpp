@@ -395,6 +395,31 @@ TEST_F(BamRawReaderWhitelistTest, WhitelistWithPipeline)
     }
 }
 
+TEST_F(BamRawReaderWhitelistTest, ChunkingCanProduceEmptyChunk)
+{
+    BamRawReader reader{tmpBamPath_, BamRawReaderConfig{.ChunkNum = 2, .TotalChunks = 10}};
+
+    std::size_t count{0};
+    for ([[maybe_unused]] const auto& rec : reader.Records()) {
+        ++count;
+    }
+    EXPECT_EQ(count, 0u);
+}
+
+TEST_F(BamRawReaderWhitelistTest, ChunkingWithManyChunksStillCoversAllRecords)
+{
+    std::size_t total{0};
+    for (std::int32_t chunkNum{1}; chunkNum <= 10; ++chunkNum) {
+        BamRawReader reader{tmpBamPath_,
+                            BamRawReaderConfig{.ChunkNum = chunkNum, .TotalChunks = 10}};
+        for ([[maybe_unused]] const auto& rec : reader.Records()) {
+            ++total;
+        }
+    }
+
+    EXPECT_EQ(total, 6u);
+}
+
 TEST(BamRawReader, WhitelistAndChunkingMutuallyExclusive)
 {
     const auto path = tests::DataDir / "spec_example.bam";

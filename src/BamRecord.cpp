@@ -1,10 +1,13 @@
 #include <pbsamoa/core/BamRecord.hpp>
 
+#include "BinaryUtils.hpp"
+
 #include <pbsamoa/core/CigarClipping.hpp>
 #include <pbsamoa/core/Sequence.hpp>
 #include <pbsamoa/core/TagClipping.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <format>
 #include <iterator>
 #include <limits>
@@ -13,6 +16,29 @@
 
 namespace PacBio {
 namespace Samoa {
+
+namespace {
+
+void WriteU16LEAt(std::byte* dst, std::uint16_t v)
+{
+    dst[0] = static_cast<std::byte>(v & 0xFFU);
+    dst[1] = static_cast<std::byte>((v >> 8U) & 0xFFU);
+}
+
+void WriteU32LEAt(std::byte* dst, std::uint32_t v)
+{
+    dst[0] = static_cast<std::byte>(v & 0xFFU);
+    dst[1] = static_cast<std::byte>((v >> 8U) & 0xFFU);
+    dst[2] = static_cast<std::byte>((v >> 16U) & 0xFFU);
+    dst[3] = static_cast<std::byte>((v >> 24U) & 0xFFU);
+}
+
+void WriteI32LEAt(std::byte* dst, std::int32_t v)
+{
+    WriteU32LEAt(dst, std::bit_cast<std::uint32_t>(v));
+}
+
+}  // namespace
 
 // --- accessors ---
 
@@ -173,18 +199,17 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     std::byte* p{std::data(result)};
 
     // Fixed fields (32 bytes)
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&refId_), sizeof(refId_), p + 0);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&pos_), sizeof(pos_), p + 4);
+    WriteI32LEAt(p + 0, refId_);
+    WriteI32LEAt(p + 4, pos_);
     p[8] = static_cast<std::byte>(nameLen);
     p[9] = static_cast<std::byte>(mapQ_);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&bin), sizeof(bin), p + 10);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&nCigarOp), sizeof(nCigarOp), p + 12);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&flag_), sizeof(flag_), p + 14);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&seqLen), sizeof(seqLen), p + 16);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&nextRefId_), sizeof(nextRefId_),
-                        p + 20);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&nextPos_), sizeof(nextPos_), p + 24);
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&tlen_), sizeof(tlen_), p + 28);
+    WriteU16LEAt(p + 10, bin);
+    WriteU16LEAt(p + 12, nCigarOp);
+    WriteU16LEAt(p + 14, flag_);
+    WriteU32LEAt(p + 16, seqLen);
+    WriteI32LEAt(p + 20, nextRefId_);
+    WriteI32LEAt(p + 24, nextPos_);
+    WriteI32LEAt(p + 28, tlen_);
 
     std::size_t offset{32};
 
@@ -197,7 +222,7 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     // CIGAR (array of uint32)
     for (const CigarOp& op : cigar_) {
         const std::uint32_t raw{op.RawValue()};
-        std::ranges::copy_n(reinterpret_cast<const std::byte*>(&raw), sizeof(raw), p + offset);
+        WriteU32LEAt(p + offset, raw);
         offset += 4;
     }
 

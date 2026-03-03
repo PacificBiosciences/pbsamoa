@@ -506,6 +506,26 @@ TEST(SamHeader, LookupAfterMutation)
 
 namespace {
 
+void AppendU32LE(std::vector<std::byte>& data, std::uint32_t value)
+{
+    data.push_back(static_cast<std::byte>(value & 0xFFU));
+    data.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
+    data.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
+    data.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
+}
+
+void AppendI32LE(std::vector<std::byte>& data, std::int32_t value)
+{
+    AppendU32LE(data, static_cast<std::uint32_t>(value));
+}
+
+std::uint32_t ReadU32LE(const std::byte* p)
+{
+    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
+           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
+           (std::to_integer<std::uint32_t>(p[3]) << 24U);
+}
+
 /// \brief Build a minimal BAM header block in memory.
 /// Layout: magic(4) + l_text(4) + text(l_text) + n_ref(4) + [l_name(4) + name(l_name) + l_ref(4)]*
 std::vector<std::byte> BuildBamHeader(std::string_view headerText,
@@ -521,8 +541,7 @@ std::vector<std::byte> BuildBamHeader(std::string_view headerText,
 
     // l_text (little-endian uint32)
     const std::uint32_t lText = std::size(headerText);
-    const std::byte* lTextBytes = reinterpret_cast<const std::byte*>(&lText);
-    data.insert(std::ranges::end(data), lTextBytes, lTextBytes + 4);
+    AppendU32LE(data, lText);
 
     // text
     for (char c : headerText) {
@@ -531,14 +550,12 @@ std::vector<std::byte> BuildBamHeader(std::string_view headerText,
 
     // n_ref (little-endian uint32)
     const std::uint32_t nRef = std::size(refs);
-    const std::byte* nRefBytes = reinterpret_cast<const std::byte*>(&nRef);
-    data.insert(std::ranges::end(data), nRefBytes, nRefBytes + 4);
+    AppendU32LE(data, nRef);
 
     for (const auto& [name, length] : refs) {
         // l_name = reference name length + 1 (NUL terminator)
         const std::uint32_t lName = std::size(name) + 1;
-        const std::byte* lNameBytes = reinterpret_cast<const std::byte*>(&lName);
-        data.insert(std::ranges::end(data), lNameBytes, lNameBytes + 4);
+        AppendU32LE(data, lName);
 
         // name (NUL-terminated)
         for (char c : name) {
@@ -547,8 +564,7 @@ std::vector<std::byte> BuildBamHeader(std::string_view headerText,
         data.push_back(std::byte{0});
 
         // l_ref (little-endian int32)
-        const std::byte* lRefBytes = reinterpret_cast<const std::byte*>(&length);
-        data.insert(std::ranges::end(data), lRefBytes, lRefBytes + 4);
+        AppendI32LE(data, length);
     }
 
     return data;
@@ -742,6 +758,30 @@ TEST(SamHeader, BamBinaryMagicBytes)
     EXPECT_EQ(binary[1], std::byte{'A'});
     EXPECT_EQ(binary[2], std::byte{'M'});
     EXPECT_EQ(binary[3], std::byte{1});
+}
+
+TEST(SamHeader, ToBamHeaderBlockUsesLittleEndianIntegers)
+{
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.AddReferenceSequence(ReferenceSequence{std::string{"chrLE"}, 0x01020304});
+
+    const std::vector<std::byte> binary = header.ToBamHeaderBlock();
+    ASSERT_GE(std::size(binary), 12U);
+
+    const std::uint32_t lText = ReadU32LE(std::data(binary) + 4);
+    const std::size_t nRefOffset = 8U + lText;
+    ASSERT_GE(std::size(binary), nRefOffset + 4U);
+    EXPECT_EQ(ReadU32LE(std::data(binary) + nRefOffset), 1U);
+
+    const std::size_t lNameOffset = nRefOffset + 4U;
+    ASSERT_GE(std::size(binary), lNameOffset + 4U);
+    const std::uint32_t lName = ReadU32LE(std::data(binary) + lNameOffset);
+    EXPECT_EQ(lName, 6U);  // "chrLE" + NUL
+
+    const std::size_t lRefOffset = lNameOffset + 4U + lName;
+    ASSERT_GE(std::size(binary), lRefOffset + 4U);
+    EXPECT_EQ(ReadU32LE(std::data(binary) + lRefOffset), 0x01020304U);
 }
 
 TEST(SamHeader, BamBinaryFromRealFileRoundTrip)
