@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -17,10 +16,12 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -38,29 +39,21 @@ void ReadExact(std::ifstream& in, std::span<std::byte> bytes, std::string_view f
     }
 }
 
-std::uint32_t ReadU32LEFromFile(std::ifstream& in, std::string_view fieldName)
+template <typename T>
+    requires std::is_arithmetic_v<T>
+T ReadLEFromFile(std::ifstream& in, std::string_view fieldName)
 {
-    std::array<std::byte, 4> bytes{};
+    std::array<std::byte, sizeof(T)> bytes{};
     ReadExact(in, bytes, fieldName);
-    return ReadU32LE(std::data(bytes));
-}
-
-std::int32_t ReadI32LEFromFile(std::ifstream& in, std::string_view fieldName)
-{
-    return std::bit_cast<std::int32_t>(ReadU32LEFromFile(in, fieldName));
-}
-
-std::uint64_t ReadU64LEFromFile(std::ifstream& in, std::string_view fieldName)
-{
-    std::array<std::byte, 8> bytes{};
-    ReadExact(in, bytes, fieldName);
-    return ReadU64LE(std::data(bytes));
+    T v;
+    std::memcpy(&v, std::data(bytes), sizeof(T));
+    return v;
 }
 
 std::optional<std::uint64_t> ReadOptionalU64LEFromFile(std::ifstream& in,
                                                        std::string_view fieldName)
 {
-    std::array<std::byte, 8> bytes{};
+    std::array<std::byte, sizeof(std::uint64_t)> bytes{};
     in.read(reinterpret_cast<char*>(std::data(bytes)),
             static_cast<std::streamsize>(std::size(bytes)));
     const std::streamsize bytesRead{in.gcount()};
@@ -70,7 +63,9 @@ std::optional<std::uint64_t> ReadOptionalU64LEFromFile(std::ifstream& in,
     if (bytesRead != static_cast<std::streamsize>(std::size(bytes))) {
         throw std::runtime_error{std::format("Truncated BAI file reading {}", fieldName)};
     }
-    return ReadU64LE(std::data(bytes));
+    std::uint64_t v;
+    std::memcpy(&v, std::data(bytes), sizeof(v));
+    return v;
 }
 
 std::size_t CheckedNonNegativeCount(std::int32_t value, std::string_view fieldName)
@@ -82,35 +77,12 @@ std::size_t CheckedNonNegativeCount(std::int32_t value, std::string_view fieldNa
     return static_cast<std::size_t>(value);
 }
 
-void WriteU32LE(std::ofstream& out, std::uint32_t v)
+template <typename T>
+    requires std::is_arithmetic_v<T>
+void WriteLEToFile(std::ofstream& out, T v)
 {
-    const std::array<std::byte, 4> bytes{
-        static_cast<std::byte>(v & 0xFFU),
-        static_cast<std::byte>((v >> 8U) & 0xFFU),
-        static_cast<std::byte>((v >> 16U) & 0xFFU),
-        static_cast<std::byte>((v >> 24U) & 0xFFU),
-    };
-    out.write(reinterpret_cast<const char*>(std::data(bytes)),
-              static_cast<std::streamsize>(std::size(bytes)));
-}
-
-void WriteI32LE(std::ofstream& out, std::int32_t v)
-{
-    WriteU32LE(out, std::bit_cast<std::uint32_t>(v));
-}
-
-void WriteU64LE(std::ofstream& out, std::uint64_t v)
-{
-    const std::array<std::byte, 8> bytes{
-        static_cast<std::byte>(v & 0xFFULL),
-        static_cast<std::byte>((v >> 8ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 16ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 24ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 32ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 40ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 48ULL) & 0xFFULL),
-        static_cast<std::byte>((v >> 56ULL) & 0xFFULL),
-    };
+    std::array<std::byte, sizeof(T)> bytes;
+    std::memcpy(std::data(bytes), &v, sizeof(T));
     out.write(reinterpret_cast<const char*>(std::data(bytes)),
               static_cast<std::streamsize>(std::size(bytes)));
 }
@@ -181,7 +153,7 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
     }
 
     // Read n_ref
-    const std::int32_t nRef{ReadI32LEFromFile(file, "n_ref")};
+    const std::int32_t nRef{ReadLEFromFile<std::int32_t>(file, "n_ref")};
     const std::size_t nRefCount{CheckedNonNegativeCount(nRef, "n_ref")};
 
     BaiIndex index;
@@ -191,19 +163,19 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
         ReferenceIndex& ref{index.references_[r]};
 
         // n_bin
-        const std::int32_t nBin{ReadI32LEFromFile(file, "n_bin")};
+        const std::int32_t nBin{ReadLEFromFile<std::int32_t>(file, "n_bin")};
         const std::size_t nBinCount{CheckedNonNegativeCount(nBin, "n_bin")};
 
         for (std::size_t b{0}; b < nBinCount; ++b) {
-            const std::uint32_t binNumber{ReadU32LEFromFile(file, "bin number")};
-            const std::int32_t nChunks{ReadI32LEFromFile(file, "n_chunks")};
+            const std::uint32_t binNumber{ReadLEFromFile<std::uint32_t>(file, "bin number")};
+            const std::int32_t nChunks{ReadLEFromFile<std::int32_t>(file, "n_chunks")};
             const std::size_t nChunkCount{CheckedNonNegativeCount(nChunks, "n_chunks")};
 
             std::vector<Chunk> chunks;
             chunks.reserve(nChunkCount);
             for (std::size_t c{0}; c < nChunkCount; ++c) {
-                const std::uint64_t chunkBeg{ReadU64LEFromFile(file, "chunk begin")};
-                const std::uint64_t chunkEnd{ReadU64LEFromFile(file, "chunk end")};
+                const std::uint64_t chunkBeg{ReadLEFromFile<std::uint64_t>(file, "chunk begin")};
+                const std::uint64_t chunkEnd{ReadLEFromFile<std::uint64_t>(file, "chunk end")};
                 chunks.push_back(Chunk{VirtualOffset{chunkBeg}, VirtualOffset{chunkEnd}});
             }
 
@@ -211,12 +183,12 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
         }
 
         // n_intv
-        const std::int32_t nIntv{ReadI32LEFromFile(file, "n_intv")};
+        const std::int32_t nIntv{ReadLEFromFile<std::int32_t>(file, "n_intv")};
         const std::size_t nIntvCount{CheckedNonNegativeCount(nIntv, "n_intv")};
 
         ref.linearIndex.resize(nIntvCount);
         for (std::size_t i{0}; i < nIntvCount; ++i) {
-            const std::uint64_t offset{ReadU64LEFromFile(file, "linear index offset")};
+            const std::uint64_t offset{ReadLEFromFile<std::uint64_t>(file, "linear index offset")};
             ref.linearIndex[i] = VirtualOffset{offset};
         }
     }
@@ -246,33 +218,33 @@ void BaiIndex::ToFile(const std::filesystem::path& path) const
 
         // n_ref
         const std::int32_t nRef = std::ssize(references_);
-        WriteI32LE(file, nRef);
+        WriteLEToFile(file, nRef);
 
         for (const ReferenceIndex& ref : references_) {
             // n_bin
             const std::int32_t nBin = std::ssize(ref.bins);
-            WriteI32LE(file, nBin);
+            WriteLEToFile(file, nBin);
 
             for (const auto& [binNumber, chunks] : ref.bins) {
-                WriteU32LE(file, binNumber);
+                WriteLEToFile(file, binNumber);
                 const std::int32_t nChunks = std::ssize(chunks);
-                WriteI32LE(file, nChunks);
+                WriteLEToFile(file, nChunks);
                 for (const Chunk& chunk : chunks) {
-                    WriteU64LE(file, chunk.Begin.Value());
-                    WriteU64LE(file, chunk.End.Value());
+                    WriteLEToFile(file, chunk.Begin.Value());
+                    WriteLEToFile(file, chunk.End.Value());
                 }
             }
 
             // n_intv
             const std::int32_t nIntv = std::ssize(ref.linearIndex);
-            WriteI32LE(file, nIntv);
+            WriteLEToFile(file, nIntv);
             for (const VirtualOffset& offset : ref.linearIndex) {
-                WriteU64LE(file, offset.Value());
+                WriteLEToFile(file, offset.Value());
             }
         }
 
         // n_no_coor
-        WriteU64LE(file, unmappedCount_);
+        WriteLEToFile(file, unmappedCount_);
     } catch (...) {
         file.close();
         std::filesystem::remove(path);
