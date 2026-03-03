@@ -67,15 +67,7 @@ RecordTagData BuildRecordTagData(const BamRecord& record)
         result.Payloads.push_back(std::move(payload));
     }
 
-    std::ranges::sort(result.TagSet, [](const TagTriple& lhs, const TagTriple& rhs) {
-        if (lhs.Tag1 != rhs.Tag1) {
-            return lhs.Tag1 < rhs.Tag1;
-        }
-        if (lhs.Tag2 != rhs.Tag2) {
-            return lhs.Tag2 < rhs.Tag2;
-        }
-        return lhs.Type < rhs.Type;
-    });
+    std::ranges::sort(result.TagSet);
 
     return result;
 }
@@ -94,44 +86,62 @@ std::vector<std::byte> BuildTagIdsDictionary(const std::vector<std::vector<TagTr
     return dict;
 }
 
-constexpr std::array<CramDataSeries, 28> DATA_SERIES_COLUMNS = {
-    CramDataSeries::BF, CramDataSeries::CF, CramDataSeries::RI, CramDataSeries::RL,
-    CramDataSeries::AP, CramDataSeries::RG, CramDataSeries::RN, CramDataSeries::MF,
-    CramDataSeries::NS, CramDataSeries::NP, CramDataSeries::TS, CramDataSeries::NF,
-    CramDataSeries::TL, CramDataSeries::FN, CramDataSeries::FC, CramDataSeries::FP,
-    CramDataSeries::MQ, CramDataSeries::BA, CramDataSeries::QS, CramDataSeries::BS,
-    CramDataSeries::IN, CramDataSeries::DL, CramDataSeries::SC, CramDataSeries::RS,
-    CramDataSeries::PD, CramDataSeries::HC, CramDataSeries::BB, CramDataSeries::QQ,
+struct DataSeriesInfo
+{
+    CramDataSeries Series;
+    std::int32_t BlockId;
 };
 
-constexpr std::int32_t BF_BLOCK_ID = 1;
-constexpr std::int32_t CF_BLOCK_ID = 2;
-constexpr std::int32_t RI_BLOCK_ID = 3;
-constexpr std::int32_t RL_BLOCK_ID = 4;
-constexpr std::int32_t AP_BLOCK_ID = 5;
-constexpr std::int32_t RG_BLOCK_ID = 6;
-constexpr std::int32_t RN_BLOCK_ID = 7;
-constexpr std::int32_t MF_BLOCK_ID = 8;
-constexpr std::int32_t NS_BLOCK_ID = 9;
-constexpr std::int32_t NP_BLOCK_ID = 10;
-constexpr std::int32_t TS_BLOCK_ID = 11;
-constexpr std::int32_t NF_BLOCK_ID = 12;
-constexpr std::int32_t TL_BLOCK_ID = 13;
-constexpr std::int32_t FN_BLOCK_ID = 14;
-constexpr std::int32_t FC_BLOCK_ID = 15;
-constexpr std::int32_t FP_BLOCK_ID = 16;
-constexpr std::int32_t MQ_BLOCK_ID = 17;
-constexpr std::int32_t BA_BLOCK_ID = 18;
-constexpr std::int32_t QS_BLOCK_ID = 19;
-constexpr std::int32_t BS_BLOCK_ID = 20;
-constexpr std::int32_t IN_BLOCK_ID = 21;
-constexpr std::int32_t DL_BLOCK_ID = 22;
-constexpr std::int32_t SC_BLOCK_ID = 23;
-constexpr std::int32_t RS_BLOCK_ID = 24;
-constexpr std::int32_t PD_BLOCK_ID = 25;
-constexpr std::int32_t HC_BLOCK_ID = 26;
-constexpr std::int32_t BB_BLOCK_ID = 27;
-constexpr std::int32_t QQ_BLOCK_ID = 28;
+constexpr std::array<DataSeriesInfo, 28> DATA_SERIES = {{
+    {CramDataSeries::BF, 1},  {CramDataSeries::CF, 2},  {CramDataSeries::RI, 3},
+    {CramDataSeries::RL, 4},  {CramDataSeries::AP, 5},  {CramDataSeries::RG, 6},
+    {CramDataSeries::RN, 7},  {CramDataSeries::MF, 8},  {CramDataSeries::NS, 9},
+    {CramDataSeries::NP, 10}, {CramDataSeries::TS, 11}, {CramDataSeries::NF, 12},
+    {CramDataSeries::TL, 13}, {CramDataSeries::FN, 14}, {CramDataSeries::FC, 15},
+    {CramDataSeries::FP, 16}, {CramDataSeries::MQ, 17}, {CramDataSeries::BA, 18},
+    {CramDataSeries::QS, 19}, {CramDataSeries::BS, 20}, {CramDataSeries::IN, 21},
+    {CramDataSeries::DL, 22}, {CramDataSeries::SC, 23}, {CramDataSeries::RS, 24},
+    {CramDataSeries::PD, 25}, {CramDataSeries::HC, 26}, {CramDataSeries::BB, 27},
+    {CramDataSeries::QQ, 28},
+}};
+
+constexpr std::int32_t BlockIdFor(CramDataSeries ds)
+{
+    for (const auto& info : DATA_SERIES) {
+        if (info.Series == ds) {
+            return info.BlockId;
+        }
+    }
+    return -1;
+}
+
+constexpr std::int32_t BF_BLOCK_ID = BlockIdFor(CramDataSeries::BF);
+constexpr std::int32_t CF_BLOCK_ID = BlockIdFor(CramDataSeries::CF);
+constexpr std::int32_t RI_BLOCK_ID = BlockIdFor(CramDataSeries::RI);
+constexpr std::int32_t RL_BLOCK_ID = BlockIdFor(CramDataSeries::RL);
+constexpr std::int32_t AP_BLOCK_ID = BlockIdFor(CramDataSeries::AP);
+constexpr std::int32_t RG_BLOCK_ID = BlockIdFor(CramDataSeries::RG);
+constexpr std::int32_t RN_BLOCK_ID = BlockIdFor(CramDataSeries::RN);
+constexpr std::int32_t MF_BLOCK_ID = BlockIdFor(CramDataSeries::MF);
+constexpr std::int32_t NS_BLOCK_ID = BlockIdFor(CramDataSeries::NS);
+constexpr std::int32_t NP_BLOCK_ID = BlockIdFor(CramDataSeries::NP);
+constexpr std::int32_t TS_BLOCK_ID = BlockIdFor(CramDataSeries::TS);
+// constexpr std::int32_t NF_BLOCK_ID = BlockIdFor(CramDataSeries::NF); // Mate pair is not required for PB data
+constexpr std::int32_t TL_BLOCK_ID = BlockIdFor(CramDataSeries::TL);
+constexpr std::int32_t FN_BLOCK_ID = BlockIdFor(CramDataSeries::FN);
+constexpr std::int32_t FC_BLOCK_ID = BlockIdFor(CramDataSeries::FC);
+constexpr std::int32_t FP_BLOCK_ID = BlockIdFor(CramDataSeries::FP);
+constexpr std::int32_t MQ_BLOCK_ID = BlockIdFor(CramDataSeries::MQ);
+constexpr std::int32_t BA_BLOCK_ID = BlockIdFor(CramDataSeries::BA);
+constexpr std::int32_t QS_BLOCK_ID = BlockIdFor(CramDataSeries::QS);
+constexpr std::int32_t BB_BLOCK_ID = BlockIdFor(CramDataSeries::BB);
+constexpr std::int32_t QQ_BLOCK_ID = BlockIdFor(CramDataSeries::QQ);
+constexpr std::int32_t IN_BLOCK_ID = BlockIdFor(CramDataSeries::IN);
+constexpr std::int32_t DL_BLOCK_ID = BlockIdFor(CramDataSeries::DL);
+constexpr std::int32_t SC_BLOCK_ID = BlockIdFor(CramDataSeries::SC);
+constexpr std::int32_t RS_BLOCK_ID = BlockIdFor(CramDataSeries::RS);
+constexpr std::int32_t PD_BLOCK_ID = BlockIdFor(CramDataSeries::PD);
+constexpr std::int32_t HC_BLOCK_ID = BlockIdFor(CramDataSeries::HC);
 
 std::string DataSeriesCode(CramDataSeries ds)
 {
@@ -242,8 +252,8 @@ struct CramWriter::Impl
             requiredMinor = 1;
         }
 
-        for (const auto ds : DATA_SERIES_COLUMNS) {
-            if (IsV31BlockMethod(ResolveDataSeriesMethod(ds))) {
+        for (const auto& [series, _] : DATA_SERIES) {
+            if (IsV31BlockMethod(ResolveDataSeriesMethod(series))) {
                 requiredMinor = 1;
                 break;
             }
@@ -575,27 +585,10 @@ struct CramWriter::Impl
         compHeader.PreservationMap.ApDelta = false;
         compHeader.PreservationMap.ReferenceRequired = false;
 
-        const std::array<std::pair<CramDataSeries, std::int32_t>, 28> dataSeriesContentIds = {{
-            {CramDataSeries::BF, BF_BLOCK_ID}, {CramDataSeries::CF, CF_BLOCK_ID},
-            {CramDataSeries::RI, RI_BLOCK_ID}, {CramDataSeries::RL, RL_BLOCK_ID},
-            {CramDataSeries::AP, AP_BLOCK_ID}, {CramDataSeries::RG, RG_BLOCK_ID},
-            {CramDataSeries::RN, RN_BLOCK_ID}, {CramDataSeries::MF, MF_BLOCK_ID},
-            {CramDataSeries::NS, NS_BLOCK_ID}, {CramDataSeries::NP, NP_BLOCK_ID},
-            {CramDataSeries::TS, TS_BLOCK_ID}, {CramDataSeries::NF, NF_BLOCK_ID},
-            {CramDataSeries::TL, TL_BLOCK_ID}, {CramDataSeries::FN, FN_BLOCK_ID},
-            {CramDataSeries::FC, FC_BLOCK_ID}, {CramDataSeries::FP, FP_BLOCK_ID},
-            {CramDataSeries::MQ, MQ_BLOCK_ID}, {CramDataSeries::BA, BA_BLOCK_ID},
-            {CramDataSeries::QS, QS_BLOCK_ID}, {CramDataSeries::BS, BS_BLOCK_ID},
-            {CramDataSeries::IN, IN_BLOCK_ID}, {CramDataSeries::DL, DL_BLOCK_ID},
-            {CramDataSeries::SC, SC_BLOCK_ID}, {CramDataSeries::RS, RS_BLOCK_ID},
-            {CramDataSeries::PD, PD_BLOCK_ID}, {CramDataSeries::HC, HC_BLOCK_ID},
-            {CramDataSeries::BB, BB_BLOCK_ID}, {CramDataSeries::QQ, QQ_BLOCK_ID},
-        }};
-
         std::unordered_map<std::int32_t, CramBlockMethod> dataSeriesMethods;
-        dataSeriesMethods.reserve(std::size(dataSeriesContentIds));
-        for (const auto& [series, contentId] : dataSeriesContentIds) {
-            dataSeriesMethods.emplace(contentId, ResolveDataSeriesMethod(series));
+        dataSeriesMethods.reserve(std::size(DATA_SERIES));
+        for (const auto& [series, blockId] : DATA_SERIES) {
+            dataSeriesMethods.emplace(blockId, ResolveDataSeriesMethod(series));
         }
 
         auto selectBlockMethod = [&](CramBlockContentType contentType,
@@ -649,36 +642,25 @@ struct CramWriter::Impl
             return makeByteArrayLenExternalDesc(blockId);
         };
 
-        compHeader.DataSeriesEncodings = {
-            {CramDataSeries::BF, makeExternalDesc(BF_BLOCK_ID)},
-            {CramDataSeries::CF, makeExternalDesc(CF_BLOCK_ID)},
-            {CramDataSeries::RI, makeExternalDesc(RI_BLOCK_ID)},
-            {CramDataSeries::RL, makeExternalDesc(RL_BLOCK_ID)},
-            {CramDataSeries::AP, makeExternalDesc(AP_BLOCK_ID)},
-            {CramDataSeries::RG, makeExternalDesc(RG_BLOCK_ID)},
-            {CramDataSeries::RN, makeByteArrayStopExternalDesc(RN_BLOCK_ID, std::byte{0})},
-            {CramDataSeries::MF, makeExternalDesc(MF_BLOCK_ID)},
-            {CramDataSeries::NS, makeExternalDesc(NS_BLOCK_ID)},
-            {CramDataSeries::NP, makeExternalDesc(NP_BLOCK_ID)},
-            {CramDataSeries::TS, makeExternalDesc(TS_BLOCK_ID)},
-            {CramDataSeries::NF, makeExternalDesc(NF_BLOCK_ID)},
-            {CramDataSeries::TL, makeExternalDesc(TL_BLOCK_ID)},
-            {CramDataSeries::FN, makeExternalDesc(FN_BLOCK_ID)},
-            {CramDataSeries::FC, makeExternalDesc(FC_BLOCK_ID)},
-            {CramDataSeries::FP, makeExternalDesc(FP_BLOCK_ID)},
-            {CramDataSeries::MQ, makeExternalDesc(MQ_BLOCK_ID)},
-            {CramDataSeries::BA, makeExternalDesc(BA_BLOCK_ID)},
-            {CramDataSeries::QS, makeExternalDesc(QS_BLOCK_ID)},
-            {CramDataSeries::BS, makeExternalDesc(BS_BLOCK_ID)},
-            {CramDataSeries::IN, makeByteArrayStopExternalDesc(IN_BLOCK_ID, std::byte{0})},
-            {CramDataSeries::DL, makeExternalDesc(DL_BLOCK_ID)},
-            {CramDataSeries::SC, makeByteArrayStopExternalDesc(SC_BLOCK_ID, std::byte{0})},
-            {CramDataSeries::RS, makeExternalDesc(RS_BLOCK_ID)},
-            {CramDataSeries::PD, makeExternalDesc(PD_BLOCK_ID)},
-            {CramDataSeries::HC, makeExternalDesc(HC_BLOCK_ID)},
-            {CramDataSeries::BB, makeByteArrayLenExternalDesc(BB_BLOCK_ID)},
-            {CramDataSeries::QQ, makeExternalDesc(QQ_BLOCK_ID)},
+        auto makeDataSeriesEncoding = [&](CramDataSeries series,
+                                          std::int32_t blockId) -> CramEncodingDescriptor {
+            switch (series) {
+                case CramDataSeries::RN:
+                case CramDataSeries::IN:
+                case CramDataSeries::SC:
+                    return makeByteArrayStopExternalDesc(blockId, std::byte{0});
+                case CramDataSeries::BB:
+                    return makeByteArrayLenExternalDesc(blockId);
+                default:
+                    return makeExternalDesc(blockId);
+            }
         };
+
+        compHeader.DataSeriesEncodings.reserve(std::size(DATA_SERIES));
+        for (const auto& [series, blockId] : DATA_SERIES) {
+            compHeader.DataSeriesEncodings.emplace_back(series,
+                                                        makeDataSeriesEncoding(series, blockId));
+        }
 
         // Build per-record tag payloads and tag-set dictionary.
         std::vector<RecordTagData> recordTagData;

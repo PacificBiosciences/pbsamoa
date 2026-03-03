@@ -926,12 +926,12 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 
     if (impl_->pool) {
         const auto snap{impl_->pool->GetMetrics()};
-        m.PoolQueueDepth = snap.CurrentQueueDepth;
-        m.PoolPeakQueueDepth = snap.PeakQueueDepth;
-        m.PoolActiveWorkers = snap.CurrentActiveTasks;
-        m.PoolPeakActiveWorkers = snap.PeakActiveTasks;
-        m.PoolResultQueueDepth = snap.CurrentResultQueueDepth;
-        m.PoolPeakResultQueueDepth = snap.PeakResultQueueDepth;
+        m.Pool.QueueDepth = snap.CurrentQueueDepth;
+        m.Pool.PeakQueueDepth = snap.PeakQueueDepth;
+        m.Pool.ActiveWorkers = snap.CurrentActiveTasks;
+        m.Pool.PeakActiveWorkers = snap.PeakActiveTasks;
+        m.Pool.ResultQueueDepth = snap.CurrentResultQueueDepth;
+        m.Pool.PeakResultQueueDepth = snap.PeakResultQueueDepth;
     }
     return m;
 }
@@ -1587,12 +1587,12 @@ BgzfMetrics BgzfPipelineState::GetMetrics() const
     // ThreadPool metrics
     if (pool) {
         const auto poolSnap{pool->GetMetrics()};
-        m.PoolQueueDepth = poolSnap.CurrentQueueDepth;
-        m.PoolPeakQueueDepth = poolSnap.PeakQueueDepth;
-        m.PoolActiveWorkers = poolSnap.CurrentActiveTasks;
-        m.PoolPeakActiveWorkers = poolSnap.PeakActiveTasks;
-        m.PoolResultQueueDepth = poolSnap.CurrentResultQueueDepth;
-        m.PoolPeakResultQueueDepth = poolSnap.PeakResultQueueDepth;
+        m.Pool.QueueDepth = poolSnap.CurrentQueueDepth;
+        m.Pool.PeakQueueDepth = poolSnap.PeakQueueDepth;
+        m.Pool.ActiveWorkers = poolSnap.CurrentActiveTasks;
+        m.Pool.PeakActiveWorkers = poolSnap.PeakActiveTasks;
+        m.Pool.ResultQueueDepth = poolSnap.CurrentResultQueueDepth;
+        m.Pool.PeakResultQueueDepth = poolSnap.PeakResultQueueDepth;
     }
 
     // SPSC queue

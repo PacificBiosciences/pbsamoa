@@ -254,7 +254,7 @@ void PrintMetricsLine(const BgzfMetrics& m, const BgzfMetrics& prev, double elap
                  "[metrics] {:.1f} MB in, {:.1f} MB out | {:.0f} rec/s, {:.1f} "
                  "MB/s | pool: {} active, "
                  "queue {} | spsc: depth {} | stalls: io={} cons={} read={}",
-                 mbRead, mbDecomp, recPerSec, mbPerSec, m.PoolActiveWorkers, m.PoolQueueDepth,
+                 mbRead, mbDecomp, recPerSec, mbPerSec, m.Pool.ActiveWorkers, m.Pool.QueueDepth,
                  queueDepth, m.IoStalls, m.ConsumerStalls, m.ReaderStalls);
 }
 
@@ -271,9 +271,9 @@ void PrintMetricsSummary(const BgzfMetrics& m)
     std::println(stderr, "Decompressed:  {:.1f} MB", mbDecomp);
     std::println(stderr, "Records:       {} produced, {} consumed", m.RecordsProduced,
                  m.RecordsConsumed);
-    std::println(stderr, "Pool peak:     queue {}, workers {}", m.PoolPeakQueueDepth,
-                 m.PoolPeakActiveWorkers);
-    std::println(stderr, "Result peak:   queue {}", m.PoolPeakResultQueueDepth);
+    std::println(stderr, "Pool peak:     queue {}, workers {}", m.Pool.PeakQueueDepth,
+                 m.Pool.PeakActiveWorkers);
+    std::println(stderr, "Result peak:   queue {}", m.Pool.PeakResultQueueDepth);
     std::println(stderr, "Stalls:        IO={}, consumer={}, reader={}", m.IoStalls,
                  m.ConsumerStalls, m.ReaderStalls);
     std::println(stderr, "Timing:        IO {:.1f}ms, decompress {:.1f}ms, parse {:.1f}ms", ioMs,

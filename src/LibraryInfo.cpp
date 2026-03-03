@@ -3,6 +3,7 @@
 #include "LibraryGitHash.hpp"
 #include "LibraryVersion.hpp"
 
+#include <format>
 #include <string>
 
 namespace PacBio {
@@ -20,7 +21,7 @@ LibraryInfo GetLibraryInfo()
 std::string LibraryFormattedVersion()
 {
     const LibraryInfo info{GetLibraryInfo()};
-    return std::string{info.Release} + " (commit " + std::string{info.GitSha1} + ')';
+    return std::format("{} (commit {})", info.Release, info.GitSha1);
 }
 
 }  // namespace Samoa

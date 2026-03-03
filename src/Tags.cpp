@@ -432,27 +432,26 @@ void TagMap::Append(TagKey key, TagValue value) { entries_.emplace_back(key, std
 
 // --- Filters ---
 
-DropTags::DropTags(std::initializer_list<TagKey> keys) : keys_{keys}
+SortedTagKeySet::SortedTagKeySet(std::initializer_list<TagKey> keys) : keys_{keys}
 {
-    std::ranges::sort(keys_,
-                      [](const TagKey& a, const TagKey& b) { return a.Value() < b.Value(); });
+    std::ranges::sort(
+        keys_, [](const TagKey& lhs, const TagKey& rhs) { return lhs.Value() < rhs.Value(); });
 }
 
-bool DropTags::ShouldDrop(TagKey key) const
+bool SortedTagKeySet::Contains(TagKey key) const
 {
-    return std::ranges::binary_search(keys_, key.Value(), {}, &TagKey::Value);
+    const auto it = std::ranges::lower_bound(
+        keys_, key, [](const TagKey& lhs, const TagKey& rhs) { return lhs.Value() < rhs.Value(); });
+    return (it != std::ranges::end(keys_)) && (*it == key);
 }
 
-KeepTags::KeepTags(std::initializer_list<TagKey> keys) : keys_{keys}
-{
-    std::ranges::sort(keys_,
-                      [](const TagKey& a, const TagKey& b) { return a.Value() < b.Value(); });
-}
+DropTags::DropTags(std::initializer_list<TagKey> keys) : keys_{keys} {}
 
-bool KeepTags::ShouldKeep(TagKey key) const
-{
-    return std::ranges::binary_search(keys_, key.Value(), {}, &TagKey::Value);
-}
+bool DropTags::ShouldDrop(TagKey key) const { return keys_.Contains(key); }
+
+KeepTags::KeepTags(std::initializer_list<TagKey> keys) : keys_{keys} {}
+
+bool KeepTags::ShouldKeep(TagKey key) const { return keys_.Contains(key); }
 
 // --- Parsing/serialization ---
 

@@ -9,86 +9,13 @@
 
 namespace PacBio {
 namespace Samoa {
+namespace {
 
-struct SamWriter::Impl
+void FormatFields(std::string& buf, const SamHeader& header, std::string_view name,
+                  std::uint16_t flag, std::int32_t refId, std::int32_t pos, std::uint8_t mapq,
+                  CigarView cigar, std::int32_t nextRefId, std::int32_t nextPos, std::int32_t tlen,
+                  std::string_view seq, std::span<const std::uint8_t> qual)
 {
-    std::ofstream stream;
-    SamHeader header;
-    std::string buf;  // reusable line buffer
-    bool closed{false};
-
-    Impl(const std::filesystem::path& path, const SamHeader& hdr) : stream{path}, header{hdr}
-    {
-        if (!stream) {
-            throw std::runtime_error{"SamWriter: cannot open " + path.string()};
-        }
-        stream << header.ToText();
-    }
-};
-
-SamWriter::SamWriter(const std::filesystem::path& path, const SamHeader& header)
-    : impl_{std::make_unique<Impl>(path, header)}
-{
-}
-
-SamWriter::~SamWriter()
-{
-    if ((impl_ != nullptr) && (!impl_->closed)) {
-        Close();
-    }
-}
-
-SamWriter::SamWriter(SamWriter&&) noexcept = default;
-SamWriter& SamWriter::operator=(SamWriter&&) noexcept = default;
-
-void SamWriter::Write(const BamRecord& record)
-{
-    FormatFields(record.Name(), record.Flag(), record.RefId(), record.Pos(), record.MapQ(),
-                 record.Cigar(), record.NextRefId(), record.NextPos(), record.Tlen(),
-                 record.Sequence(), record.Qualities());
-
-    for (const auto& [key, value] : record.Tags().Entries()) {
-        impl_->buf += '\t';
-        impl_->buf.append(SerializeTagToSam(key, value));
-    }
-
-    FlushLine();
-}
-
-void SamWriter::Write(const RawRecord& view)
-{
-    FormatFields(view.Name(), view.Flag(), view.RefId(), view.Pos(), view.MapQ(), view.CigarOps(),
-                 view.NextRefId(), view.NextPos(), view.Tlen(), view.Seq().ToString(), view.Qual());
-
-    SerializeRawTagsToSam(view.AuxData(), impl_->buf);
-
-    FlushLine();
-}
-
-void SamWriter::WriteBatch(const RawRecordBatch& batch)
-{
-    for (std::size_t i{0}; i < batch.RecordCount(); ++i) {
-        const RawRecord view{batch.RecordData(i)};
-        Write(view);
-    }
-}
-
-void SamWriter::Close()
-{
-    if (impl_->closed) {
-        return;
-    }
-    impl_->stream.flush();
-    impl_->stream.close();
-    impl_->closed = true;
-}
-
-void SamWriter::FormatFields(std::string_view name, std::uint16_t flag, std::int32_t refId,
-                             std::int32_t pos, std::uint8_t mapq, CigarView cigar,
-                             std::int32_t nextRefId, std::int32_t nextPos, std::int32_t tlen,
-                             std::string_view seq, std::span<const std::uint8_t> qual)
-{
-    std::string& buf{impl_->buf};
     buf.clear();
 
     // QNAME
@@ -103,7 +30,7 @@ void SamWriter::FormatFields(std::string_view name, std::uint16_t flag, std::int
     if (refId < 0) {
         buf += '*';
     } else {
-        buf.append(impl_->header.ReferenceName(refId));
+        buf.append(header.ReferenceName(refId));
     }
     buf += '\t';
 
@@ -129,7 +56,7 @@ void SamWriter::FormatFields(std::string_view name, std::uint16_t flag, std::int
     } else if (nextRefId == refId) {
         buf += '=';
     } else {
-        buf.append(impl_->header.ReferenceName(nextRefId));
+        buf.append(header.ReferenceName(nextRefId));
     }
     buf += '\t';
 
@@ -161,10 +88,86 @@ void SamWriter::FormatFields(std::string_view name, std::uint16_t flag, std::int
     }
 }
 
-void SamWriter::FlushLine()
+void FlushLine(std::string& buf, std::ofstream& stream)
 {
-    impl_->buf += '\n';
-    impl_->stream.write(std::data(impl_->buf), static_cast<std::streamsize>(std::size(impl_->buf)));
+    buf += '\n';
+    stream.write(std::data(buf), static_cast<std::streamsize>(std::size(buf)));
+}
+
+}  // namespace
+
+struct SamWriter::Impl
+{
+    std::ofstream stream;
+    SamHeader header;
+    std::string buf;  // reusable line buffer
+    bool closed{false};
+
+    Impl(const std::filesystem::path& path, const SamHeader& hdr) : stream{path}, header{hdr}
+    {
+        if (!stream) {
+            throw std::runtime_error{std::format("SamWriter: cannot open {}", path.string())};
+        }
+        stream << header.ToText();
+    }
+};
+
+SamWriter::SamWriter(const std::filesystem::path& path, const SamHeader& header)
+    : impl_{std::make_unique<Impl>(path, header)}
+{
+}
+
+SamWriter::~SamWriter()
+{
+    if ((impl_ != nullptr) && (!impl_->closed)) {
+        Close();
+    }
+}
+
+SamWriter::SamWriter(SamWriter&&) noexcept = default;
+SamWriter& SamWriter::operator=(SamWriter&&) noexcept = default;
+
+void SamWriter::Write(const BamRecord& record)
+{
+    FormatFields(impl_->buf, impl_->header, record.Name(), record.Flag(), record.RefId(),
+                 record.Pos(), record.MapQ(), record.Cigar(), record.NextRefId(), record.NextPos(),
+                 record.Tlen(), record.Sequence(), record.Qualities());
+
+    for (const auto& [key, value] : record.Tags().Entries()) {
+        impl_->buf += '\t';
+        impl_->buf.append(SerializeTagToSam(key, value));
+    }
+
+    FlushLine(impl_->buf, impl_->stream);
+}
+
+void SamWriter::Write(const RawRecord& view)
+{
+    FormatFields(impl_->buf, impl_->header, view.Name(), view.Flag(), view.RefId(), view.Pos(),
+                 view.MapQ(), view.CigarOps(), view.NextRefId(), view.NextPos(), view.Tlen(),
+                 view.Seq().ToString(), view.Qual());
+
+    SerializeRawTagsToSam(view.AuxData(), impl_->buf);
+
+    FlushLine(impl_->buf, impl_->stream);
+}
+
+void SamWriter::WriteBatch(const RawRecordBatch& batch)
+{
+    for (std::size_t i{0}; i < batch.RecordCount(); ++i) {
+        const RawRecord view{batch.RecordData(i)};
+        Write(view);
+    }
+}
+
+void SamWriter::Close()
+{
+    if (impl_->closed) {
+        return;
+    }
+    impl_->stream.flush();
+    impl_->stream.close();
+    impl_->closed = true;
 }
 
 }  // namespace Samoa

@@ -122,6 +122,17 @@ void SerializeRawTagsToSam(std::span<const std::byte> auxData, std::string& out)
 
 // --- Tag filters for ToOwned() ---
 
+/// \brief Sorted set of TagKeys with O(log n) lookup via binary search.
+class SortedTagKeySet
+{
+public:
+    SortedTagKeySet(std::initializer_list<TagKey> keys);
+    bool Contains(TagKey key) const;
+
+private:
+    std::vector<TagKey> keys_;
+};
+
 /// \brief Drop listed tags during ToOwned() conversion.
 class DropTags
 {
@@ -130,7 +141,7 @@ public:
     bool ShouldDrop(TagKey key) const;
 
 private:
-    std::vector<TagKey> keys_;
+    SortedTagKeySet keys_;
 };
 
 /// \brief Keep only listed tags during ToOwned() conversion.
@@ -141,7 +152,7 @@ public:
     bool ShouldKeep(TagKey key) const;
 
 private:
-    std::vector<TagKey> keys_;
+    SortedTagKeySet keys_;
 };
 
 // --- Zero-allocation tag serialization for BamRecord::SerializeToBam ---

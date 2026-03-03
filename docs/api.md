@@ -1063,8 +1063,8 @@ via relaxed atomics — diff two snapshots for per-second rates.
 ### BgzfMetrics fields
 
 Throughput: `BytesRead`, `BlocksRead`, `BytesDecompressed`.
-Pool: `PoolQueueDepth`, `PoolPeakQueueDepth`, `PoolActiveWorkers`,
-`PoolPeakActiveWorkers`, `PoolResultQueueDepth`, `PoolPeakResultQueueDepth`.
+Pool (via `PoolMetrics Pool`): `QueueDepth`, `PeakQueueDepth`, `ActiveWorkers`,
+`PeakActiveWorkers`, `ResultQueueDepth`, `PeakResultQueueDepth`.
 Queue: `RecordsProduced`, `RecordsConsumed`.
 Stalls: `IoStalls`, `ConsumerStalls`, `ReaderStalls`.
 Timing (ns): `IoReadNs`, `DecompressNs`, `RecordParseNs`.

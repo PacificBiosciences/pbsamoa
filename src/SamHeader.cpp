@@ -44,6 +44,30 @@ std::pair<std::string_view, std::string_view> ParseTagValue(std::string_view fie
 
 namespace PacBio {
 namespace Samoa {
+namespace detail {
+
+const std::string* FindTag(std::span<const std::pair<std::string, std::string>> tags,
+                           std::string_view key)
+{
+    const auto it = std::ranges::find(tags, key, &std::pair<std::string, std::string>::first);
+    if (it == std::ranges::end(tags)) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void UpsertTag(std::vector<std::pair<std::string, std::string>>& tags, std::string key,
+               std::string value)
+{
+    auto it = std::ranges::find(tags, key, &std::pair<std::string, std::string>::first);
+    if (it != std::ranges::end(tags)) {
+        it->second = std::move(value);
+    } else {
+        tags.emplace_back(std::move(key), std::move(value));
+    }
+}
+
+}  // namespace detail
 
 // --- ReferenceSequence ---
 
@@ -58,13 +82,7 @@ std::int32_t ReferenceSequence::Length() const { return length_; }
 
 const std::string* ReferenceSequence::GetTag(std::string_view key) const
 {
-    const auto it = std::ranges::find_if(
-        customTags_,
-        [key](const std::pair<std::string, std::string>& tagPair) { return tagPair.first == key; });
-    if (it == std::ranges::end(customTags_)) {
-        return nullptr;
-    }
-    return &it->second;
+    return detail::FindTag(customTags_, key);
 }
 
 void ReferenceSequence::SetTag(std::string key, std::string value)
@@ -93,13 +111,7 @@ std::string_view ReadGroup::Id() const { return id_; }
 
 const std::string* ReadGroup::GetTag(std::string_view key) const
 {
-    const auto it = std::ranges::find_if(
-        customTags_,
-        [key](const std::pair<std::string, std::string>& tagPair) { return tagPair.first == key; });
-    if (it == std::ranges::end(customTags_)) {
-        return nullptr;
-    }
-    return &it->second;
+    return detail::FindTag(customTags_, key);
 }
 
 void ReadGroup::SetTag(std::string key, std::string value)
@@ -128,13 +140,7 @@ std::string_view ProgramRecord::Id() const { return id_; }
 
 const std::string* ProgramRecord::GetTag(std::string_view key) const
 {
-    const auto it = std::ranges::find_if(
-        customTags_,
-        [key](const std::pair<std::string, std::string>& tagPair) { return tagPair.first == key; });
-    if (it == std::ranges::end(customTags_)) {
-        return nullptr;
-    }
-    return &it->second;
+    return detail::FindTag(customTags_, key);
 }
 
 void ProgramRecord::SetTag(std::string key, std::string value)
@@ -555,11 +561,7 @@ std::string_view SamHeader::ReferenceName(std::int32_t refId) const
     return references_[refId].Name();
 }
 
-std::int32_t SamHeader::NumReferences() const
-{
-    const std::int32_t numRefs = std::size(references_);
-    return numRefs;
-}
+std::int32_t SamHeader::NumReferences() const { return std::ssize(references_); }
 
 }  // namespace Samoa
 }  // namespace PacBio

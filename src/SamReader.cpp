@@ -1,5 +1,7 @@
 #include <pbsamoa/io/SamReader.hpp>
 
+#include "BinaryUtils.hpp"
+
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
@@ -10,7 +12,6 @@
 #include <string>
 #include <vector>
 
-#include <charconv>
 #include <cstdint>
 
 namespace PacBio {
@@ -34,45 +35,12 @@ std::vector<std::string_view> SplitOnTabs(std::string_view line)
     return fields;
 }
 
-std::int32_t ParseInt32(std::string_view text, std::string_view field)
+/// \brief Parse a uint8 from text via uint16 (from_chars may not support uint8_t).
+std::uint8_t ParseUInt8(std::string_view text, std::string_view context)
 {
-    std::int32_t value{0};
-    const auto [ptr, ec] =
-        std::from_chars(std::data(text), std::data(text) + std::size(text), value);
-    if (ec != std::errc{}) {
-        throw std::runtime_error{
-            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
-    }
-    if (ptr != (std::data(text) + std::size(text))) {
-        throw std::runtime_error{
-            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
-    }
-    return value;
-}
-
-std::uint16_t ParseUInt16(std::string_view text, std::string_view field)
-{
-    std::uint16_t value{0};
-    const auto [ptr, ec] =
-        std::from_chars(std::data(text), std::data(text) + std::size(text), value);
-    if (ec != std::errc{}) {
-        throw std::runtime_error{
-            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
-    }
-    if (ptr != (std::data(text) + std::size(text))) {
-        throw std::runtime_error{
-            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
-    }
-    return value;
-}
-
-std::uint8_t ParseUInt8(std::string_view text, std::string_view field)
-{
-    // from_chars doesn't support uint8_t on all platforms, parse as uint16_t
-    const std::uint16_t v{ParseUInt16(text, field)};
+    const std::uint16_t v{ParseInteger<std::uint16_t>(text, context)};
     if (v > std::numeric_limits<std::uint8_t>::max()) {
-        throw std::runtime_error{
-            std::format("SamReader: invalid integer '{}' for field {}", text, field)};
+        throw std::runtime_error{std::format("{}: not numeric: '{}'", context, text)};
     }
     return static_cast<std::uint8_t>(v);
 }
@@ -132,33 +100,16 @@ SamReader& SamReader::operator=(SamReader&&) noexcept = default;
 
 const SamHeader& SamReader::Header() const { return impl_->header; }
 
-std::optional<BamRecord> SamReader::ReadRecord()
-{
-    // Use buffered first alignment line if available
-    if (impl_->hasBufferedLine) {
-        impl_->hasBufferedLine = false;
-        return ParseAlignmentLine(impl_->currentLine);
-    }
+namespace {
 
-    // Read next lines, skipping empty ones
-    std::string line;
-    while (std::getline(impl_->file, line)) {
-        ++impl_->lineNumber;
-        if (!std::empty(line)) {
-            return ParseAlignmentLine(line);
-        }
-    }
-
-    return std::nullopt;
-}
-
-BamRecord SamReader::ParseAlignmentLine(std::string_view line)
+BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
+                             std::uint64_t lineNumber)
 {
     const std::vector<std::string_view> fields{SplitOnTabs(line)};
     if (std::size(fields) < 11) {
         throw std::runtime_error{
             std::format("SamReader: line {}: expected at least 11 tab-separated fields, got {}",
-                        impl_->lineNumber, std::size(fields))};
+                        lineNumber, std::size(fields))};
     }
 
     BamRecord record;
@@ -167,23 +118,23 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     record.Name(std::string{fields[0]});
 
     // FLAG
-    record.Flag(ParseUInt16(fields[1], "FLAG"));
+    record.Flag(ParseInteger<std::uint16_t>(fields[1], "FLAG"));
 
     // RNAME → RefId
     if (fields[2] == "*") {
         record.RefId(-1);
     } else {
-        const std::int32_t refId{impl_->header.ReferenceId(fields[2])};
-        if ((impl_->header.NumReferences() > 0) && (refId < 0)) {
-            throw std::runtime_error{std::format("SamReader: line {}: unknown RNAME '{}'",
-                                                 impl_->lineNumber, fields[2])};
+        const std::int32_t refId{header.ReferenceId(fields[2])};
+        if ((header.NumReferences() > 0) && (refId < 0)) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: unknown RNAME '{}'", lineNumber, fields[2])};
         }
         record.RefId(refId);
     }
 
     // POS (1-based to 0-based)
     {
-        const std::int32_t pos{ParseInt32(fields[3], "POS")};
+        const std::int32_t pos{ParseInteger<std::int32_t>(fields[3], "POS")};
         record.Pos((pos > 0) ? (pos - 1) : -1);
     }
 
@@ -195,7 +146,7 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
         auto cigar{ParseCigar(fields[5])};
         if (!cigar.has_value()) {
             throw std::runtime_error{
-                std::format("SamReader: line {}: {}", impl_->lineNumber, cigar.error())};
+                std::format("SamReader: line {}: {}", lineNumber, cigar.error())};
         }
         record.Cigar(std::move(*cigar));
     }
@@ -206,26 +157,26 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     } else if (fields[6] == "=") {
         record.NextRefId(record.RefId());
     } else {
-        const std::int32_t nextRefId{impl_->header.ReferenceId(fields[6])};
-        if ((impl_->header.NumReferences() > 0) && (nextRefId < 0)) {
-            throw std::runtime_error{std::format("SamReader: line {}: unknown RNEXT '{}'",
-                                                 impl_->lineNumber, fields[6])};
+        const std::int32_t nextRefId{header.ReferenceId(fields[6])};
+        if ((header.NumReferences() > 0) && (nextRefId < 0)) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: unknown RNEXT '{}'", lineNumber, fields[6])};
         }
         record.NextRefId(nextRefId);
     }
 
     // PNEXT (1-based to 0-based)
     {
-        const std::int32_t pnext{ParseInt32(fields[7], "PNEXT")};
+        const std::int32_t pnext{ParseInteger<std::int32_t>(fields[7], "PNEXT")};
         record.NextPos((pnext > 0) ? (pnext - 1) : -1);
     }
 
     // TLEN
-    record.Tlen(ParseInt32(fields[8], "TLEN"));
+    record.Tlen(ParseInteger<std::int32_t>(fields[8], "TLEN"));
 
     // SEQ
     const bool seqMissing{fields[9] == "*"};
-    if (fields[9] == "*") {
+    if (seqMissing) {
         record.Sequence(std::string{});
     } else {
         record.Sequence(std::string{fields[9]});
@@ -237,8 +188,8 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
         record.Qualities(std::vector<std::uint8_t>{});
     } else {
         if (seqMissing) {
-            throw std::runtime_error{std::format(
-                "SamReader: line {}: QUAL provided while SEQ is '*'", impl_->lineNumber)};
+            throw std::runtime_error{
+                std::format("SamReader: line {}: QUAL provided while SEQ is '*'", lineNumber)};
         }
 
         std::vector<std::uint8_t> quals;
@@ -246,13 +197,13 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
         for (const char c : fields[10]) {
             if ((c < 33) || (c > 126)) {
                 throw std::runtime_error{
-                    std::format("SamReader: line {}: invalid QUAL character", impl_->lineNumber)};
+                    std::format("SamReader: line {}: invalid QUAL character", lineNumber)};
             }
             quals.push_back(c - 33);
         }
         if (std::size(quals) != std::size(fields[9])) {
             throw std::runtime_error{
-                std::format("SamReader: line {}: SEQ and QUAL lengths differ", impl_->lineNumber)};
+                std::format("SamReader: line {}: SEQ and QUAL lengths differ", lineNumber)};
         }
         record.Qualities(std::move(quals));
     }
@@ -263,7 +214,7 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
         const auto parsed = ParseTagFromSam(fields[i]);
         if (!parsed.has_value()) {
             throw std::runtime_error{
-                std::format("SamReader: line {}: invalid tag '{}'", impl_->lineNumber, fields[i])};
+                std::format("SamReader: line {}: invalid tag '{}'", lineNumber, fields[i])};
         }
         tags.Set(parsed->first, parsed->second);
     }
@@ -272,6 +223,28 @@ BamRecord SamReader::ParseAlignmentLine(std::string_view line)
     }
 
     return record;
+}
+
+}  // namespace
+
+std::optional<BamRecord> SamReader::ReadRecord()
+{
+    // Use buffered first alignment line if available
+    if (impl_->hasBufferedLine) {
+        impl_->hasBufferedLine = false;
+        return ParseAlignmentLine(impl_->currentLine, impl_->header, impl_->lineNumber);
+    }
+
+    // Read next lines, skipping empty ones
+    std::string line;
+    while (std::getline(impl_->file, line)) {
+        ++impl_->lineNumber;
+        if (!std::empty(line)) {
+            return ParseAlignmentLine(line, impl_->header, impl_->lineNumber);
+        }
+    }
+
+    return std::nullopt;
 }
 
 // --- RecordRange ---

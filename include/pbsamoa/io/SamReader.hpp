@@ -60,8 +60,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-
-    BamRecord ParseAlignmentLine(std::string_view line);
 };
 
 }  // namespace Samoa

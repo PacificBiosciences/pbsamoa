@@ -16,10 +16,8 @@
 #include <variant>
 #include <vector>
 
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -39,8 +37,8 @@ bool ClipSubstring(TagValue& value, std::size_t offset, std::size_t length)
         }
         const std::size_t byteOffset{offset * elemSize};
         const std::size_t byteLength{length * elemSize};
-        std::memmove(std::data(arr->MutableData()), std::data(arr->MutableData()) + byteOffset,
-                     byteLength);
+        auto data = arr->MutableData();
+        std::ranges::copy_n(std::data(data) + byteOffset, byteLength, std::data(data));
         arr->Resize(length);
         return true;
     }
@@ -93,14 +91,14 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
                 ++pos;
             }
             std::int32_t num{0};
-            const std::size_t digitStart{pos};
-            while ((pos < std::size(segment)) &&
-                   std::isdigit(static_cast<unsigned char>(segment[pos]))) {
-                num = (num * 10) + (segment[pos] - '0');
-                ++pos;
-            }
-            if (pos > digitStart) {
+            const auto* first{std::data(segment) + pos};
+            const auto* last{std::data(segment) + std::size(segment)};
+            const auto [ptr, ec]{std::from_chars(first, last, num)};
+            if (ec == std::errc{}) {
                 rec.skips.push_back(num);
+                pos += static_cast<std::size_t>(ptr - first);
+            } else {
+                break;
             }
         }
 

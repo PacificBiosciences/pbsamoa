@@ -2,17 +2,12 @@
 #define PBSAMOA_IO_SAMWRITER_HPP
 
 #include <pbsamoa/core/BamRecord.hpp>
-#include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include <filesystem>
 #include <memory>
-#include <span>
-#include <string_view>
-
-#include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
@@ -49,15 +44,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-
-    /// \brief Format all SAM fields up to (but not including) tags into impl_->buf.
-    void FormatFields(std::string_view name, std::uint16_t flag, std::int32_t refId,
-                      std::int32_t pos, std::uint8_t mapq, CigarView cigar, std::int32_t nextRefId,
-                      std::int32_t nextPos, std::int32_t tlen, std::string_view seq,
-                      std::span<const std::uint8_t> qual);
-
-    /// \brief Append newline and write the line buffer to the output stream.
-    void FlushLine();
 };
 
 }  // namespace Samoa
