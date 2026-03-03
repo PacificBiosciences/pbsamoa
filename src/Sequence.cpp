@@ -35,6 +35,20 @@ inline constexpr std::array<char, 256> COMPLEMENT_TABLE = [] {
     t['H'] = 'D';
     return t;
 }();
+
+void DecodePackedInto(std::span<const std::byte> packed, std::uint32_t seqLength, char* dest)
+{
+    const std::uint32_t fullBytes{seqLength / 2};
+    for (std::uint32_t i{0}; i < fullBytes; ++i) {
+        const auto& pair{PACKED_TO_BASES[static_cast<std::uint8_t>(packed[i])]};
+        dest[2 * i] = pair[0];
+        dest[2 * i + 1] = pair[1];
+    }
+    if ((seqLength % 2) != 0) {
+        dest[seqLength - 1] =
+            CODE_TO_BASE[(static_cast<std::uint8_t>(packed[fullBytes]) >> 4) & 0xF];
+    }
+}
 }  // namespace
 
 std::vector<std::byte> PackSequence(std::string_view seq)
@@ -90,18 +104,7 @@ void WriteSequenceTo(std::span<const std::byte> packed, std::uint32_t seqLength,
 {
     const std::size_t startPos{std::size(out)};
     out.resize(startPos + seqLength);
-    char* dest{std::data(out) + startPos};
-
-    const std::uint32_t fullBytes{seqLength / 2};
-    for (std::uint32_t i{0}; i < fullBytes; ++i) {
-        const auto& pair{PACKED_TO_BASES[static_cast<std::uint8_t>(packed[i])]};
-        dest[2 * i] = pair[0];
-        dest[2 * i + 1] = pair[1];
-    }
-    if ((seqLength % 2) != 0) {
-        dest[seqLength - 1] =
-            CODE_TO_BASE[(static_cast<std::uint8_t>(packed[fullBytes]) >> 4) & 0xF];
-    }
+    DecodePackedInto(packed, seqLength, std::data(out) + startPos);
 }
 
 SequenceView::SequenceView() : data_{}, length_{0} {}
