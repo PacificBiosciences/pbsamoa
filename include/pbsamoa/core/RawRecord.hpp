@@ -3,11 +3,11 @@
 
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
+#include <pbsamoa/core/Endian.hpp>
 #include <pbsamoa/core/Sequence.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include <algorithm>
-#include <bit>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -17,30 +17,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
-
-namespace detail {
-
-inline std::uint16_t ReadU16LE(const std::byte* p)
-{
-    return std::to_integer<std::uint16_t>(p[0]) | (std::to_integer<std::uint16_t>(p[1]) << 8U);
-}
-
-inline std::uint32_t ReadU32LE(const std::byte* p)
-{
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
-}
-
-inline std::int32_t ReadI32LE(const std::byte* p)
-{
-    return std::bit_cast<std::int32_t>(ReadU32LE(p));
-}
-
-}  // namespace detail
 
 /// \brief Owning byte view into raw BAM record bytes with decode-on-demand.
 ///
@@ -124,50 +104,40 @@ inline RawRecord::RawRecord(std::span<const std::byte> data)
         throw std::invalid_argument{"RawRecord: read name is not NUL-terminated"};
     }
 
-    // Decode CIGAR from little-endian uint32 words into aligned CigarOp objects.
+    // Copy CIGAR directly — CigarOp stores BAM-native uint32 layout and
+    // Endian.hpp guarantees a little-endian platform.
+    static_assert(sizeof(CigarOp) == sizeof(std::uint32_t));
     const std::uint16_t count{CigarOpCount()};
     if (count > 0) {
         cigar_.resize(count);
-        const std::size_t offset{CigarOffset()};
-        for (std::uint16_t i = 0; i < count; ++i) {
-            const std::size_t byteOffset{offset + static_cast<std::size_t>(4U * i)};
-            cigar_[i] = CigarOp{detail::ReadU32LE(std::data(data_) + byteOffset)};
-        }
+        std::memcpy(cigar_.data(), std::data(data_) + CigarOffset(),
+                    static_cast<std::size_t>(count) * sizeof(CigarOp));
     }
 }
 
 // --- fixed fields ---
 
-inline std::int32_t RawRecord::RefId() const { return detail::ReadI32LE(std::data(data_)); }
+inline std::int32_t RawRecord::RefId() const { return ReadI32LE(std::data(data_)); }
 
-inline std::int32_t RawRecord::Pos() const { return detail::ReadI32LE(std::data(data_) + 4); }
+inline std::int32_t RawRecord::Pos() const { return ReadI32LE(std::data(data_) + 4); }
 
 inline std::uint8_t RawRecord::NameLength() const { return static_cast<std::uint8_t>(data_[8]); }
 
 inline std::uint8_t RawRecord::MapQ() const { return static_cast<std::uint8_t>(data_[9]); }
 
-inline std::uint16_t RawRecord::Bin() const { return detail::ReadU16LE(std::data(data_) + 10); }
+inline std::uint16_t RawRecord::Bin() const { return ReadU16LE(std::data(data_) + 10); }
 
-inline std::uint16_t RawRecord::CigarOpCount() const
-{
-    return detail::ReadU16LE(std::data(data_) + 12);
-}
+inline std::uint16_t RawRecord::CigarOpCount() const { return ReadU16LE(std::data(data_) + 12); }
 
-inline std::uint16_t RawRecord::Flag() const { return detail::ReadU16LE(std::data(data_) + 14); }
+inline std::uint16_t RawRecord::Flag() const { return ReadU16LE(std::data(data_) + 14); }
 
-inline std::uint32_t RawRecord::SeqLength() const
-{
-    return detail::ReadU32LE(std::data(data_) + 16);
-}
+inline std::uint32_t RawRecord::SeqLength() const { return ReadU32LE(std::data(data_) + 16); }
 
-inline std::int32_t RawRecord::NextRefId() const
-{
-    return detail::ReadI32LE(std::data(data_) + 20);
-}
+inline std::int32_t RawRecord::NextRefId() const { return ReadI32LE(std::data(data_) + 20); }
 
-inline std::int32_t RawRecord::NextPos() const { return detail::ReadI32LE(std::data(data_) + 24); }
+inline std::int32_t RawRecord::NextPos() const { return ReadI32LE(std::data(data_) + 24); }
 
-inline std::int32_t RawRecord::Tlen() const { return detail::ReadI32LE(std::data(data_) + 28); }
+inline std::int32_t RawRecord::Tlen() const { return ReadI32LE(std::data(data_) + 28); }
 
 // --- variable-length field offsets ---
 
@@ -261,12 +231,15 @@ inline BamRecord RawRecord::ToOwned() const
     return record;
 }
 
-inline BamRecord RawRecord::ToOwned(const DropTags& filter) const
+namespace detail {
+
+template <typename Pred>
+BamRecord ToOwnedFiltered(const RawRecord& raw, Pred keep)
 {
-    BamRecord record{ToOwned()};
+    BamRecord record{raw.ToOwned()};
     TagMap filtered;
     for (const auto& [key, value] : record.Tags().Entries()) {
-        if (!filter.ShouldDrop(key)) {
+        if (keep(key)) {
             filtered.Append(key, value);
         }
     }
@@ -274,17 +247,16 @@ inline BamRecord RawRecord::ToOwned(const DropTags& filter) const
     return record;
 }
 
+}  // namespace detail
+
+inline BamRecord RawRecord::ToOwned(const DropTags& filter) const
+{
+    return detail::ToOwnedFiltered(*this, [&filter](TagKey k) { return !filter.ShouldDrop(k); });
+}
+
 inline BamRecord RawRecord::ToOwned(const KeepTags& filter) const
 {
-    BamRecord record{ToOwned()};
-    TagMap filtered;
-    for (const auto& [key, value] : record.Tags().Entries()) {
-        if (filter.ShouldKeep(key)) {
-            filtered.Append(key, value);
-        }
-    }
-    record.Tags(std::move(filtered));
-    return record;
+    return detail::ToOwnedFiltered(*this, [&filter](TagKey k) { return filter.ShouldKeep(k); });
 }
 
 /// \brief Owns decompressed buffer(s) and provides access to raw record data.

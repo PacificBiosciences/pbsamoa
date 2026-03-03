@@ -25,15 +25,13 @@ struct BamRawReader::Impl
     BgzfReader bgzf;
 
     // Chunking support
-    bool hasRecordLimit{false};
-    std::size_t recordLimit{0};
+    std::optional<std::size_t> recordLimit;
     std::size_t recordsRead{0};
 
     explicit Impl(const std::filesystem::path& p, BamRawReaderConfig config)
         : path{p}
         , bgzf{p, config.BgzfWorkers}
-        , hasRecordLimit{config.RecordLimit > 0}
-        , recordLimit{config.RecordLimit}
+        , recordLimit{config.RecordLimit > 0 ? std::optional{config.RecordLimit} : std::nullopt}
     {
         // Validate mutual exclusion
         const bool hasChunking{(config.ChunkNum > 0) && (config.TotalChunks > 0)};
@@ -72,12 +70,11 @@ struct BamRawReader::Impl
         const std::ptrdiff_t endIdx{(numZmws * static_cast<std::ptrdiff_t>(chunkNum)) /
                                     totalChunks};
 
-        hasRecordLimit = true;
         recordsRead = 0;
 
         if (startIdx >= endIdx) {
             // This chunk has no assigned ZMWs.
-            recordLimit = 0;
+            recordLimit = std::size_t{0};
             return;
         }
 
@@ -85,7 +82,7 @@ struct BamRawReader::Impl
                                                      static_cast<std::size_t>(endIdx - startIdx)};
         const std::vector<std::int64_t> chunkOffsets{index.Find(chunkZmws)};
 
-        recordLimit = std::size(chunkOffsets);
+        recordLimit = std::optional{std::size(chunkOffsets)};
 
         // Seek to the first record in this chunk
         const VirtualOffset startOffset(index.FirstOffset(unique[startIdx]));
@@ -110,7 +107,7 @@ const SamHeader& BamRawReader::Header() const { return impl_->bgzf.Header(); }
 
 std::optional<RawRecord> BamRawReader::ReadRecord()
 {
-    if (impl_->hasRecordLimit && (impl_->recordsRead >= impl_->recordLimit)) {
+    if (impl_->recordLimit && (impl_->recordsRead >= *impl_->recordLimit)) {
         return std::nullopt;
     }
 
@@ -123,12 +120,12 @@ std::optional<RawRecord> BamRawReader::ReadRecord()
 
 std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 {
-    if (impl_->hasRecordLimit && (impl_->recordsRead >= impl_->recordLimit)) {
+    if (impl_->recordLimit && (impl_->recordsRead >= *impl_->recordLimit)) {
         return std::nullopt;
     }
 
-    const std::size_t remaining{impl_->hasRecordLimit ? (impl_->recordLimit - impl_->recordsRead)
-                                                      : std::numeric_limits<std::size_t>::max()};
+    const std::size_t remaining{impl_->recordLimit ? (*impl_->recordLimit - impl_->recordsRead)
+                                                   : std::numeric_limits<std::size_t>::max()};
 
     std::vector<std::byte> batchBuffer;
     batchBuffer.reserve(limit.Value());

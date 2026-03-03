@@ -1,7 +1,8 @@
 #include <pbsamoa/core/SamHeader.hpp>
 
+#include "BinaryUtils.hpp"
+
 #include <algorithm>
-#include <bit>
 #include <charconv>
 #include <expected>
 #include <format>
@@ -37,32 +38,6 @@ std::pair<std::string_view, std::string_view> ParseTagValue(std::string_view fie
         return {field, {}};
     }
     return {field.substr(0, colon), field.substr(colon + 1)};
-}
-
-std::uint32_t ReadU32LE(std::span<const std::byte> data, std::size_t offset)
-{
-    const std::byte* p{std::data(data) + offset};
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
-}
-
-std::int32_t ReadI32LE(std::span<const std::byte> data, std::size_t offset)
-{
-    return std::bit_cast<std::int32_t>(ReadU32LE(data, offset));
-}
-
-void WriteU32LE(std::vector<std::byte>& out, std::uint32_t value)
-{
-    out.push_back(static_cast<std::byte>(value & 0xFFU));
-    out.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
-    out.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
-    out.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
-}
-
-void WriteI32LE(std::vector<std::byte>& out, std::int32_t value)
-{
-    WriteU32LE(out, std::bit_cast<std::uint32_t>(value));
 }
 
 }  // namespace
@@ -318,7 +293,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         (data[3] != std::byte{1})) {
         return std::unexpected{"Invalid BAM magic bytes"};
     }
-    const std::uint32_t lText = ReadU32LE(data, 4);
+    const std::uint32_t lText = PacBio::Samoa::ReadU32LE(std::data(data) + 4);
     if (std::size(data) < 8 + lText + 4) {
         return std::unexpected{"BAM header block truncated in header text"};
     }
@@ -339,7 +314,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
 
     // Parse binary reference dictionary
     std::size_t offset = 8 + lText;
-    const std::uint32_t nRef = ReadU32LE(data, offset);
+    const std::uint32_t nRef = PacBio::Samoa::ReadU32LE(std::data(data) + offset);
     offset += 4;
 
     // Build references from binary dict (authoritative for name/length)
@@ -350,7 +325,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         if (offset + 4 > std::size(data)) {
             return std::unexpected{"BAM header block truncated in reference dictionary"};
         }
-        const std::uint32_t lName = ReadU32LE(data, offset);
+        const std::uint32_t lName = PacBio::Samoa::ReadU32LE(std::data(data) + offset);
         offset += 4;
 
         if (offset + lName + 4 > std::size(data)) {
@@ -361,7 +336,7 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         std::string name{reinterpret_cast<const char*>(std::data(data) + offset),
                          lName > 0 ? lName - 1 : 0};
         offset += lName;
-        const std::int32_t lRef = ReadI32LE(data, offset);
+        const std::int32_t lRef = PacBio::Samoa::ReadI32LE(std::data(data) + offset);
         offset += 4;
 
         binaryRefs.emplace_back(std::move(name), lRef);

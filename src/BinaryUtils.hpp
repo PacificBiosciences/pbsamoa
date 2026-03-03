@@ -1,6 +1,8 @@
 #ifndef PBSAMOA_BINARYUTILS_HPP
 #define PBSAMOA_BINARYUTILS_HPP
 
+#include <pbsamoa/core/Endian.hpp>
+
 #include <algorithm>
 #include <charconv>
 #include <filesystem>
@@ -11,52 +13,11 @@
 #include <string_view>
 #include <vector>
 
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
-
-/// \brief Read a little-endian uint16 from raw bytes.
-inline std::uint16_t ReadU16LE(const std::byte* p)
-{
-    const std::uint16_t low{std::to_integer<std::uint16_t>(p[0])};
-    const std::uint16_t high{std::to_integer<std::uint16_t>(p[1])};
-    return low | (high << 8U);
-}
-
-/// \brief Read a little-endian uint32 from raw bytes.
-inline std::uint32_t ReadU32LE(const std::byte* p)
-{
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
-}
-
-/// \brief Read a little-endian int32 from raw bytes.
-inline std::int32_t ReadI32LE(const std::byte* p)
-{
-    return std::bit_cast<std::int32_t>(ReadU32LE(p));
-}
-
-/// \brief Read a little-endian uint64 from raw bytes.
-inline std::uint64_t ReadU64LE(const std::byte* p)
-{
-    return std::to_integer<std::uint64_t>(p[0]) | (std::to_integer<std::uint64_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint64_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint64_t>(p[3]) << 24U) |
-           (std::to_integer<std::uint64_t>(p[4]) << 32U) |
-           (std::to_integer<std::uint64_t>(p[5]) << 40U) |
-           (std::to_integer<std::uint64_t>(p[6]) << 48U) |
-           (std::to_integer<std::uint64_t>(p[7]) << 56U);
-}
-
-/// \brief Read a little-endian int64 from raw bytes.
-inline std::int64_t ReadI64LE(const std::byte* p)
-{
-    return std::bit_cast<std::int64_t>(ReadU64LE(p));
-}
 
 /// \brief Write a little-endian int32 to a byte vector.
 inline void WriteI32LE(std::vector<std::byte>& out, std::int32_t value)

@@ -1,10 +1,10 @@
 #include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/Endian.hpp>
 #include <pbsamoa/core/Sequence.hpp>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <bit>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,24 +14,6 @@
 
 namespace PacBio {
 namespace Samoa {
-
-namespace {
-
-std::uint16_t ReadU16LE(const std::byte* p)
-{
-    return std::to_integer<std::uint16_t>(p[0]) | (std::to_integer<std::uint16_t>(p[1]) << 8U);
-}
-
-std::uint32_t ReadU32LE(const std::byte* p)
-{
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
-}
-
-std::int32_t ReadI32LE(const std::byte* p) { return std::bit_cast<std::int32_t>(ReadU32LE(p)); }
-
-}  // namespace
 
 TEST(BamRecord, DefaultConstruction)
 {

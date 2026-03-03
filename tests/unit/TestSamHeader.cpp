@@ -3,6 +3,7 @@
 #include <pbsamoa/core/SamHeader.hpp>
 
 #include <pbsamoa/core/Bgzf.hpp>
+#include <pbsamoa/core/Endian.hpp>
 
 #include <gtest/gtest.h>
 
@@ -517,13 +518,6 @@ void AppendU32LE(std::vector<std::byte>& data, std::uint32_t value)
 void AppendI32LE(std::vector<std::byte>& data, std::int32_t value)
 {
     AppendU32LE(data, static_cast<std::uint32_t>(value));
-}
-
-std::uint32_t ReadU32LE(const std::byte* p)
-{
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
 }
 
 /// \brief Build a minimal BAM header block in memory.
