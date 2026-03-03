@@ -9,6 +9,33 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace {
+
+void TrimBack(std::vector<PacBio::Samoa::CigarOp>& ops, std::int32_t count)
+{
+    while (!std::empty(ops) && (count > 0)) {
+        const PacBio::Samoa::CigarOp op{ops.back()};
+        const PacBio::Samoa::CigarOpType type{op.Type()};
+        const std::uint32_t len{op.Length()};
+
+        if (!ConsumesQuery(type)) {
+            ops.pop_back();
+            continue;
+        }
+
+        if (len <= static_cast<std::uint32_t>(count)) {
+            count -= static_cast<std::int32_t>(len);
+            ops.pop_back();
+        } else {
+            const std::uint32_t shrunk{len - static_cast<std::uint32_t>(count)};
+            ops.back() = PacBio::Samoa::CigarOp{type, shrunk};
+            count = 0;
+        }
+    }
+}
+
+}  // namespace
+
 namespace PacBio {
 namespace Samoa {
 
@@ -73,26 +100,7 @@ ClipResult ClipCigarToQuery(std::span<const CigarOp> cigar, std::int32_t querySt
             }
 
             // --- Back trim ---
-            std::int32_t back{backRemove};
-            while (!std::empty(result) && (back > 0)) {
-                const CigarOp backOp{result.back()};
-                const CigarOpType backType{backOp.Type()};
-                const std::uint32_t backLen{backOp.Length()};
-
-                if (!ConsumesQuery(backType)) {
-                    result.pop_back();
-                    continue;
-                }
-
-                if (backLen <= static_cast<std::uint32_t>(back)) {
-                    back -= static_cast<std::int32_t>(backLen);
-                    result.pop_back();
-                } else {
-                    const std::uint32_t shrunk{backLen - static_cast<std::uint32_t>(back)};
-                    result.back() = CigarOp{backType, shrunk};
-                    back = 0;
-                }
-            }
+            TrimBack(result, backRemove);
 
             return ClipResult{
                 std::move(result),
@@ -112,26 +120,7 @@ ClipResult ClipCigarToQuery(std::span<const CigarOp> cigar, std::int32_t querySt
     }
 
     // --- Back trim ---
-    std::int32_t back{backRemove};
-    while (!std::empty(result) && (back > 0)) {
-        const CigarOp backOp{result.back()};
-        const CigarOpType backType{backOp.Type()};
-        const std::uint32_t backLen{backOp.Length()};
-
-        if (!ConsumesQuery(backType)) {
-            result.pop_back();
-            continue;
-        }
-
-        if (backLen <= static_cast<std::uint32_t>(back)) {
-            back -= static_cast<std::int32_t>(backLen);
-            result.pop_back();
-        } else {
-            const std::uint32_t shrunk{backLen - static_cast<std::uint32_t>(back)};
-            result.back() = CigarOp{backType, shrunk};
-            back = 0;
-        }
-    }
+    TrimBack(result, backRemove);
 
     return ClipResult{
         std::move(result),
