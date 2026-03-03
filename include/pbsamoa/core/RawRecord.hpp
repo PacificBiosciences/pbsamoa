@@ -100,7 +100,7 @@ private:
 // --- inline implementations ---
 
 inline RawRecord::RawRecord(std::span<const std::byte> data)
-    : data_{std::ranges::begin(data), std::ranges::end(data)}
+    : data_{data.begin(), data.end()}
 {
     // Validate minimum size for fixed fields (32 bytes)
     if (std::size(data_) < 32) {
@@ -243,7 +243,7 @@ inline BamRecord RawRecord::ToOwned() const
         .RefId(RefId())
         .Pos(Pos())
         .MapQ(MapQ())
-        .Cigar(std::vector<CigarOp>{std::ranges::begin(CigarOps()), std::ranges::end(CigarOps())})
+        .Cigar(std::vector<CigarOp>{CigarOps().begin(), CigarOps().end()})
         .NextRefId(NextRefId())
         .NextPos(NextPos())
         .Tlen(Tlen())
@@ -254,7 +254,7 @@ inline BamRecord RawRecord::ToOwned() const
     if (!std::ranges::all_of(qualities, [](std::uint8_t q) { return q == 0xFF; }) &&
         (SeqLength() > 0)) {
         record.Qualities(
-            std::vector<std::uint8_t>{std::ranges::begin(qualities), std::ranges::end(qualities)});
+            std::vector<std::uint8_t>{qualities.begin(), qualities.end()});
     }
 
     record.Tags(ParseTags());

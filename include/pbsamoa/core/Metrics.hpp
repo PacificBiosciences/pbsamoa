@@ -7,6 +7,17 @@
 namespace PacBio {
 namespace Samoa {
 
+/// \brief Snapshot of ThreadPool metrics (forwarded from ThreadPool::Metrics).
+struct PoolMetrics
+{
+    std::size_t QueueDepth{0};           ///< current work queue depth
+    std::size_t PeakQueueDepth{0};       ///< max work queue depth observed
+    std::size_t ActiveWorkers{0};        ///< currently executing tasks
+    std::size_t PeakActiveWorkers{0};    ///< max concurrent active workers observed
+    std::size_t ResultQueueDepth{0};     ///< pending results for consumer thread
+    std::size_t PeakResultQueueDepth{0};
+};
+
 /// \brief Snapshot of BGZF pipeline metrics (IO + decompression + output
 /// queue).
 ///
@@ -19,13 +30,8 @@ struct BgzfMetrics
     std::uint64_t BlocksRead{0};         ///< BGZF blocks submitted to pool
     std::uint64_t BytesDecompressed{0};  ///< decompressed bytes produced
 
-    // --- Decompression pool (forwarded from ThreadPool::Metrics) ---
-    std::size_t PoolQueueDepth{0};         ///< current work queue depth
-    std::size_t PoolPeakQueueDepth{0};     ///< max work queue depth observed
-    std::size_t PoolActiveWorkers{0};      ///< currently executing decompression tasks
-    std::size_t PoolPeakActiveWorkers{0};  ///< max concurrent active workers observed
-    std::size_t PoolResultQueueDepth{0};   ///< pending results for consumer thread
-    std::size_t PoolPeakResultQueueDepth{0};
+    // --- Decompression pool ---
+    PoolMetrics Pool;
 
     // --- Pipeline output SPSC queue ---
     std::uint64_t RecordsProduced{0};  ///< records pushed by consumer thread
@@ -46,11 +52,8 @@ struct BgzfMetrics
 /// \brief Snapshot of BAM record decode metrics (BamRecordReader layer).
 struct DecodeMetrics
 {
-    // --- Decode pool (forwarded from ThreadPool::Metrics) ---
-    std::size_t PoolQueueDepth{0};
-    std::size_t PoolPeakQueueDepth{0};
-    std::size_t PoolActiveWorkers{0};
-    std::size_t PoolPeakActiveWorkers{0};
+    // --- Decode pool ---
+    PoolMetrics Pool;
 
     // --- Throughput ---
     std::uint64_t BatchesDecoded{0};
@@ -97,13 +100,8 @@ struct BgzfWriteMetrics
     std::uint64_t IoWriteNs{0};   ///< cumulative file write time
     std::uint64_t CallbackNs{0};  ///< cumulative callback dispatch time
 
-    // --- Compression pool metrics ---
-    std::size_t PoolQueueDepth{0};
-    std::size_t PoolPeakQueueDepth{0};
-    std::size_t PoolActiveWorkers{0};
-    std::size_t PoolPeakActiveWorkers{0};
-    std::size_t PoolResultQueueDepth{0};
-    std::size_t PoolPeakResultQueueDepth{0};
+    // --- Compression pool ---
+    PoolMetrics Pool;
 };
 
 /// \brief Composite writer metrics returned by BamWriter::GetMetrics().

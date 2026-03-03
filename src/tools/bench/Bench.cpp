@@ -112,8 +112,8 @@ void PrintBgzfMetrics(const BgzfMetrics& m)
                  mbDecomp, m.BlocksRead);
     std::println("    timing: io {:.1f}ms, decomp {:.1f}ms, parse {:.1f}ms", ioMs, decompMs,
                  parseMs);
-    std::println("    pool peak: queue {}, workers {}, results {}", m.PoolPeakQueueDepth,
-                 m.PoolPeakActiveWorkers, m.PoolPeakResultQueueDepth);
+    std::println("    pool peak: queue {}, workers {}, results {}", m.Pool.PeakQueueDepth,
+                 m.Pool.PeakActiveWorkers, m.Pool.PeakResultQueueDepth);
     std::println("    stalls: io={}, consumer={}, reader={}", m.IoStalls, m.ConsumerStalls,
                  m.ReaderStalls);
 }
@@ -125,8 +125,8 @@ void PrintDecodeMetrics(const DecodeMetrics& m)
 
     std::println("    decode: {} batches, {} records", m.BatchesDecoded, m.RecordsDecoded);
     std::println("    timing: decode {:.1f}ms, batch_read {:.1f}ms", decodeMs, batchReadMs);
-    std::println("    pool peak: queue {}, workers {}", m.PoolPeakQueueDepth,
-                 m.PoolPeakActiveWorkers);
+    std::println("    pool peak: queue {}, workers {}", m.Pool.PeakQueueDepth,
+                 m.Pool.PeakActiveWorkers);
     std::println("    stalls: producer={}, consumer={}", m.ProducerStalls, m.ConsumerStalls);
 }
 

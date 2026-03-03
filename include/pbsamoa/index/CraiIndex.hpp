@@ -42,7 +42,6 @@ public:
 private:
     void AddEntry(CraiEntry entry);
 
-private:
     std::vector<CraiEntry> entries_;
     std::unordered_map<std::int32_t, std::vector<std::size_t>> referenceEntries_;
 };

@@ -297,10 +297,10 @@ ReaderMetrics BamRecordReader::GetMetrics() const
     // Decode layer metrics
     if (impl_->pool_) {
         const auto poolSnap{impl_->pool_->GetMetrics()};
-        m.Decode.PoolQueueDepth = poolSnap.CurrentQueueDepth;
-        m.Decode.PoolPeakQueueDepth = poolSnap.PeakQueueDepth;
-        m.Decode.PoolActiveWorkers = poolSnap.CurrentActiveTasks;
-        m.Decode.PoolPeakActiveWorkers = poolSnap.PeakActiveTasks;
+        m.Decode.Pool.QueueDepth = poolSnap.CurrentQueueDepth;
+        m.Decode.Pool.PeakQueueDepth = poolSnap.PeakQueueDepth;
+        m.Decode.Pool.ActiveWorkers = poolSnap.CurrentActiveTasks;
+        m.Decode.Pool.PeakActiveWorkers = poolSnap.PeakActiveTasks;
     }
 
     m.Decode.BatchesDecoded = impl_->counters_.batchesDecoded.load(std::memory_order_relaxed);
