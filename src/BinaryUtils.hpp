@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <concepts>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -19,13 +20,19 @@
 namespace PacBio {
 namespace Samoa {
 
+/// \brief Write a little-endian integral value to raw bytes (unaligned-safe).
+template <std::integral T>
+inline void WriteLE(std::byte* dst, T value)
+{
+    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&value), sizeof(value), dst);
+}
+
 /// \brief Write a little-endian int32 to a byte vector.
 inline void WriteI32LE(std::vector<std::byte>& out, std::int32_t value)
 {
     const auto pos = std::size(out);
     out.resize(pos + sizeof(value));
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&value), sizeof(value),
-                        out.data() + pos);
+    WriteLE(out.data() + pos, value);
 }
 
 /// \brief Write a little-endian uint32 to a byte vector.
@@ -33,8 +40,7 @@ inline void WriteU32LE(std::vector<std::byte>& out, std::uint32_t value)
 {
     const auto pos = std::size(out);
     out.resize(pos + sizeof(value));
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(&value), sizeof(value),
-                        out.data() + pos);
+    WriteLE(out.data() + pos, value);
 }
 
 inline constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
