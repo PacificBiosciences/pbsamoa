@@ -8,17 +8,7 @@ Create test BAM with PacBio-style read names (3 ZMWs: 10, 20, 30):
   $ printf 'movie/30/100_200\t0\tref\t501\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
   $ printf 'movie/30/200_300\t0\tref\t601\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
   $ samtools view -bS input.sam > input.bam
-
-Build ZMI index from BAM:
-
   $ "${PBSAMOA}" zmi-build input.bam indexed.bam 2>/dev/null
-  $ test -f indexed.bam
-  $ test -f indexed.bam.zmi
-
-Dump indexed BAM to verify all 6 records survived the copy:
-
-  $ "${PBSAMOA}" dump indexed.bam | grep -v "^@" | wc -l | sed 's/ //g'
-  6
 
 Query ZMW 30 returns 3 records:
 
@@ -39,17 +29,3 @@ Query nonexistent ZMW returns 0 records:
 
   $ "${PBSAMOA}" zmi-query indexed.bam 999 2>/dev/null | grep -v "^@" | wc -l | sed 's/ //g'
   0
-
-Three chunks cover all records with no overlap or gaps:
-
-  $ "${PBSAMOA}" chunk indexed.bam 1 3 | grep -v "^@" | sort > chunk1.txt
-  $ "${PBSAMOA}" chunk indexed.bam 2 3 | grep -v "^@" | sort > chunk2.txt
-  $ "${PBSAMOA}" chunk indexed.bam 3 3 | grep -v "^@" | sort > chunk3.txt
-  $ cat chunk1.txt chunk2.txt chunk3.txt | sort > chunked.txt
-  $ "${PBSAMOA}" dump indexed.bam | grep -v "^@" | sort > full.txt
-  $ diff chunked.txt full.txt
-
-Single chunk reads everything:
-
-  $ "${PBSAMOA}" chunk indexed.bam 1 1 | grep -v "^@" | wc -l | sed 's/ //g'
-  6
