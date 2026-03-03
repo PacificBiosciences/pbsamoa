@@ -16,6 +16,54 @@ namespace Samoa {
 // ITF-8 / LTF-8 variable-length integer encoding
 // ---------------------------------------------------------------------------
 
+/// \brief Number of bytes in an ITF-8 encoding given the first byte.
+inline constexpr std::size_t Itf8EncodedLength(std::uint8_t b0)
+{
+    if ((b0 & 0x80) == 0) {
+        return 1;
+    }
+    if ((b0 & 0xC0) == 0x80) {
+        return 2;
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        return 3;
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        return 4;
+    }
+    return 5;
+}
+
+/// \brief Number of bytes in an LTF-8 encoding given the first byte.
+inline constexpr std::size_t Ltf8EncodedLength(std::uint8_t b0)
+{
+    if ((b0 & 0x80) == 0) {
+        return 1;
+    }
+    if ((b0 & 0xC0) == 0x80) {
+        return 2;
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        return 3;
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        return 4;
+    }
+    if ((b0 & 0xF8) == 0xF0) {
+        return 5;
+    }
+    if ((b0 & 0xFC) == 0xF8) {
+        return 6;
+    }
+    if ((b0 & 0xFE) == 0xFC) {
+        return 7;
+    }
+    if (b0 == 0xFE) {
+        return 8;
+    }
+    return 9;
+}
+
 /// \brief Read an ITF-8 encoded integer from a byte span.
 /// \param[in] data input bytes
 /// \param[out] bytesRead number of bytes consumed

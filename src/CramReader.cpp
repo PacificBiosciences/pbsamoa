@@ -42,52 +42,6 @@ struct DecodedFeature
     std::vector<std::byte> Data;
 };
 
-std::size_t Itf8EncodedLength(std::uint8_t b0)
-{
-    if ((b0 & 0x80) == 0) {
-        return 1;
-    }
-    if ((b0 & 0xC0) == 0x80) {
-        return 2;
-    }
-    if ((b0 & 0xE0) == 0xC0) {
-        return 3;
-    }
-    if ((b0 & 0xF0) == 0xE0) {
-        return 4;
-    }
-    return 5;
-}
-
-std::size_t Ltf8EncodedLength(std::uint8_t b0)
-{
-    if ((b0 & 0x80) == 0) {
-        return 1;
-    }
-    if ((b0 & 0xC0) == 0x80) {
-        return 2;
-    }
-    if ((b0 & 0xE0) == 0xC0) {
-        return 3;
-    }
-    if ((b0 & 0xF0) == 0xE0) {
-        return 4;
-    }
-    if ((b0 & 0xF8) == 0xF0) {
-        return 5;
-    }
-    if ((b0 & 0xFC) == 0xF8) {
-        return 6;
-    }
-    if ((b0 & 0xFE) == 0xFC) {
-        return 7;
-    }
-    if (b0 == 0xFE) {
-        return 8;
-    }
-    return 9;
-}
-
 std::vector<std::vector<TagTriple>> ParseTagDictionary(std::span<const std::byte> dictionaryBytes)
 {
     std::vector<std::vector<TagTriple>> dictionary;
@@ -442,7 +396,20 @@ void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenc
     }
 }
 
-std::unordered_map<std::string, std::string> LoadFastaSequences(const std::filesystem::path& path)
+struct TransparentStringHash
+{
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view sv) const noexcept
+    {
+        return std::hash<std::string_view>{}(sv);
+    }
+};
+
+using TransparentStringMap =
+    std::unordered_map<std::string, std::string, TransparentStringHash, std::equal_to<>>;
+
+TransparentStringMap LoadFastaSequences(const std::filesystem::path& path)
 {
     std::ifstream in{path};
     if (!in) {
@@ -450,7 +417,7 @@ std::unordered_map<std::string, std::string> LoadFastaSequences(const std::files
             std::format("CramReader: cannot open reference FASTA {}", path.string())};
     }
 
-    std::unordered_map<std::string, std::string> references;
+    TransparentStringMap references;
     std::string currentName;
     std::string line;
     while (std::getline(in, line)) {
@@ -695,7 +662,7 @@ struct CramReader::Impl
 
         for (std::size_t i = 0; i < std::size(header.ReferenceSequences()); ++i) {
             const auto& sq = header.ReferenceSequences()[i];
-            auto it = referencesByName.find(std::string{sq.Name()});
+            auto it = referencesByName.find(sq.Name());
             if (it != std::end(referencesByName)) {
                 externalReferenceById[i] = std::move(it->second);
             }
