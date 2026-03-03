@@ -76,14 +76,8 @@ std::size_t CheckedAdd(std::size_t lhs, std::size_t rhs, std::string_view what)
     return lhs + rhs;
 }
 
-}  // namespace
-
-ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
+std::vector<std::byte> ReadAllBgzfData(BgzfReader& reader)
 {
-    BgzfReader reader{path};
-
-    // Read all decompressed data into a single buffer.
-    // BGZF blocks decompress to at most 65536 bytes each.
     std::vector<std::byte> data;
     std::array<std::byte, BGZF_MAX_BLOCK_SIZE> blockBuf{};
 
@@ -95,6 +89,16 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
         data.insert(std::ranges::end(data), std::ranges::begin(blockBuf),
                     std::ranges::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
     }
+
+    return data;
+}
+
+}  // namespace
+
+ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
+{
+    BgzfReader reader{path};
+    std::vector<std::byte> data{ReadAllBgzfData(reader)};
 
     // Validate minimum size for header
     if (std::size(data) < detail::ZMI_HEADER_SIZE) {
@@ -148,19 +152,7 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
 ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
 {
     BgzfReader reader{path};
-
-    // Read all decompressed data into a single buffer.
-    std::vector<std::byte> data;
-    std::array<std::byte, BGZF_MAX_BLOCK_SIZE> blockBuf{};
-
-    while (true) {
-        const std::optional<std::size_t> bytesRead{reader.ReadBlock(blockBuf)};
-        if (!bytesRead.has_value() || (*bytesRead == 0)) {
-            break;
-        }
-        data.insert(std::ranges::end(data), std::ranges::begin(blockBuf),
-                    std::ranges::begin(blockBuf) + static_cast<std::ptrdiff_t>(*bytesRead));
-    }
+    std::vector<std::byte> data{ReadAllBgzfData(reader)};
 
     // Validate minimum size for header
     if (std::size(data) < PBI_HEADER_SIZE) {
