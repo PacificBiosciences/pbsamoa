@@ -34,7 +34,7 @@ BamRecord DecodeView(const RawRecord& view,
 {
     return std::visit(
         [&](const auto& filter) -> BamRecord {
-            using T = std::remove_cvref_t<decltype(filter)>;
+            using T = std::decay_t<decltype(filter)>;
             if constexpr (std::is_same_v<T, std::monostate>) {
                 return view.ToOwned();
             } else {
@@ -100,17 +100,6 @@ struct BamRecordReader::Impl
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
 
-    /// \brief Acquire-release the mutex so the consumer sees all prior writes,
-    ///        then wake one waiter. The lock scope is intentionally empty: the
-    ///        unlock acts as a release fence pairing with the consumer's acquire.
-    void SignalConsumer()
-    {
-        {
-            const std::lock_guard lock{readyMutex_};
-        }
-        readyCv_.notify_one();
-    }
-
     void ProducerLoop(std::stop_token stopToken)
     {
         try {
@@ -129,7 +118,7 @@ struct BamRecordReader::Impl
                     break;
                 }
 
-                const std::int32_t n{static_cast<std::int32_t>(batch->RecordCount())};
+                const std::int32_t n = batch->RecordCount();
                 std::vector<BamRecord> owned(n);
 
                 // Time the parallel decode
@@ -163,7 +152,12 @@ struct BamRecordReader::Impl
                         std::this_thread::yield();
                     }
                     counters_.recordsProduced.fetch_add(1, std::memory_order_relaxed);
-                    SignalConsumer();
+                    {
+                        // Memory fence: lock/unlock ensures the queue write is
+                        // visible to the consumer before notify_one().
+                        const std::lock_guard lock{readyMutex_};
+                    }
+                    readyCv_.notify_one();
                 }
             }
 
@@ -175,7 +169,11 @@ struct BamRecordReader::Impl
                 }
                 std::this_thread::yield();
             }
-            SignalConsumer();
+            {
+                // Memory fence: see above.
+                const std::lock_guard lock{readyMutex_};
+            }
+            readyCv_.notify_one();
         } catch (...) {
             // Error sentinel
             done_.store(true, std::memory_order_release);
@@ -185,7 +183,11 @@ struct BamRecordReader::Impl
                 }
                 std::this_thread::yield();
             }
-            SignalConsumer();
+            {
+                // Memory fence: see above.
+                const std::lock_guard lock{readyMutex_};
+            }
+            readyCv_.notify_one();
         }
     }
 };
