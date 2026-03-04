@@ -33,8 +33,6 @@
 namespace PacBio {
 namespace Samoa {
 
-namespace {
-
 struct EncodedTagPayload
 {
     std::int32_t ContentId{};
@@ -49,6 +47,8 @@ struct RecordTagData
     std::vector<TagTriple> TagSet;
     std::vector<EncodedTagPayload> Payloads;
 };
+
+namespace {
 
 RecordTagData BuildRecordTagData(const BamRecord& record)
 {
