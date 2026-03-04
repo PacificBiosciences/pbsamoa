@@ -200,7 +200,8 @@ ReaderMetrics m = reader.GetMetrics();
 #include <pbsamoa/io/CramReader.hpp>
 ```
 
-Reads CRAM v3.x files and yields owned `BamRecord` objects.
+Reads CRAM v3.x files and yields owned `BamRecord` objects, with optional
+`RawRecord` accessors for BAM-layout output.
 
 ### Construction
 
@@ -220,7 +221,7 @@ CramReader reader{"input.cram", CramReaderConfig{
 | Field | Default | Description |
 | ----- | ------- | ----------- |
 | `ReferencePath` | `{}` | Optional FASTA path for reference-based slices |
-| `DecompressionWorkers` | `0` | CRAM block decompression threads (`0` = synchronous) |
+| `DecompressionWorkers` | `0` | CRAM block decompression workers for slice data blocks (`0` = synchronous) |
 
 ### Header access
 
@@ -236,11 +237,27 @@ while (auto record = reader.ReadRecord()) {
 }
 ```
 
+### Single-record reading as RawRecord
+
+```cpp
+while (auto raw = reader.ReadRawRecord()) {
+    // raw is an owning RawRecord (BAM binary layout)
+}
+```
+
 ### Range iteration
 
 ```cpp
 for (const auto& record : reader.Records()) {
     // process record
+}
+```
+
+### Range iteration as RawRecord
+
+```cpp
+for (const auto& raw : reader.RawRecords()) {
+    // process raw BAM-layout records
 }
 ```
 
@@ -252,6 +269,7 @@ for (const auto& record : reader.Records()) {
 const CraiIndex index = CraiIndex::FromFile("input.cram.crai");
 const std::int32_t refId = reader.Header().ReferenceId("chr1");
 const auto records = reader.Query(index, refId, 1000, 2000);  // [beg,end), 0-based
+const auto rawRecords = reader.QueryRaw(index, refId, 1000, 2000);
 ```
 
 Use `refId = -1` for unmapped query rows.
@@ -276,6 +294,9 @@ CramWriter writer{"output.cram", header};
 CramWriter writer{"output.cram", header, CramWriterConfig{
     .BlockCompressionMethod = CramBlockMethod::RANS4X8,
     .RecordsPerSlice = 10000,
+    .SlicesPerContainer = 8,
+    .CompressionLevel = 1,  // gzip levels: [0, 12]
+    .UseTempFile = true,
     .WriteCrai = true,
     .CompressionWorkers = 4,
 }};
@@ -288,11 +309,27 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `BlockCompressionMethod` | `CramBlockMethod` | `GZIP` | Default block method |
 | `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}` | Per-data-series method overrides |
 | `RecordsPerSlice` | `int32_t` | `10000` | Max records per slice |
+| `SlicesPerContainer` | `int32_t` | `1` | Max slices per container (`<= 0` means unlimited until `Close()`) |
 | `MajorVersion` | `uint8_t` | `3` | CRAM major version (`3` only) |
 | `MinorVersion` | `uint8_t` | `0` | CRAM minor version (`0` or `1`) |
 | `WriteCrai` | `bool` | `false` | Write `<output>.crai` sidecar |
 | `CraiPath` | `optional<path>` | `{}` | CRAI output path override |
 | `CompressionWorkers` | `size_t` | `0` | CRAM block compression threads (`0` = synchronous) |
+| `CompressionLevel` | `optional<int>` | `{}` | Optional gzip compression level (`[0,12]`) |
+| `UseTempFile` | `bool` | `false` | Write to a temporary path and rename atomically on `Close()` |
+
+Notes:
+- `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
+- `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
+
+### Containerization and CRAI behavior
+
+- Records are buffered into slices of up to `RecordsPerSlice`.
+- Slices are buffered into containers of up to `SlicesPerContainer`.
+- With `SlicesPerContainer <= 0`, containers are flushed only at `Close()`.
+- With `WriteCrai = true`, CRAI rows are emitted per serialized slice offset.
+- Mixed-reference slices (`RefSeqId == -2`) emit one CRAI row per referenced sequence,
+  plus one unmapped row if unmapped records are present.
 
 ### Writing records
 
@@ -305,6 +342,22 @@ writer.Write(rawRecord);
 writer.WriteBatch(rawBatch);
 writer.Close();
 ```
+
+### Low-level CRAM container/slice APIs
+
+```cpp
+#include <pbsamoa/cram/CramStructs.hpp>
+```
+
+Use these when working directly with serialized CRAM container payloads:
+
+- `CramSlice` and `CramContainer` aggregate parsed wire-format pieces.
+- `SerializeSlice(slice)` and `SerializedSliceSize(slice)` for slice-level output/size accounting.
+- `SerializeContainer(container)` for complete container bytes (header + payload).
+- `ParseContainer(header, payload)` to parse a full payload into slices.
+
+`ParseContainer` parses and decompresses compression/slice headers, while
+core/external slice data blocks remain in their on-disk compressed form.
 
 ---
 

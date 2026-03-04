@@ -149,6 +149,12 @@ void ApplyDecodedTag(BamRecord& record, TagKey key, char type, std::span<const s
     record.MutableTags().Set(key, DecodeTagValueFromBamPayload(type, payload));
 }
 
+RawRecord ToRawRecord(const BamRecord& record)
+{
+    const std::vector<std::byte> bytes = record.SerializeToBam();
+    return RawRecord{std::span<const std::byte>{bytes}};
+}
+
 template <typename T>
 void AppendLittleEndian(std::vector<std::byte>& payload, T value)
 {
@@ -870,18 +876,8 @@ struct CramReader::Impl
             return decodedRecords;
         }
 
-        std::size_t pos = 0;
-        std::size_t blocksParsed = 0;
-        std::size_t blockBytesRead = 0;
-
-        auto compHdrBlock = ParseBlock(blockData, blockBytesRead);
-        pos += blockBytesRead;
-        ++blocksParsed;
-        if (compHdrBlock.ContentType != CramBlockContentType::COMPRESSION_HEADER) {
-            throw std::runtime_error("CramReader: first container block is not COMPRESSION_HEADER");
-        }
-        DecompressCramBlock(compHdrBlock, gzipContext.Decompressor.get());
-        const auto compressionHeader = ParseCompressionHeader(compHdrBlock.Data);
+        const auto container = ParseContainer(containerHeader, blockData);
+        const auto& compressionHeader = container.CompressionHeader;
         const auto substitutionMatrix =
             BuildSubstitutionMatrixLookup(compressionHeader.PreservationMap.SubstitutionMatrix);
 
@@ -908,57 +904,60 @@ struct CramReader::Impl
         }
         std::ranges::sort(flatTagCodecs, {}, &std::pair<std::int32_t, CramCodec*>::first);
 
-        std::vector<std::int32_t> observedLandmarks;
+        std::int64_t nextComputedSliceOffset = 0;
+        if (std::empty(containerHeader.Landmarks)) {
+            const auto compHdrData = SerializeCompressionHeader(container.CompressionHeader);
+            CramBlock compHdrBlock;
+            compHdrBlock.Method = CramBlockMethod::RAW;
+            compHdrBlock.ContentType = CramBlockContentType::COMPRESSION_HEADER;
+            compHdrBlock.ContentId = 0;
+            compHdrBlock.RawSize = static_cast<std::int32_t>(std::size(compHdrData));
+            compHdrBlock.CompressedSize = compHdrBlock.RawSize;
+            compHdrBlock.Data = compHdrData;
+            nextComputedSliceOffset =
+                static_cast<std::int64_t>(std::size(SerializeBlock(compHdrBlock)));
+        }
 
-        while (blocksParsed < static_cast<std::size_t>(containerHeader.NumBlocks)) {
-            if (pos >= std::size(blockData)) {
-                throw std::runtime_error("CramReader: container ended before declared block count");
+        for (std::size_t sliceIndex = 0; sliceIndex < std::size(container.Slices); ++sliceIndex) {
+            const auto& slice = container.Slices[sliceIndex];
+            const auto& sliceHeader = slice.Header;
+            if (sliceHeader.NumRecords < 0) {
+                throw std::runtime_error("CramReader: negative slice record count");
             }
 
-            const std::int64_t sliceOffset = pos;
-            observedLandmarks.push_back(static_cast<std::int32_t>(pos));
+            std::int64_t sliceOffset = nextComputedSliceOffset;
+            std::int64_t sliceSize = static_cast<std::int64_t>(SerializedSliceSize(slice));
+            if (!std::empty(containerHeader.Landmarks)) {
+                sliceOffset = containerHeader.Landmarks.at(sliceIndex);
+                const auto nextLandmark =
+                    (sliceIndex + 1 < std::size(containerHeader.Landmarks))
+                        ? static_cast<std::int64_t>(containerHeader.Landmarks.at(sliceIndex + 1))
+                        : static_cast<std::int64_t>(containerHeader.Length);
+                sliceSize = nextLandmark - sliceOffset;
+            }
+            if (sliceSize <= 0) {
+                throw std::runtime_error("CramReader: non-positive slice size");
+            }
+            nextComputedSliceOffset = sliceOffset + sliceSize;
 
-            auto sliceHdrBlock =
-                ParseBlock(std::span<const std::byte>{blockData}.subspan(pos), blockBytesRead);
-            pos += blockBytesRead;
-            ++blocksParsed;
-
-            if (sliceHdrBlock.ContentType != CramBlockContentType::SLICE_HEADER) {
-                throw std::runtime_error("CramReader: expected SLICE_HEADER block");
+            const bool shouldDecodeSlice =
+                !targetSlice.has_value() ||
+                ((targetSlice->SliceOffset == sliceOffset) &&
+                 ((targetSlice->SliceSize <= 0) || (targetSlice->SliceSize == sliceSize)));
+            if (!shouldDecodeSlice) {
+                continue;
             }
 
-            DecompressCramBlock(sliceHdrBlock, gzipContext.Decompressor.get());
-            const auto sliceHeader = ParseSliceHeader(sliceHdrBlock.Data);
-
-            if (sliceHeader.NumBlocks < 0) {
-                throw std::runtime_error("CramReader: negative slice block count");
-            }
-            if (blocksParsed + static_cast<std::size_t>(sliceHeader.NumBlocks) >
-                static_cast<std::size_t>(containerHeader.NumBlocks)) {
-                throw std::runtime_error(
-                    "CramReader: slice declares more blocks than "
-                    "available in container");
-            }
+            std::vector<CramBlock> sliceBlocks;
+            sliceBlocks.reserve(1 + std::size(slice.ExternalBlocks));
+            sliceBlocks.push_back(slice.CoreBlock);
+            sliceBlocks.insert(std::end(sliceBlocks), std::begin(slice.ExternalBlocks),
+                               std::end(slice.ExternalBlocks));
+            DecompressBlocks(sliceBlocks);
 
             CramBlock coreBlock;
             bool sawCoreBlock = false;
             CramExternalBlockStore extStore;
-            std::vector<CramBlock> sliceBlocks;
-            sliceBlocks.reserve(static_cast<std::size_t>(sliceHeader.NumBlocks));
-
-            for (std::int32_t bi = 0; bi < sliceHeader.NumBlocks; ++bi) {
-                if (pos >= std::size(blockData)) {
-                    throw std::runtime_error("CramReader: truncated slice block list");
-                }
-                auto block =
-                    ParseBlock(std::span<const std::byte>{blockData}.subspan(pos), blockBytesRead);
-                pos += blockBytesRead;
-                ++blocksParsed;
-                sliceBlocks.push_back(std::move(block));
-            }
-
-            DecompressBlocks(sliceBlocks);
-
             for (auto& block : sliceBlocks) {
                 if (block.ContentType == CramBlockContentType::CORE_DATA) {
                     if (sawCoreBlock) {
@@ -968,20 +967,12 @@ struct CramReader::Impl
                     sawCoreBlock = true;
                 } else if (block.ContentType == CramBlockContentType::EXTERNAL_DATA) {
                     extStore.AddBlock(block.ContentId, block.Data);
+                } else {
+                    throw std::runtime_error("CramReader: unexpected block type in slice payload");
                 }
             }
-
             if (!sawCoreBlock) {
                 throw std::runtime_error("CramReader: slice missing CORE_DATA block");
-            }
-
-            const std::int64_t sliceSize = pos - sliceOffset;
-            const bool shouldDecodeSlice =
-                !targetSlice.has_value() ||
-                ((targetSlice->SliceOffset == sliceOffset) &&
-                 ((targetSlice->SliceSize <= 0) || (targetSlice->SliceSize == sliceSize)));
-            if (!shouldDecodeSlice) {
-                continue;
             }
 
             std::span<const std::byte> embeddedReference{};
@@ -1028,21 +1019,6 @@ struct CramReader::Impl
             decodedRecords.insert(std::end(decodedRecords),
                                   std::make_move_iterator(std::begin(sliceRecords)),
                                   std::make_move_iterator(std::end(sliceRecords)));
-        }
-
-        if (blocksParsed != static_cast<std::size_t>(containerHeader.NumBlocks)) {
-            throw std::runtime_error("CramReader: block count mismatch");
-        }
-
-        if (!std::empty(containerHeader.Landmarks)) {
-            if (std::size(containerHeader.Landmarks) != std::size(observedLandmarks)) {
-                throw std::runtime_error("CramReader: landmark count mismatch");
-            }
-            for (std::size_t i = 0; i < std::size(observedLandmarks); ++i) {
-                if (containerHeader.Landmarks[i] != observedLandmarks[i]) {
-                    throw std::runtime_error("CramReader: landmark offset mismatch");
-                }
-            }
         }
 
         return decodedRecords;
@@ -1674,6 +1650,15 @@ std::optional<BamRecord> CramReader::ReadRecord()
     return std::nullopt;
 }
 
+std::optional<RawRecord> CramReader::ReadRawRecord()
+{
+    auto record = ReadRecord();
+    if (!record.has_value()) {
+        return std::nullopt;
+    }
+    return ToRawRecord(*record);
+}
+
 std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t refId,
                                          std::int32_t beg, std::int32_t end)
 {
@@ -1702,6 +1687,18 @@ std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t re
     }
 
     return queriedRecords;
+}
+
+std::vector<RawRecord> CramReader::QueryRaw(const CraiIndex& index, std::int32_t refId,
+                                            std::int32_t beg, std::int32_t end)
+{
+    const std::vector<BamRecord> records = Query(index, refId, beg, end);
+    std::vector<RawRecord> rawRecords;
+    rawRecords.reserve(std::size(records));
+    for (const BamRecord& record : records) {
+        rawRecords.push_back(ToRawRecord(record));
+    }
+    return rawRecords;
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,6 +1741,51 @@ CramReader::RecordRange::Iterator& CramReader::RecordRange::Iterator::operator++
 void CramReader::RecordRange::Iterator::operator++(int) { ++(*this); }
 
 bool CramReader::RecordRange::Iterator::operator==(const Iterator& other) const
+{
+    return reader_ == other.reader_;
+}
+
+// ---------------------------------------------------------------------------
+// RawRecordRange
+// ---------------------------------------------------------------------------
+
+CramReader::RawRecordRange::RawRecordRange(CramReader* reader) : reader_{reader} {}
+
+CramReader::RawRecordRange::Iterator CramReader::RawRecordRange::begin()
+{
+    return Iterator{reader_};
+}
+
+CramReader::RawRecordRange::Iterator CramReader::RawRecordRange::end() { return Iterator{}; }
+
+CramReader::RawRecordRange CramReader::RawRecords() { return RawRecordRange{this}; }
+
+CramReader::RawRecordRange::Iterator::Iterator() = default;
+
+CramReader::RawRecordRange::Iterator::Iterator(CramReader* reader) : reader_{reader}
+{
+    current_ = reader_->ReadRawRecord();
+    if (!current_) {
+        reader_ = nullptr;
+    }
+}
+
+const RawRecord& CramReader::RawRecordRange::Iterator::operator*() const { return *current_; }
+
+const RawRecord* CramReader::RawRecordRange::Iterator::operator->() const { return &*current_; }
+
+CramReader::RawRecordRange::Iterator& CramReader::RawRecordRange::Iterator::operator++()
+{
+    current_ = reader_->ReadRawRecord();
+    if (!current_) {
+        reader_ = nullptr;
+    }
+    return *this;
+}
+
+void CramReader::RawRecordRange::Iterator::operator++(int) { ++(*this); }
+
+bool CramReader::RawRecordRange::Iterator::operator==(const Iterator& other) const
 {
     return reader_ == other.reader_;
 }

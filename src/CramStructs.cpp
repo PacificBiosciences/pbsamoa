@@ -1,3 +1,4 @@
+#include <pbsamoa/cram/CramCompression.hpp>
 #include <pbsamoa/cram/CramStructs.hpp>
 
 #include "BinaryUtils.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace PacBio {
@@ -18,6 +20,44 @@ namespace {
 std::uint32_t ComputeCrc32(std::span<const std::byte> data)
 {
     return libdeflate_crc32(0, data.data(), std::size(data));
+}
+
+std::size_t Itf8EncodedSize(const std::int32_t value)
+{
+    const auto uval = static_cast<std::uint32_t>(value);
+    if (uval < 0x80) {
+        return 1;
+    }
+    if (uval < 0x4000) {
+        return 2;
+    }
+    if (uval < 0x200000) {
+        return 3;
+    }
+    if (uval < 0x10000000) {
+        return 4;
+    }
+    return 5;
+}
+
+std::size_t SerializedBlockSize(const CramBlock& block)
+{
+    const auto dataSize = std::size(block.Data);
+    if (dataSize > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error("block: compressed size exceeds ITF8 range");
+    }
+    const auto compressedSize = static_cast<std::int32_t>(dataSize);
+    return 2 + Itf8EncodedSize(block.ContentId) + Itf8EncodedSize(compressedSize) +
+           Itf8EncodedSize(block.RawSize) + dataSize + 4;
+}
+
+void ValidateAndAdvance(std::int64_t& accumulator, const std::int64_t delta, const char* context)
+{
+    const auto next = accumulator + delta;
+    if (next < 0 || next > std::numeric_limits<std::int32_t>::max()) {
+        throw std::runtime_error(std::string{"CRAM size overflow while "} + context);
+    }
+    accumulator = next;
 }
 
 }  // namespace
@@ -839,6 +879,213 @@ std::vector<std::byte> SerializeCompressionHeader(const CramCompressionHeader& h
     out.insert(std::end(out), std::begin(tagBody), std::end(tagBody));
 
     return out;
+}
+
+std::vector<std::byte> SerializeSlice(const CramSlice& slice)
+{
+    const auto sliceHdrData = SerializeSliceHeader(slice.Header);
+    CramBlock sliceHdrBlock;
+    sliceHdrBlock.Method = CramBlockMethod::RAW;
+    sliceHdrBlock.ContentType = CramBlockContentType::SLICE_HEADER;
+    sliceHdrBlock.ContentId = 0;
+    sliceHdrBlock.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
+    sliceHdrBlock.CompressedSize = sliceHdrBlock.RawSize;
+    sliceHdrBlock.Data = sliceHdrData;
+
+    std::vector<std::byte> out;
+    out.reserve(SerializedSliceSize(slice));
+
+    const auto hdrBytes = SerializeBlock(sliceHdrBlock);
+    out.insert(std::end(out), std::begin(hdrBytes), std::end(hdrBytes));
+
+    const auto coreBytes = SerializeBlock(slice.CoreBlock);
+    out.insert(std::end(out), std::begin(coreBytes), std::end(coreBytes));
+
+    for (const auto& extBlock : slice.ExternalBlocks) {
+        const auto extBytes = SerializeBlock(extBlock);
+        out.insert(std::end(out), std::begin(extBytes), std::end(extBytes));
+    }
+
+    return out;
+}
+
+std::size_t SerializedSliceSize(const CramSlice& slice)
+{
+    const auto sliceHdrData = SerializeSliceHeader(slice.Header);
+    CramBlock sliceHdrBlock;
+    sliceHdrBlock.Method = CramBlockMethod::RAW;
+    sliceHdrBlock.ContentType = CramBlockContentType::SLICE_HEADER;
+    sliceHdrBlock.ContentId = 0;
+    sliceHdrBlock.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
+    sliceHdrBlock.CompressedSize = sliceHdrBlock.RawSize;
+    sliceHdrBlock.Data = std::move(sliceHdrData);
+
+    std::size_t total = SerializedBlockSize(sliceHdrBlock);
+    total += SerializedBlockSize(slice.CoreBlock);
+    for (const auto& extBlock : slice.ExternalBlocks) {
+        total += SerializedBlockSize(extBlock);
+    }
+    return total;
+}
+
+std::vector<std::byte> SerializeContainer(const CramContainer& container)
+{
+    const auto compHdrData = SerializeCompressionHeader(container.CompressionHeader);
+    CramBlock compHdrBlock;
+    compHdrBlock.Method = CramBlockMethod::RAW;
+    compHdrBlock.ContentType = CramBlockContentType::COMPRESSION_HEADER;
+    compHdrBlock.ContentId = 0;
+    compHdrBlock.RawSize = static_cast<std::int32_t>(std::size(compHdrData));
+    compHdrBlock.CompressedSize = compHdrBlock.RawSize;
+    compHdrBlock.Data = compHdrData;
+    const auto compHdrBytes = SerializeBlock(compHdrBlock);
+
+    CramContainerHeader containerHeader = container.Header;
+    containerHeader.Landmarks.clear();
+    containerHeader.Landmarks.reserve(std::size(container.Slices));
+
+    std::int64_t payloadSize = static_cast<std::int64_t>(std::size(compHdrBytes));
+    for (const auto& slice : container.Slices) {
+        containerHeader.Landmarks.push_back(static_cast<std::int32_t>(payloadSize));
+        const auto sliceSize = static_cast<std::int64_t>(SerializedSliceSize(slice));
+        ValidateAndAdvance(payloadSize, sliceSize, "serializing container slices");
+    }
+    containerHeader.Length = static_cast<std::int32_t>(payloadSize);
+
+    std::int64_t totalBlocks = 1;  // compression header block
+    for (const auto& slice : container.Slices) {
+        ValidateAndAdvance(totalBlocks, 2, "counting slice header/core blocks");
+        ValidateAndAdvance(totalBlocks, static_cast<std::int64_t>(std::size(slice.ExternalBlocks)),
+                           "counting external blocks");
+    }
+    containerHeader.NumBlocks = static_cast<std::int32_t>(totalBlocks);
+
+    const auto containerHeaderBytes = SerializeContainerHeader(containerHeader);
+    std::vector<std::byte> out;
+    out.reserve(std::size(containerHeaderBytes) + static_cast<std::size_t>(payloadSize));
+    out.insert(std::end(out), std::begin(containerHeaderBytes), std::end(containerHeaderBytes));
+    out.insert(std::end(out), std::begin(compHdrBytes), std::end(compHdrBytes));
+    for (const auto& slice : container.Slices) {
+        const auto sliceBytes = SerializeSlice(slice);
+        out.insert(std::end(out), std::begin(sliceBytes), std::end(sliceBytes));
+    }
+    return out;
+}
+
+CramContainer ParseContainer(const CramContainerHeader& header, std::span<const std::byte> payload)
+{
+    if (header.Length < 0) {
+        throw std::runtime_error("ParseContainer: negative container length");
+    }
+    if (static_cast<std::size_t>(header.Length) != std::size(payload)) {
+        throw std::runtime_error("ParseContainer: payload size does not match container header");
+    }
+    if (header.NumBlocks < 0) {
+        throw std::runtime_error("ParseContainer: negative container block count");
+    }
+
+    CramContainer container;
+    container.Header = header;
+
+    if (header.NumBlocks == 0) {
+        if (!std::empty(payload)) {
+            throw std::runtime_error("ParseContainer: non-empty payload with zero block count");
+        }
+        return container;
+    }
+
+    std::size_t pos = 0;
+    std::size_t bytesRead = 0;
+    std::size_t blocksParsed = 0;
+
+    CramBlock compressionHeaderBlock =
+        ParseBlock(std::span<const std::byte>{payload}.subspan(pos), bytesRead);
+    pos += bytesRead;
+    ++blocksParsed;
+    if (compressionHeaderBlock.ContentType != CramBlockContentType::COMPRESSION_HEADER) {
+        throw std::runtime_error("ParseContainer: first block is not COMPRESSION_HEADER");
+    }
+    DecompressCramBlock(compressionHeaderBlock);
+    container.CompressionHeader = ParseCompressionHeader(compressionHeaderBlock.Data);
+
+    std::vector<std::int32_t> observedLandmarks;
+    observedLandmarks.reserve(std::size(header.Landmarks));
+
+    while (blocksParsed < static_cast<std::size_t>(header.NumBlocks)) {
+        if (pos >= std::size(payload)) {
+            throw std::runtime_error("ParseContainer: truncated slice list");
+        }
+
+        observedLandmarks.push_back(static_cast<std::int32_t>(pos));
+
+        CramBlock sliceHeaderBlock =
+            ParseBlock(std::span<const std::byte>{payload}.subspan(pos), bytesRead);
+        pos += bytesRead;
+        ++blocksParsed;
+        if (sliceHeaderBlock.ContentType != CramBlockContentType::SLICE_HEADER) {
+            throw std::runtime_error("ParseContainer: expected SLICE_HEADER block");
+        }
+
+        DecompressCramBlock(sliceHeaderBlock);
+        CramSlice slice;
+        slice.Header = ParseSliceHeader(sliceHeaderBlock.Data);
+
+        if (slice.Header.NumBlocks < 0) {
+            throw std::runtime_error("ParseContainer: negative slice block count");
+        }
+        if (blocksParsed + static_cast<std::size_t>(slice.Header.NumBlocks) >
+            static_cast<std::size_t>(header.NumBlocks)) {
+            throw std::runtime_error("ParseContainer: slice block count exceeds container payload");
+        }
+
+        bool sawCore = false;
+        for (std::int32_t i = 0; i < slice.Header.NumBlocks; ++i) {
+            CramBlock block =
+                ParseBlock(std::span<const std::byte>{payload}.subspan(pos), bytesRead);
+            pos += bytesRead;
+            ++blocksParsed;
+
+            switch (block.ContentType) {
+                case CramBlockContentType::CORE_DATA:
+                    if (sawCore) {
+                        throw std::runtime_error(
+                            "ParseContainer: multiple CORE_DATA blocks in slice");
+                    }
+                    slice.CoreBlock = std::move(block);
+                    sawCore = true;
+                    break;
+                case CramBlockContentType::EXTERNAL_DATA:
+                    slice.ExternalBlocks.push_back(std::move(block));
+                    break;
+                default:
+                    throw std::runtime_error(
+                        "ParseContainer: unsupported slice data block content type");
+            }
+        }
+
+        if (!sawCore) {
+            throw std::runtime_error("ParseContainer: slice missing CORE_DATA block");
+        }
+
+        container.Slices.push_back(std::move(slice));
+    }
+
+    if (pos != std::size(payload)) {
+        throw std::runtime_error("ParseContainer: trailing bytes after declared block list");
+    }
+
+    if (!std::empty(header.Landmarks)) {
+        if (std::size(header.Landmarks) != std::size(observedLandmarks)) {
+            throw std::runtime_error("ParseContainer: landmark count mismatch");
+        }
+        for (std::size_t i = 0; i < std::size(observedLandmarks); ++i) {
+            if (header.Landmarks[i] != observedLandmarks[i]) {
+                throw std::runtime_error("ParseContainer: landmark offset mismatch");
+            }
+        }
+    }
+
+    return container;
 }
 
 // ---------------------------------------------------------------------------

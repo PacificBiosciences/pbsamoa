@@ -89,6 +89,11 @@ PacBio::Samoa::CramReader reader{"input.cram"};
 for (const auto& record : reader.Records()) {
     std::println("{}", record.Name());
 }
+
+// Raw BAM-layout access from CRAM decode
+for (const auto& raw : reader.RawRecords()) {
+    std::println("{}", raw.Name());
+}
 ```
 
 ### Write a CRAM file

@@ -17,14 +17,17 @@
 #include <atomic>
 #include <format>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
 #include <cstring>
 
 namespace PacBio {
@@ -126,7 +129,8 @@ constexpr std::int32_t MF_BLOCK_ID = BlockIdFor(CramDataSeries::MF);
 constexpr std::int32_t NS_BLOCK_ID = BlockIdFor(CramDataSeries::NS);
 constexpr std::int32_t NP_BLOCK_ID = BlockIdFor(CramDataSeries::NP);
 constexpr std::int32_t TS_BLOCK_ID = BlockIdFor(CramDataSeries::TS);
-// constexpr std::int32_t NF_BLOCK_ID = BlockIdFor(CramDataSeries::NF); // Mate pair is not required for PB data
+// constexpr std::int32_t NF_BLOCK_ID = BlockIdFor(CramDataSeries::NF); // Mate
+// pair is not required for PB data
 constexpr std::int32_t TL_BLOCK_ID = BlockIdFor(CramDataSeries::TL);
 constexpr std::int32_t FN_BLOCK_ID = BlockIdFor(CramDataSeries::FN);
 constexpr std::int32_t FC_BLOCK_ID = BlockIdFor(CramDataSeries::FC);
@@ -165,13 +169,31 @@ bool IsV31BlockMethod(const CramBlockMethod method)
     }
 }
 
-libdeflate_compressor* ThreadLocalGzipCompressor()
+libdeflate_compressor* ThreadLocalGzipCompressor(const std::optional<int> compressionLevel)
 {
-    const thread_local CramGzipCompressorContext THREAD_LOCAL_GZIP_COMPRESSOR_CONTEXT{};
-    if (!THREAD_LOCAL_GZIP_COMPRESSOR_CONTEXT.Compressor) {
+    const int level = compressionLevel.value_or(DEFAULT_GZIP_COMPRESSION_LEVEL);
+    if (level < 0 || level > 12) {
+        throw std::runtime_error(
+            std::format("CramWriter: invalid gzip compression level {}", level));
+    }
+
+    struct ThreadLocalCompressorCache
+    {
+        int Level{-1};
+        LibdeflateCompressorPtr Compressor{};
+    };
+
+    static thread_local ThreadLocalCompressorCache cache;
+
+    if (!cache.Compressor || cache.Level != level) {
+        cache.Compressor.reset(libdeflate_alloc_compressor(level));
+        cache.Level = level;
+    }
+
+    if (!cache.Compressor) {
         throw std::runtime_error("CramWriter: failed to allocate gzip compressor");
     }
-    return THREAD_LOCAL_GZIP_COMPRESSOR_CONTEXT.Compressor.get();
+    return cache.Compressor.get();
 }
 
 }  // namespace
@@ -182,17 +204,21 @@ libdeflate_compressor* ThreadLocalGzipCompressor()
 
 struct CramWriter::Impl
 {
-    std::filesystem::path path;
+    std::filesystem::path path;       // final output path requested by caller
+    std::filesystem::path writePath;  // actual on-disk output (temp path when UseTempFile=true)
     std::ofstream file;
     SamHeader header;
     CramWriterConfig config;
     bool closed{false};
 
     std::vector<BamRecord> pendingRecords;
+    std::vector<std::vector<BamRecord>> pendingSlices;
     std::int64_t globalRecordCounter{0};
+    std::int64_t nextContainerOffset{0};
     std::unordered_map<std::string, std::int32_t> readGroupIndex;
     std::vector<CraiEntry> craiEntries;
-    CramGzipCompressorContext gzipContext;
+    std::future<void> pendingWrite;
+    LibdeflateCompressorPtr gzipCompressor;
     std::shared_ptr<Parallel::ThreadPool<>> compressionPool;
 
     CramBlockMethod DefaultDataSeriesMethod(CramDataSeries ds) const
@@ -261,25 +287,72 @@ struct CramWriter::Impl
         return std::ranges::max(config.MinorVersion, requiredMinor);
     }
 
+    void ValidateConfig() const
+    {
+        if (config.RecordsPerSlice <= 0) {
+            throw std::runtime_error(std::format(
+                "CramWriter: RecordsPerSlice must be positive, got {}", config.RecordsPerSlice));
+        }
+        if (config.CompressionLevel.has_value()) {
+            const int level = *config.CompressionLevel;
+            if (level < 0 || level > 12) {
+                throw std::runtime_error(
+                    std::format("CramWriter: CompressionLevel must be in [0, 12], got {}", level));
+            }
+        }
+    }
+
+    static std::filesystem::path TemporaryWritePath(const std::filesystem::path& finalPath)
+    {
+        const auto pid = static_cast<long long>(::getpid());
+        for (int attempt = 0; attempt < 1024; ++attempt) {
+            auto candidate = finalPath;
+            candidate += std::format(".tmp.{}.{}", pid, attempt);
+            if (!std::filesystem::exists(candidate)) {
+                return candidate;
+            }
+        }
+        throw std::runtime_error(std::format(
+            "CramWriter: failed to allocate temporary output path for {}", finalPath.string()));
+    }
+
+    void WaitForPendingWrite()
+    {
+        if (pendingWrite.valid()) {
+            pendingWrite.get();
+        }
+    }
+
     void Open()
     {
-        if (!gzipContext.Compressor) {
+        ValidateConfig();
+
+        const int level = config.CompressionLevel.value_or(DEFAULT_GZIP_COMPRESSION_LEVEL);
+        gzipCompressor.reset(libdeflate_alloc_compressor(level));
+        if (!gzipCompressor) {
             throw std::runtime_error("CramWriter: failed to allocate gzip compressor");
         }
 
-        file.open(path, std::ios::binary | std::ios::trunc);
+        writePath = config.UseTempFile ? TemporaryWritePath(path) : path;
+        file.open(writePath, std::ios::binary | std::ios::trunc);
         if (!file) {
-            throw std::runtime_error{std::format("CramWriter: cannot open {}", path.string())};
+            throw std::runtime_error{std::format("CramWriter: cannot open {}", writePath.string())};
         }
 
         WriteFileDefinition();
         WriteHeaderContainer();
+        nextContainerOffset = CurrentFileOffset();
+
         if (config.CompressionWorkers > 0) {
             compressionPool =
                 std::make_shared<Parallel::ThreadPool<>>(Parallel::ThreadPool<>::Config{
                     .NumThreads = config.CompressionWorkers,
                 });
         }
+
+        pendingRecords.clear();
+        pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
+        pendingSlices.clear();
 
         readGroupIndex.clear();
         for (std::int32_t i = 0; i < static_cast<std::int32_t>(std::size(header.ReadGroups()));
@@ -292,6 +365,9 @@ struct CramWriter::Impl
     {
         file.write(reinterpret_cast<const char*>(data.data()),
                    static_cast<std::streamsize>(std::size(data)));
+        if (!file.good()) {
+            throw std::runtime_error("CramWriter: write failed");
+        }
     }
 
     std::int64_t CurrentFileOffset()
@@ -337,14 +413,15 @@ struct CramWriter::Impl
         });
     }
 
-    void CaptureCraiEntries(std::int32_t containerRefId, const CramSliceHeader& sliceHeader,
-                            std::int64_t containerOffset, std::int64_t sliceOffset,
-                            std::int64_t sliceSize)
+    void CaptureCraiEntries(const std::vector<BamRecord>& sliceRecords,
+                            const CramSliceHeader& sliceHeader, std::int64_t containerOffset,
+                            std::int64_t sliceOffset, std::int64_t sliceSize)
     {
         if (!config.WriteCrai) {
             return;
         }
 
+        const auto containerRefId = sliceHeader.RefSeqId;
         if (containerRefId >= 0) {
             const std::int64_t span = std::max<std::int64_t>(sliceHeader.AlignmentSpan, 1);
             AddCraiEntry(containerRefId, sliceHeader.AlignmentStart, span, containerOffset,
@@ -372,7 +449,7 @@ struct CramWriter::Impl
 
         std::vector<RefSpan> spans;
         std::unordered_map<std::int32_t, std::size_t> spanLookup;
-        spans.reserve(std::size(pendingRecords));
+        spans.reserve(std::size(sliceRecords));
 
         auto getSpan = [&](std::int32_t sequenceId) -> RefSpan& {
             if (const auto it = spanLookup.find(sequenceId); it != spanLookup.end()) {
@@ -384,7 +461,7 @@ struct CramWriter::Impl
             return spans.back();
         };
 
-        for (const BamRecord& record : pendingRecords) {
+        for (const BamRecord& record : sliceRecords) {
             if (!record.IsMapped() || record.RefId() < 0) {
                 (void)getSpan(-1);
                 continue;
@@ -499,108 +576,40 @@ struct CramWriter::Impl
         WriteRaw(blockBytes);
     }
 
-    void FlushPendingRecords()
+    struct PreparedSliceData
     {
-        if (std::empty(pendingRecords)) {
-            return;
-        }
+        std::vector<RecordTagData> RecordTags;
+    };
 
-        // Determine container properties
-        std::int32_t containerRefId = -2;  // multi-ref by default
-        std::int32_t minPos = std::numeric_limits<std::int32_t>::max();
-        std::int32_t maxEnd = 0;
-        std::int64_t bases = 0;
-        std::size_t totalNameBytes = 0;
+    struct ContainerEncodingPlan
+    {
+        CramCompressionHeader CompressionHeader;
+        std::unordered_map<std::int32_t, CramBlockMethod> DataSeriesMethods;
+        std::vector<PreparedSliceData> SliceData;
+    };
 
-        bool allSameRef = true;
-        const auto firstRefId = pendingRecords[0].RefId();
-        for (const auto& rec : pendingRecords) {
-            if (rec.RefId() != firstRefId) {
-                allSameRef = false;
-            }
-            bases += static_cast<std::int64_t>(std::size(rec.Sequence()));
-            totalNameBytes += std::size(rec.Name()) + 1;
-            if (rec.Pos() >= 0) {
-                if (rec.Pos() < minPos) {
-                    minPos = rec.Pos();
-                }
-                std::int32_t end{rec.Pos() + static_cast<std::int32_t>(std::size(rec.Sequence()))};
-                if (rec.IsMapped()) {
-                    end = rec.ReferenceEnd();
-                    if (end <= rec.Pos()) {
-                        end = rec.Pos() + 1;
-                    }
-                }
-                if (end > maxEnd) {
-                    maxEnd = end;
-                }
-            }
-        }
+    struct ContainerStats
+    {
+        std::int32_t RefSeqId{-2};
+        std::int32_t StartPos{1};
+        std::int32_t AlignmentSpan{0};
+        std::int64_t Bases{0};
+        std::int32_t NumRecords{0};
+    };
 
-        if (allSameRef) {
-            containerRefId = firstRefId;
-        } else {
-            minPos = 0;
-            maxEnd = 0;
-        }
-        if (minPos == std::numeric_limits<std::int32_t>::max()) {
-            minPos = 0;
-        }
+    ContainerEncodingPlan BuildContainerEncodingPlan() const
+    {
+        ContainerEncodingPlan plan;
+        plan.SliceData.resize(std::size(pendingSlices));
 
-        const auto numRecords = static_cast<std::int32_t>(std::size(pendingRecords));
-        const bool needFqzMetadata =
-            ResolveDataSeriesMethod(CramDataSeries::QS) == CramBlockMethod::FQZCOMP ||
-            ResolveDataSeriesMethod(CramDataSeries::QQ) == CramBlockMethod::FQZCOMP;
+        plan.CompressionHeader.PreservationMap.ReadNamesIncluded = true;
+        plan.CompressionHeader.PreservationMap.ApDelta = false;
+        plan.CompressionHeader.PreservationMap.ReferenceRequired = false;
 
-        std::vector<std::uint32_t> qualityRecordLengths;
-        std::vector<std::uint32_t> qualityRecordFlags;
-        std::uint64_t totalQualityBytes = 0;
-        if (needFqzMetadata) {
-            qualityRecordLengths.reserve(std::size(pendingRecords));
-            qualityRecordFlags.reserve(std::size(pendingRecords));
-
-            for (const auto& rec : pendingRecords) {
-                const auto readLength = std::size(rec.Sequence());
-                if (readLength > std::numeric_limits<std::uint32_t>::max()) {
-                    throw std::runtime_error("CramWriter: read length exceeds fqz metadata limit");
-                }
-
-                qualityRecordLengths.push_back(static_cast<std::uint32_t>(readLength));
-                totalQualityBytes += static_cast<std::uint32_t>(readLength);
-
-                std::uint32_t flags = 0;
-                if ((rec.Flag() & 0x10) != 0) {
-                    flags |= FQZ_FREVERSE;
-                }
-                if ((rec.Flag() & 0x80) != 0) {
-                    flags |= FQZ_FREAD2;
-                }
-                qualityRecordFlags.push_back(flags);
-            }
-        }
-
-        // Build compression header with simple EXTERNAL encodings
-        CramCompressionHeader compHeader;
-        compHeader.PreservationMap.ReadNamesIncluded = true;
-        compHeader.PreservationMap.ApDelta = false;
-        compHeader.PreservationMap.ReferenceRequired = false;
-
-        std::unordered_map<std::int32_t, CramBlockMethod> dataSeriesMethods;
-        dataSeriesMethods.reserve(std::size(DATA_SERIES));
+        plan.DataSeriesMethods.reserve(std::size(DATA_SERIES));
         for (const auto& [series, blockId] : DATA_SERIES) {
-            dataSeriesMethods.emplace(blockId, ResolveDataSeriesMethod(series));
+            plan.DataSeriesMethods.emplace(blockId, ResolveDataSeriesMethod(series));
         }
-
-        auto selectBlockMethod = [&](CramBlockContentType contentType,
-                                     std::int32_t contentId) -> CramBlockMethod {
-            if (contentType == CramBlockContentType::EXTERNAL_DATA) {
-                if (const auto it = dataSeriesMethods.find(contentId);
-                    it != std::end(dataSeriesMethods)) {
-                    return it->second;
-                }
-            }
-            return NonDataSeriesMethod();
-        };
 
         auto makeExternalDesc = [](std::int32_t blockId) -> CramEncodingDescriptor {
             CramEncodingDescriptor desc;
@@ -641,7 +650,6 @@ struct CramWriter::Impl
             }
             return makeByteArrayLenExternalDesc(blockId);
         };
-
         auto makeDataSeriesEncoding = [&](CramDataSeries series,
                                           std::int32_t blockId) -> CramEncodingDescriptor {
             switch (series) {
@@ -656,59 +664,196 @@ struct CramWriter::Impl
             }
         };
 
-        compHeader.DataSeriesEncodings.reserve(std::size(DATA_SERIES));
+        plan.CompressionHeader.DataSeriesEncodings.reserve(std::size(DATA_SERIES));
         for (const auto& [series, blockId] : DATA_SERIES) {
-            compHeader.DataSeriesEncodings.emplace_back(series,
-                                                        makeDataSeriesEncoding(series, blockId));
+            plan.CompressionHeader.DataSeriesEncodings.emplace_back(
+                series, makeDataSeriesEncoding(series, blockId));
         }
-
-        // Build per-record tag payloads and tag-set dictionary.
-        std::vector<RecordTagData> recordTagData;
-        recordTagData.reserve(std::size(pendingRecords));
 
         std::map<std::int32_t, char> tagContentTypes;
         std::vector<std::vector<TagTriple>> tagSets;
-        tagSets.emplace_back();  // index 0: empty tag set
-
+        tagSets.emplace_back();
         std::map<std::vector<TagTriple>, std::int32_t> tagSetIndex;
         tagSetIndex.emplace(std::vector<TagTriple>{}, 0);
 
-        for (const auto& record : pendingRecords) {
-            auto tagData = BuildRecordTagData(record);
-            for (const auto& payload : tagData.Payloads) {
-                if (!tagContentTypes.contains(payload.ContentId)) {
-                    tagContentTypes.emplace(payload.ContentId, payload.Type);
-                }
-            }
-            const auto foundSet = tagSetIndex.find(tagData.TagSet);
-            if (foundSet == std::end(tagSetIndex)) {
-                const auto idx = static_cast<std::int32_t>(std::size(tagSets));
-                tagSetIndex.emplace(tagData.TagSet, idx);
-                tagSets.push_back(tagData.TagSet);
-                tagData.TagListIndex = idx;
-            } else {
-                tagData.TagListIndex = foundSet->second;
-            }
+        for (std::size_t sliceIndex = 0; sliceIndex < std::size(pendingSlices); ++sliceIndex) {
+            const auto& sliceRecords = pendingSlices[sliceIndex];
+            auto& prepared = plan.SliceData[sliceIndex];
+            prepared.RecordTags.reserve(std::size(sliceRecords));
 
-            if (const TagValue* rgValue = record.Tags().Get(RG_TAG)) {
-                if (const auto* rgText = std::get_if<std::string>(rgValue)) {
-                    if (const auto rgIt = readGroupIndex.find(*rgText);
-                        rgIt != std::end(readGroupIndex)) {
-                        tagData.ReadGroupIndex = rgIt->second;
+            for (const auto& record : sliceRecords) {
+                auto tagData = BuildRecordTagData(record);
+                for (const auto& payload : tagData.Payloads) {
+                    if (!tagContentTypes.contains(payload.ContentId)) {
+                        tagContentTypes.emplace(payload.ContentId, payload.Type);
                     }
                 }
+
+                if (const auto foundSet = tagSetIndex.find(tagData.TagSet);
+                    foundSet != std::end(tagSetIndex)) {
+                    tagData.TagListIndex = foundSet->second;
+                } else {
+                    const auto idx = static_cast<std::int32_t>(std::size(tagSets));
+                    tagSetIndex.emplace(tagData.TagSet, idx);
+                    tagSets.push_back(tagData.TagSet);
+                    tagData.TagListIndex = idx;
+                }
+
+                if (const TagValue* rgValue = record.Tags().Get(RG_TAG)) {
+                    if (const auto* rgText = std::get_if<std::string>(rgValue)) {
+                        if (const auto rgIt = readGroupIndex.find(*rgText);
+                            rgIt != std::end(readGroupIndex)) {
+                            tagData.ReadGroupIndex = rgIt->second;
+                        }
+                    }
+                }
+                prepared.RecordTags.push_back(std::move(tagData));
             }
-            recordTagData.push_back(std::move(tagData));
         }
 
-        compHeader.PreservationMap.TagIdsDictionary = BuildTagIdsDictionary(tagSets);
-
+        plan.CompressionHeader.PreservationMap.TagIdsDictionary = BuildTagIdsDictionary(tagSets);
         for (const auto& [contentId, type] : tagContentTypes) {
-            compHeader.TagEncodings.emplace_back(contentId, makeTagDesc(type, contentId));
+            plan.CompressionHeader.TagEncodings.emplace_back(contentId,
+                                                             makeTagDesc(type, contentId));
         }
 
-        // Encode records into blocks
-        CramBitWriter coreWriter;  // unused with all-external encoding
+        return plan;
+    }
+
+    ContainerStats ComputeContainerStats() const
+    {
+        if (std::empty(pendingSlices)) {
+            return {};
+        }
+
+        ContainerStats stats;
+        std::int32_t minPos = std::numeric_limits<std::int32_t>::max();
+        std::int32_t maxEnd = 0;
+        bool haveFirstRef = false;
+        std::int32_t firstRefId = -2;
+        bool allSameRef = true;
+
+        for (const auto& sliceRecords : pendingSlices) {
+            for (const auto& rec : sliceRecords) {
+                const auto refId = rec.RefId();
+                if (!haveFirstRef) {
+                    firstRefId = refId;
+                    haveFirstRef = true;
+                } else if (refId != firstRefId) {
+                    allSameRef = false;
+                }
+
+                ++stats.NumRecords;
+                stats.Bases += static_cast<std::int64_t>(std::size(rec.Sequence()));
+                if (rec.Pos() >= 0) {
+                    minPos = std::min(minPos, rec.Pos());
+                    std::int32_t end =
+                        rec.Pos() + static_cast<std::int32_t>(std::size(rec.Sequence()));
+                    if (rec.IsMapped()) {
+                        end = rec.ReferenceEnd();
+                        if (end <= rec.Pos()) {
+                            end = rec.Pos() + 1;
+                        }
+                    }
+                    maxEnd = std::max(maxEnd, end);
+                }
+            }
+        }
+
+        if (allSameRef && haveFirstRef) {
+            stats.RefSeqId = firstRefId;
+        } else {
+            stats.RefSeqId = -2;
+            minPos = 0;
+            maxEnd = 0;
+        }
+
+        if (minPos == std::numeric_limits<std::int32_t>::max()) {
+            minPos = 0;
+        }
+        stats.StartPos = minPos + 1;
+        stats.AlignmentSpan = maxEnd - minPos;
+        return stats;
+    }
+
+    CramSlice EncodeSlice(
+        std::span<const BamRecord> records, std::span<const RecordTagData> recordTagData,
+        const std::unordered_map<std::int32_t, CramBlockMethod>& dataSeriesMethods,
+        std::int32_t containerRefId, std::int64_t recordCounterStart, bool useThreadLocalGzip,
+        bool allowBlockParallel)
+    {
+        if (std::size(records) != std::size(recordTagData)) {
+            throw std::runtime_error("CramWriter: per-slice record/tag metadata size mismatch");
+        }
+
+        const auto numRecords = static_cast<std::int32_t>(std::size(records));
+        std::int32_t minPos = std::numeric_limits<std::int32_t>::max();
+        std::int32_t maxEnd = 0;
+        std::int64_t bases = 0;
+        std::size_t totalNameBytes = 0;
+
+        for (const auto& rec : records) {
+            bases += static_cast<std::int64_t>(std::size(rec.Sequence()));
+            totalNameBytes += std::size(rec.Name()) + 1;
+            if (rec.Pos() >= 0) {
+                minPos = std::min(minPos, rec.Pos());
+                std::int32_t end = rec.Pos() + static_cast<std::int32_t>(std::size(rec.Sequence()));
+                if (rec.IsMapped()) {
+                    end = rec.ReferenceEnd();
+                    if (end <= rec.Pos()) {
+                        end = rec.Pos() + 1;
+                    }
+                }
+                maxEnd = std::max(maxEnd, end);
+            }
+        }
+        if (containerRefId == -2) {
+            minPos = 0;
+            maxEnd = 0;
+        } else if (minPos == std::numeric_limits<std::int32_t>::max()) {
+            minPos = 0;
+        }
+
+        const bool needFqzMetadata =
+            ResolveDataSeriesMethod(CramDataSeries::QS) == CramBlockMethod::FQZCOMP ||
+            ResolveDataSeriesMethod(CramDataSeries::QQ) == CramBlockMethod::FQZCOMP;
+        std::vector<std::uint32_t> qualityRecordLengths;
+        std::vector<std::uint32_t> qualityRecordFlags;
+        std::uint64_t totalQualityBytes = 0;
+        if (needFqzMetadata) {
+            qualityRecordLengths.reserve(std::size(records));
+            qualityRecordFlags.reserve(std::size(records));
+            for (const auto& rec : records) {
+                const auto readLength = std::size(rec.Sequence());
+                if (readLength > std::numeric_limits<std::uint32_t>::max()) {
+                    throw std::runtime_error("CramWriter: read length exceeds fqz metadata limit");
+                }
+                qualityRecordLengths.push_back(static_cast<std::uint32_t>(readLength));
+                totalQualityBytes += static_cast<std::uint32_t>(readLength);
+
+                std::uint32_t flags = 0;
+                if ((rec.Flag() & 0x10) != 0) {
+                    flags |= FQZ_FREVERSE;
+                }
+                if ((rec.Flag() & 0x80) != 0) {
+                    flags |= FQZ_FREAD2;
+                }
+                qualityRecordFlags.push_back(flags);
+            }
+        }
+
+        auto selectBlockMethod = [&](CramBlockContentType contentType,
+                                     std::int32_t contentId) -> CramBlockMethod {
+            if (contentType == CramBlockContentType::EXTERNAL_DATA) {
+                if (const auto it = dataSeriesMethods.find(contentId);
+                    it != std::end(dataSeriesMethods)) {
+                    return it->second;
+                }
+            }
+            return NonDataSeriesMethod();
+        };
+
+        CramBitWriter coreWriter;
         CramExternalBlockStore extStore;
         const std::size_t recordReserve = static_cast<std::size_t>(numRecords) * 5U;
         extStore.ReserveBlock(BF_BLOCK_ID, recordReserve);
@@ -736,54 +881,28 @@ struct CramWriter::Impl
             extStore.ReserveBlock(SC_BLOCK_ID, baseBytes / 8U);
         }
 
-        for (std::size_t i = 0; i < std::size(pendingRecords); ++i) {
-            EncodeRecord(pendingRecords[i], recordTagData[i], extStore, containerRefId);
+        for (std::size_t i = 0; i < std::size(records); ++i) {
+            EncodeRecord(records[i], recordTagData[i], extStore, containerRefId);
         }
         coreWriter.Flush();
 
-        // Serialize compression header block
-        const auto compHeaderData = SerializeCompressionHeader(compHeader);
-        CramBlock compHdrBlock;
-        compHdrBlock.Method = CramBlockMethod::RAW;
-        compHdrBlock.ContentType = CramBlockContentType::COMPRESSION_HEADER;
-        compHdrBlock.ContentId = 0;
-        compHdrBlock.RawSize = static_cast<std::int32_t>(std::size(compHeaderData));
-        compHdrBlock.CompressedSize = compHdrBlock.RawSize;
-        compHdrBlock.Data = compHeaderData;
-        const auto compHdrBytes = SerializeBlock(compHdrBlock);
-
-        // Build slice header
         CramSliceHeader sliceHeader;
         sliceHeader.RefSeqId = containerRefId;
-        sliceHeader.AlignmentStart = minPos + 1;  // 1-based
+        sliceHeader.AlignmentStart = minPos + 1;
         sliceHeader.AlignmentSpan = maxEnd - minPos;
         sliceHeader.NumRecords = numRecords;
-        sliceHeader.RecordCounter = globalRecordCounter;
+        sliceHeader.RecordCounter = recordCounterStart;
         sliceHeader.EmbeddedRefBlockId = -1;
 
-        // Collect external block IDs
         const auto contentIds = extStore.ContentIds();
         sliceHeader.BlockContentIds = contentIds;
-        // +1 for core data block
         sliceHeader.NumBlocks = static_cast<std::int32_t>(std::size(contentIds)) + 1;
-
-        // Serialize slice header block
-        const auto sliceHdrData = SerializeSliceHeader(sliceHeader);
-        CramBlock sliceHdrBlock;
-        sliceHdrBlock.Method = CramBlockMethod::RAW;
-        sliceHdrBlock.ContentType = CramBlockContentType::SLICE_HEADER;
-        sliceHdrBlock.ContentId = 0;
-        sliceHdrBlock.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
-        sliceHdrBlock.CompressedSize = sliceHdrBlock.RawSize;
-        sliceHdrBlock.Data = sliceHdrData;
-        const auto sliceHdrBytes = SerializeBlock(sliceHdrBlock);
 
         std::vector<CramBlock> dataBlocks;
         std::vector<CramBlockMethod> dataBlockMethods;
         dataBlocks.reserve(1 + std::size(contentIds));
         dataBlockMethods.reserve(1 + std::size(contentIds));
 
-        // Core data block
         CramBlock coreBlock;
         coreBlock.ContentType = CramBlockContentType::CORE_DATA;
         coreBlock.ContentId = 0;
@@ -792,7 +911,6 @@ struct CramWriter::Impl
         dataBlockMethods.push_back(selectBlockMethod(coreBlock.ContentType, coreBlock.ContentId));
         dataBlocks.push_back(std::move(coreBlock));
 
-        // External data blocks
         for (const auto id : contentIds) {
             CramBlock extBlock;
             extBlock.ContentType = CramBlockContentType::EXTERNAL_DATA;
@@ -810,8 +928,10 @@ struct CramWriter::Impl
 
         const std::size_t workers = config.CompressionWorkers;
         constexpr std::size_t MIN_BLOCKS_FOR_PARALLEL = 8;
-        const bool useParallelCompression = static_cast<bool>(compressionPool) && workers > 1 &&
+        const bool useParallelCompression = allowBlockParallel &&
+                                            static_cast<bool>(compressionPool) && workers > 1 &&
                                             std::size(dataBlocks) >= MIN_BLOCKS_FOR_PARALLEL;
+        const bool useThreadLocalCompressor = useThreadLocalGzip || useParallelCompression;
         auto compressDataBlock = [&](std::int32_t blockIndex) {
             auto& block = dataBlocks[static_cast<std::size_t>(blockIndex)];
             const auto method = dataBlockMethods[static_cast<std::size_t>(blockIndex)];
@@ -829,16 +949,17 @@ struct CramWriter::Impl
                 block.Method = CramBlockMethod::FQZCOMP;
                 if (std::size(block.Data) > std::numeric_limits<std::int32_t>::max()) {
                     throw std::runtime_error(
-                        "CramWriter: fqz compressed block exceeds CRAM size "
-                        "limit");
+                        "CramWriter: fqz compressed block exceeds CRAM size limit");
                 }
                 block.CompressedSize = static_cast<std::int32_t>(std::size(block.Data));
                 return;
             }
 
             CompressCramBlock(block, method,
-                              useParallelCompression ? ThreadLocalGzipCompressor()
-                                                     : gzipContext.Compressor.get());
+                              useThreadLocalCompressor
+                                  ? ThreadLocalGzipCompressor(config.CompressionLevel)
+                                  : gzipCompressor.get(),
+                              config.CompressionLevel);
         };
 
         if (useParallelCompression) {
@@ -865,57 +986,155 @@ struct CramWriter::Impl
             }
         }
 
-        std::vector<std::vector<std::byte>> dataBlockBytes;
-        dataBlockBytes.reserve(std::size(dataBlocks));
+        CramSlice slice;
+        slice.Header = std::move(sliceHeader);
+        bool sawCore = false;
         for (auto& block : dataBlocks) {
-            dataBlockBytes.push_back(SerializeBlock(block));
+            if (block.ContentType == CramBlockContentType::CORE_DATA) {
+                if (sawCore) {
+                    throw std::runtime_error(
+                        "CramWriter: duplicate CORE_DATA block in encoded slice");
+                }
+                slice.CoreBlock = std::move(block);
+                sawCore = true;
+            } else if (block.ContentType == CramBlockContentType::EXTERNAL_DATA) {
+                slice.ExternalBlocks.push_back(std::move(block));
+            } else {
+                throw std::runtime_error("CramWriter: unexpected block content in encoded slice");
+            }
+        }
+        if (!sawCore) {
+            throw std::runtime_error("CramWriter: encoded slice missing CORE_DATA block");
         }
 
-        // Calculate total blocks data size
-        std::int32_t totalBlocksSize = static_cast<std::int32_t>(std::size(compHdrBytes));
-        totalBlocksSize += static_cast<std::int32_t>(std::size(sliceHdrBytes));
-        for (const auto& blockBytes : dataBlockBytes) {
-            totalBlocksSize += static_cast<std::int32_t>(std::size(blockBytes));
+        if (slice.Header.NumBlocks !=
+            static_cast<std::int32_t>(1 + std::size(slice.ExternalBlocks))) {
+            throw std::runtime_error("CramWriter: encoded slice block count mismatch");
+        }
+        return slice;
+    }
+
+    void QueueContainerWrite(std::vector<std::byte> serializedContainer)
+    {
+        const auto bytesWritten = static_cast<std::int64_t>(std::size(serializedContainer));
+        if (bytesWritten < 0 ||
+            bytesWritten > (std::numeric_limits<std::int64_t>::max() - nextContainerOffset)) {
+            throw std::runtime_error("CramWriter: container size overflow");
         }
 
-        // Container header
-        CramContainerHeader containerHdr;
-        containerHdr.Length = totalBlocksSize;
-        containerHdr.RefSeqId = containerRefId;
-        containerHdr.StartPos = minPos + 1;  // 1-based
-        containerHdr.AlignmentSpan = maxEnd - minPos;
-        containerHdr.NumRecords = numRecords;
-        containerHdr.RecordCounter = globalRecordCounter;
-        containerHdr.Bases = bases;
-        containerHdr.NumBlocks = 3 + static_cast<std::int32_t>(std::size(
-                                         contentIds));  // comp hdr + slice hdr + core + externals
-        // Landmark: offset of slice from end of container header
-        containerHdr.Landmarks = {static_cast<std::int32_t>(std::size(compHdrBytes))};
+        WaitForPendingWrite();
+        if (compressionPool && config.CompressionWorkers > 0) {
+            pendingWrite = std::async(
+                std::launch::async,
+                [this, bytes = std::move(serializedContainer)]() mutable { WriteRaw(bytes); });
+        } else {
+            WriteRaw(serializedContainer);
+        }
+        nextContainerOffset += bytesWritten;
+    }
 
-        const auto containerHdrBytes = SerializeContainerHeader(containerHdr);
-        const std::int64_t containerOffset = CurrentFileOffset();
-        const std::int64_t sliceOffset = containerHdr.Landmarks.at(0);
-        const std::int64_t sliceSize = static_cast<std::int64_t>(totalBlocksSize) -
-                                       static_cast<std::int64_t>(std::size(compHdrBytes));
-
-        // Write everything
-        WriteRaw(containerHdrBytes);
-        WriteRaw(compHdrBytes);
-        WriteRaw(sliceHdrBytes);
-        for (const auto& blockBytes : dataBlockBytes) {
-            WriteRaw(blockBytes);
+    void FlushContainer()
+    {
+        if (std::empty(pendingSlices)) {
+            return;
         }
 
-        CaptureCraiEntries(containerRefId, sliceHeader, containerOffset, sliceOffset, sliceSize);
+        const ContainerStats containerStats = ComputeContainerStats();
+        const ContainerEncodingPlan encodingPlan = BuildContainerEncodingPlan();
 
-        globalRecordCounter += numRecords;
-        pendingRecords.clear();
+        std::vector<std::int64_t> sliceRecordCounters(std::size(pendingSlices), 0);
+        std::int64_t runningRecordCounter = globalRecordCounter;
+        for (std::size_t i = 0; i < std::size(pendingSlices); ++i) {
+            sliceRecordCounters[i] = runningRecordCounter;
+            runningRecordCounter += static_cast<std::int64_t>(std::size(pendingSlices[i]));
+        }
+
+        std::vector<CramSlice> slices(std::size(pendingSlices));
+        const bool useParallelSlices = static_cast<bool>(compressionPool) &&
+                                       config.CompressionWorkers > 1 &&
+                                       std::size(pendingSlices) > 1;
+        if (useParallelSlices) {
+            std::atomic<std::size_t> nextSlice{0};
+            const auto taskCount = static_cast<std::int32_t>(
+                std::ranges::min(config.CompressionWorkers, std::size(pendingSlices)));
+            Parallel::Dispatch(
+                compressionPool,
+                [&](std::int32_t) {
+                    while (true) {
+                        const std::size_t sliceIndex =
+                            nextSlice.fetch_add(1, std::memory_order_relaxed);
+                        if (sliceIndex >= std::size(pendingSlices)) {
+                            break;
+                        }
+                        slices[sliceIndex] =
+                            EncodeSlice(pendingSlices[sliceIndex],
+                                        encodingPlan.SliceData[sliceIndex].RecordTags,
+                                        encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
+                                        sliceRecordCounters[sliceIndex],
+                                        /*useThreadLocalGzip=*/true, /*allowBlockParallel=*/false);
+                    }
+                },
+                taskCount);
+        } else {
+            for (std::size_t sliceIndex = 0; sliceIndex < std::size(pendingSlices); ++sliceIndex) {
+                slices[sliceIndex] = EncodeSlice(
+                    pendingSlices[sliceIndex], encodingPlan.SliceData[sliceIndex].RecordTags,
+                    encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
+                    sliceRecordCounters[sliceIndex],
+                    /*useThreadLocalGzip=*/false, /*allowBlockParallel=*/true);
+            }
+        }
+
+        CramContainer container;
+        container.Header.RefSeqId = containerStats.RefSeqId;
+        container.Header.StartPos = containerStats.StartPos;
+        container.Header.AlignmentSpan = containerStats.AlignmentSpan;
+        container.Header.NumRecords = containerStats.NumRecords;
+        container.Header.RecordCounter = globalRecordCounter;
+        container.Header.Bases = containerStats.Bases;
+        container.CompressionHeader = encodingPlan.CompressionHeader;
+        container.Slices = std::move(slices);
+
+        const std::int64_t containerOffset = nextContainerOffset;
+        std::vector<std::byte> serialized = SerializeContainer(container);
+
+        std::size_t containerHeaderBytesRead = 0;
+        const auto serializedHeader = ParseContainerHeader(serialized, containerHeaderBytesRead);
+        if (std::size(serializedHeader.Landmarks) != std::size(container.Slices)) {
+            throw std::runtime_error("CramWriter: serialized landmark count mismatch");
+        }
+
+        for (std::size_t i = 0; i < std::size(container.Slices); ++i) {
+            const auto sliceOffset = static_cast<std::int64_t>(serializedHeader.Landmarks[i]);
+            const auto sliceEnd = (i + 1 < std::size(serializedHeader.Landmarks))
+                                      ? static_cast<std::int64_t>(serializedHeader.Landmarks[i + 1])
+                                      : static_cast<std::int64_t>(serializedHeader.Length);
+            const auto sliceSize = sliceEnd - sliceOffset;
+            if (sliceSize <= 0) {
+                throw std::runtime_error("CramWriter: non-positive serialized slice size");
+            }
+            CaptureCraiEntries(pendingSlices[i], container.Slices[i].Header, containerOffset,
+                               sliceOffset, sliceSize);
+        }
+
+        QueueContainerWrite(std::move(serialized));
+        globalRecordCounter += containerStats.NumRecords;
+        pendingSlices.clear();
     }
 
     void MaybeFlush()
     {
-        if (static_cast<std::int32_t>(std::size(pendingRecords)) >= config.RecordsPerSlice) {
-            FlushPendingRecords();
+        if (static_cast<std::int32_t>(std::size(pendingRecords)) < config.RecordsPerSlice) {
+            return;
+        }
+
+        pendingSlices.push_back(std::move(pendingRecords));
+        pendingRecords.clear();
+        pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
+
+        if (config.SlicesPerContainer > 0 &&
+            static_cast<std::int32_t>(std::size(pendingSlices)) >= config.SlicesPerContainer) {
+            FlushContainer();
         }
     }
 
@@ -1133,13 +1352,35 @@ struct CramWriter::Impl
         }
         closed = true;
 
-        FlushPendingRecords();
+        if (!std::empty(pendingRecords)) {
+            pendingSlices.push_back(std::move(pendingRecords));
+            pendingRecords.clear();
+        }
+
+        FlushContainer();
+        WaitForPendingWrite();
 
         WriteEofContainer();
         file.close();
         if (!file) {
             throw std::runtime_error(
-                std::format("CramWriter: failed to close output {}", path.string()));
+                std::format("CramWriter: failed to close output {}", writePath.string()));
+        }
+
+        if (config.UseTempFile) {
+            std::error_code ec;
+            std::filesystem::rename(writePath, path, ec);
+            if (ec) {
+                std::error_code removeEc;
+                std::filesystem::remove(path, removeEc);
+                ec.clear();
+                std::filesystem::rename(writePath, path, ec);
+            }
+            if (ec) {
+                throw std::runtime_error(
+                    std::format("CramWriter: failed to rename temporary output {} to {} ({})",
+                                writePath.string(), path.string(), ec.message()));
+            }
         }
 
         WriteCraiSidecar();

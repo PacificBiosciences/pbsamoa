@@ -73,6 +73,9 @@ Notes:
 - Default block compression method is `rans4x8`.
 - BAM input defaults to `RawRecord` passthrough into `CramWriter`; use
   `--convert-to-bam-record` to use the decoded `BamRecord` path.
+- Advanced `CramWriterConfig` fields (`SlicesPerContainer`,
+  `CompressionLevel`, `UseTempFile`) are currently API-only and are not
+  exposed as `convert` flags.
 
 ### bai-query — region query
 

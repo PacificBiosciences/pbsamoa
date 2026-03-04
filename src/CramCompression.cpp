@@ -230,7 +230,8 @@ std::vector<std::byte> CramNameTokeniserCompress(std::span<const std::byte> data
     if (lastStart != static_cast<int>(std::size(data))) {
         std::free(out);
         throw std::runtime_error(
-            "CramNameTokeniserCompress: input must contain complete separator-terminated names");
+            "CramNameTokeniserCompress: input must contain "
+            "complete separator-terminated names");
     }
     return CopyAndFree(out, static_cast<std::size_t>(outLen), "CramNameTokeniserCompress");
 }
@@ -243,7 +244,8 @@ std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
 {
     if (std::size(recordLengths) != std::size(recordFlags)) {
         throw std::runtime_error(
-            "CramFqzcompCompress: recordLengths and recordFlags must have equal size");
+            "CramFqzcompCompress: recordLengths and "
+            "recordFlags must have equal size");
     }
     if (std::size(recordLengths) > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::runtime_error("CramFqzcompCompress: record metadata size too large");
@@ -297,8 +299,9 @@ std::vector<std::byte> CramGzipDecompress(std::span<const std::byte> data, std::
 
     static std::once_flag libdeflateDispatchInitialized;
     std::call_once(libdeflateDispatchInitialized, [activeDecompressor, data, rawSize]() {
-        // libdeflate lazily initializes a global decompression dispatch function.
-        // Force that initialization once on a single thread before parallel decoding.
+        // libdeflate lazily initializes a global decompression dispatch
+        // function. Force that initialization once on a single thread before
+        // parallel decoding.
         std::vector<std::byte> warmupOutput(rawSize);
         std::size_t warmupOut = 0;
         (void)libdeflate_gzip_decompress(activeDecompressor, data.data(), std::size(data),
@@ -327,16 +330,27 @@ std::vector<std::byte> CramGzipDecompress(std::span<const std::byte> data, std::
 
 std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data)
 {
-    return CramGzipCompress(data, nullptr);
+    return CramGzipCompress(data, nullptr, std::nullopt);
+}
+
+std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data, const int compressionLevel)
+{
+    return CramGzipCompress(data, nullptr, compressionLevel);
 }
 
 std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data,
-                                        libdeflate_compressor* compressor)
+                                        libdeflate_compressor* compressor,
+                                        std::optional<int> compressionLevel)
 {
     LibdeflateCompressorPtr ownedCompressor{};
     auto* activeCompressor = compressor;
     if (activeCompressor == nullptr) {
-        ownedCompressor.reset(libdeflate_alloc_compressor(6));
+        const int level = compressionLevel.value_or(DEFAULT_GZIP_COMPRESSION_LEVEL);
+        if (level < 0 || level > 12) {
+            throw std::runtime_error(
+                std::format("CramGzipCompress: invalid gzip compression level {}", level));
+        }
+        ownedCompressor.reset(libdeflate_alloc_compressor(level));
         activeCompressor = ownedCompressor.get();
     }
     if (activeCompressor == nullptr) {
@@ -568,12 +582,14 @@ void DecompressCramBlock(CramBlock& block, libdeflate_decompressor* decompressor
     block.Method = CramBlockMethod::RAW;
 }
 
-void CompressCramBlock(CramBlock& block, CramBlockMethod method)
+void CompressCramBlock(CramBlock& block, CramBlockMethod method,
+                       std::optional<int> compressionLevel)
 {
-    CompressCramBlock(block, method, nullptr);
+    CompressCramBlock(block, method, nullptr, compressionLevel);
 }
 
-void CompressCramBlock(CramBlock& block, CramBlockMethod method, libdeflate_compressor* compressor)
+void CompressCramBlock(CramBlock& block, CramBlockMethod method, libdeflate_compressor* compressor,
+                       std::optional<int> compressionLevel)
 {
     if (method == CramBlockMethod::RAW) {
         block.Method = CramBlockMethod::RAW;
@@ -582,7 +598,7 @@ void CompressCramBlock(CramBlock& block, CramBlockMethod method, libdeflate_comp
     }
     block.RawSize = static_cast<std::int32_t>(std::size(block.Data));
     if (method == CramBlockMethod::GZIP) {
-        block.Data = CramGzipCompress(block.Data, compressor);
+        block.Data = CramGzipCompress(block.Data, compressor, compressionLevel);
     } else {
         block.Data = CompressionRegistry::Instance().Compress(method, block.Data);
     }

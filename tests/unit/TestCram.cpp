@@ -545,6 +545,128 @@ TEST(CramSliceHeader, OptionalTagsRoundTrip)
     EXPECT_EQ(parsed.OptionalTags, hdr.OptionalTags);
 }
 
+TEST(CramSlice, DefaultConstructionIsEmpty)
+{
+    CramSlice slice;
+    EXPECT_EQ(slice.Header.NumRecords, 0);
+    EXPECT_EQ(slice.CoreBlock.ContentType, CramBlockContentType::FILE_HEADER);
+    EXPECT_TRUE(std::empty(slice.ExternalBlocks));
+}
+
+TEST(CramContainer, DefaultConstructionIsEmpty)
+{
+    CramContainer container;
+    EXPECT_EQ(container.Header.NumRecords, 0);
+    EXPECT_TRUE(std::empty(container.CompressionHeader.DataSeriesEncodings));
+    EXPECT_TRUE(std::empty(container.Slices));
+}
+
+TEST(CramSlice, SerializeRoundTrip)
+{
+    CramSlice slice;
+    slice.Header.RefSeqId = 0;
+    slice.Header.AlignmentStart = 100;
+    slice.Header.AlignmentSpan = 50;
+    slice.Header.NumRecords = 2;
+    slice.Header.RecordCounter = 0;
+    slice.Header.NumBlocks = 2;
+    slice.Header.BlockContentIds = {1};
+
+    slice.CoreBlock.Method = CramBlockMethod::RAW;
+    slice.CoreBlock.ContentType = CramBlockContentType::CORE_DATA;
+    slice.CoreBlock.ContentId = 0;
+    slice.CoreBlock.RawSize = 0;
+    slice.CoreBlock.CompressedSize = 0;
+
+    CramBlock extBlock;
+    extBlock.Method = CramBlockMethod::RAW;
+    extBlock.ContentType = CramBlockContentType::EXTERNAL_DATA;
+    extBlock.ContentId = 1;
+    extBlock.Data = {std::byte{0xAA}, std::byte{0xBB}};
+    extBlock.RawSize = 2;
+    extBlock.CompressedSize = 2;
+    slice.ExternalBlocks.push_back(std::move(extBlock));
+
+    const auto bytes = SerializeSlice(slice);
+    ASSERT_FALSE(std::empty(bytes));
+
+    std::size_t bytesRead = 0;
+    const auto headerBlock = ParseBlock(bytes, bytesRead);
+    EXPECT_EQ(headerBlock.ContentType, CramBlockContentType::SLICE_HEADER);
+
+    const auto parsedHeader = ParseSliceHeader(headerBlock.Data);
+    EXPECT_EQ(parsedHeader.RefSeqId, 0);
+    EXPECT_EQ(parsedHeader.AlignmentStart, 100);
+    EXPECT_EQ(parsedHeader.NumRecords, 2);
+    EXPECT_EQ(SerializedSliceSize(slice), std::size(bytes));
+}
+
+TEST(CramContainer, SerializeAndParseRoundTrip)
+{
+    CramCompressionHeader compressionHeader;
+    compressionHeader.PreservationMap.ReadNamesIncluded = true;
+    compressionHeader.PreservationMap.ApDelta = false;
+    compressionHeader.PreservationMap.ReferenceRequired = false;
+
+    CramEncodingDescriptor extDesc;
+    extDesc.CodecId = CramCodecId::EXTERNAL;
+    WriteItf8(extDesc.Parameters, 1);
+    compressionHeader.DataSeriesEncodings.emplace_back(CramDataSeries::BF, extDesc);
+
+    auto makeSlice = [](std::int32_t recordCounter, std::int32_t contentId) {
+        CramSlice slice;
+        slice.Header.RefSeqId = -1;
+        slice.Header.AlignmentStart = 1;
+        slice.Header.AlignmentSpan = 0;
+        slice.Header.NumRecords = 1;
+        slice.Header.RecordCounter = recordCounter;
+        slice.Header.NumBlocks = 2;
+        slice.Header.BlockContentIds = {contentId};
+        slice.Header.EmbeddedRefBlockId = -1;
+
+        slice.CoreBlock.Method = CramBlockMethod::RAW;
+        slice.CoreBlock.ContentType = CramBlockContentType::CORE_DATA;
+        slice.CoreBlock.ContentId = 0;
+        slice.CoreBlock.RawSize = 0;
+        slice.CoreBlock.CompressedSize = 0;
+        slice.CoreBlock.Data = {};
+
+        CramBlock ext;
+        ext.Method = CramBlockMethod::RAW;
+        ext.ContentType = CramBlockContentType::EXTERNAL_DATA;
+        ext.ContentId = contentId;
+        ext.Data = {std::byte{0x01}, std::byte{0x02}};
+        ext.RawSize = 2;
+        ext.CompressedSize = 2;
+        slice.ExternalBlocks.push_back(std::move(ext));
+        return slice;
+    };
+
+    CramContainer container;
+    container.Header.RefSeqId = -1;
+    container.Header.StartPos = 1;
+    container.Header.AlignmentSpan = 0;
+    container.Header.NumRecords = 2;
+    container.Header.RecordCounter = 0;
+    container.Header.Bases = 0;
+    container.CompressionHeader = std::move(compressionHeader);
+    container.Slices = {makeSlice(0, 1), makeSlice(1, 2)};
+
+    const auto serialized = SerializeContainer(container);
+    ASSERT_FALSE(std::empty(serialized));
+
+    std::size_t headerBytesRead = 0;
+    const auto parsedHeader = ParseContainerHeader(serialized, headerBytesRead);
+    const auto parsed = ParseContainer(
+        parsedHeader, std::span<const std::byte>{serialized}.subspan(headerBytesRead));
+
+    ASSERT_EQ(std::size(parsed.Slices), 2u);
+    EXPECT_EQ(parsed.Slices[0].Header.RecordCounter, 0);
+    EXPECT_EQ(parsed.Slices[1].Header.RecordCounter, 1);
+    EXPECT_EQ(parsed.Slices[0].CoreBlock.ContentType, CramBlockContentType::CORE_DATA);
+    EXPECT_EQ(parsed.Slices[1].ExternalBlocks.front().ContentId, 2);
+}
+
 // ===========================================================================
 // Compression Header Tests
 // ===========================================================================
@@ -1081,8 +1203,8 @@ TEST(CramReaderInfrastructure, DecodeRecordUsesContextStruct)
 
     const std::string source(reinterpret_cast<const char*>(sourceBytes.data()), sourceBytes.size());
     EXPECT_NE(source.find("struct DecodeRecordContext"), std::string::npos);
-    EXPECT_NE(source.find("DecodeRecord(BamRecord& record, DecodeRecordContext& ctx)"),
-              std::string::npos);
+    EXPECT_NE(source.find("DecodeRecord(BamRecord& record"), std::string::npos);
+    EXPECT_NE(source.find("DecodeRecordContext& ctx"), std::string::npos);
 }
 
 TEST(CramCompression, BlockCompressDecompressRans4x8)
@@ -1276,6 +1398,14 @@ protected:
     }
 };
 
+TEST(CramWriterConfig, NewFieldsHaveCorrectDefaults)
+{
+    CramWriterConfig config;
+    EXPECT_EQ(config.SlicesPerContainer, 1);
+    EXPECT_FALSE(config.CompressionLevel.has_value());
+    EXPECT_FALSE(config.UseTempFile);
+}
+
 TEST_F(CramWriterReaderTest, WriteHeaderOnly)
 {
     const SamHeader header = MakeMinimalHeader();
@@ -1316,6 +1446,63 @@ TEST_F(CramWriterReaderTest, WriteAndReadUnmappedRecords)
     EXPECT_EQ(seqs[1], "TGCA");
 }
 
+TEST_F(CramWriterReaderTest, ReadRawRecordRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    BamRecord source = MakeMappedRecord("raw_decode", "ACGTA");
+    source.MutableTags().Set(TagKey{'N', 'M'}, TagValue{std::int64_t{2}});
+    {
+        CramWriter writer{tmpPath, header};
+        writer.Write(source);
+    }
+
+    CramReader reader{tmpPath};
+    const auto raw = reader.ReadRawRecord();
+    ASSERT_TRUE(raw.has_value());
+    EXPECT_EQ(raw->Name(), "raw_decode");
+    EXPECT_EQ(raw->RefId(), 0);
+    EXPECT_EQ(raw->Pos(), 100);
+    EXPECT_EQ(raw->MapQ(), 30u);
+    EXPECT_EQ(raw->Seq().ToString(), "ACGTA");
+
+    const TagMap tags = raw->ParseTags();
+    const TagValue* nm = tags.Get(TagKey{'N', 'M'});
+    ASSERT_NE(nm, nullptr);
+    const auto* nmValue = std::get_if<std::int64_t>(nm);
+    ASSERT_NE(nmValue, nullptr);
+    EXPECT_EQ(*nmValue, 2);
+
+    EXPECT_FALSE(reader.ReadRawRecord().has_value());
+}
+
+TEST_F(CramWriterReaderTest, RawRecordsRangeRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+    {
+        CramWriter writer{tmpPath, header};
+        writer.Write(MakeUnmappedRecord("raw_range_1", "AAAA"));
+        writer.Write(MakeUnmappedRecord("raw_range_2", "CCCC"));
+        writer.Write(MakeUnmappedRecord("raw_range_3", "GGGG"));
+    }
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    std::vector<std::string> seqs;
+    for (const auto& record : reader.RawRecords()) {
+        names.emplace_back(record.Name());
+        seqs.emplace_back(record.Seq().ToString());
+    }
+
+    ASSERT_EQ(std::size(names), 3u);
+    EXPECT_EQ(names[0], "raw_range_1");
+    EXPECT_EQ(names[1], "raw_range_2");
+    EXPECT_EQ(names[2], "raw_range_3");
+    EXPECT_EQ(seqs[0], "AAAA");
+    EXPECT_EQ(seqs[1], "CCCC");
+    EXPECT_EQ(seqs[2], "GGGG");
+}
+
 TEST_F(CramWriterReaderTest, WriteRawRecordRoundTrip)
 {
     const SamHeader header = MakeMinimalHeader();
@@ -1344,6 +1531,36 @@ TEST_F(CramWriterReaderTest, WriteRawRecordRoundTrip)
     const auto* nmValue = std::get_if<std::int64_t>(nm);
     ASSERT_NE(nmValue, nullptr);
     EXPECT_EQ(*nmValue, 1);
+}
+
+TEST_F(CramWriterReaderTest, QueryRawReturnsOverlappingRecords)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.WriteCrai = true;
+    config.RecordsPerSlice = 1;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+
+        BamRecord hit = MakeMappedRecord("query_hit", "ACGT");
+        hit.Pos(100);
+        writer.Write(hit);
+
+        BamRecord miss = MakeMappedRecord("query_miss", "TGCA");
+        miss.Pos(180);
+        writer.Write(miss);
+    }
+
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    CramReader reader{tmpPath};
+    const auto queried = reader.QueryRaw(index, 0, 100, 110);
+
+    ASSERT_EQ(std::size(queried), 1u);
+    EXPECT_EQ(queried[0].Name(), "query_hit");
+    EXPECT_EQ(queried[0].Pos(), 100);
+    EXPECT_EQ(queried[0].Seq().ToString(), "ACGT");
 }
 
 TEST_F(CramWriterReaderTest, WriteRawRecordBatchRoundTrip)
@@ -1623,6 +1840,250 @@ TEST_F(CramWriterReaderTest, WriteMultipleRecords)
         ++count;
     }
     EXPECT_EQ(count, 10u);
+}
+
+TEST_F(CramWriterReaderTest, MultiSliceContainerRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 2;
+    config.SlicesPerContainer = 3;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (int i = 0; i < 6; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("read{}", i), "ACGT"));
+        }
+        writer.Close();
+    }
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    for (const auto& record : reader.Records()) {
+        names.emplace_back(record.Name());
+    }
+
+    ASSERT_EQ(std::size(names), 6u);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_EQ(names[i], std::format("read{}", i));
+    }
+}
+
+TEST_F(CramWriterReaderTest, MultiSliceContainerPartialFlushOnClose)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 3;
+    config.SlicesPerContainer = 2;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (int i = 0; i < 5; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("rec{}", i), "TGCA"));
+        }
+        writer.Close();
+    }
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    for (const auto& record : reader.Records()) {
+        names.emplace_back(record.Name());
+    }
+
+    ASSERT_EQ(std::size(names), 5u);
+}
+
+TEST_F(CramWriterReaderTest, MultiSliceParallelCompressionRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 2;
+    config.SlicesPerContainer = 4;
+    config.CompressionWorkers = 2;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (int i = 0; i < 8; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("par{}", i), "ACGTACGT"));
+        }
+        writer.Close();
+    }
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    for (const auto& record : reader.Records()) {
+        names.emplace_back(record.Name());
+    }
+
+    ASSERT_EQ(std::size(names), 8u);
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(names[i], std::format("par{}", i));
+    }
+}
+
+TEST_F(CramWriterReaderTest, MultiContainerPipelineRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 2;
+    config.SlicesPerContainer = 2;
+    config.CompressionWorkers = 2;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (int i = 0; i < 12; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("pipe{}", i), "ACGT"));
+        }
+        writer.Close();
+    }
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    for (const auto& record : reader.Records()) {
+        names.emplace_back(record.Name());
+    }
+
+    ASSERT_EQ(std::size(names), 12u);
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_EQ(names[i], std::format("pipe{}", i));
+    }
+}
+
+TEST_F(CramWriterReaderTest, MultiSliceCraiHasPerSliceEntries)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 1;
+    config.SlicesPerContainer = 3;
+    config.WriteCrai = true;
+
+    BamRecord r1 = MakeMappedRecord("a", "AAAA");
+    r1.Pos(10);
+    BamRecord r2 = MakeMappedRecord("b", "CCCC");
+    r2.Pos(20);
+    BamRecord r3 = MakeMappedRecord("c", "GGGG");
+    r3.Pos(30);
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        writer.Write(r1);
+        writer.Write(r2);
+        writer.Write(r3);
+        writer.Close();
+    }
+
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    const auto entries = index.EntriesForReference(0);
+    ASSERT_EQ(std::size(entries), 3u);
+
+    EXPECT_EQ(entries[0].ContainerOffset, entries[1].ContainerOffset);
+    EXPECT_EQ(entries[1].ContainerOffset, entries[2].ContainerOffset);
+
+    EXPECT_LT(entries[0].SliceOffset, entries[1].SliceOffset);
+    EXPECT_LT(entries[1].SliceOffset, entries[2].SliceOffset);
+}
+
+TEST_F(CramWriterReaderTest, UnlimitedSlicesPerContainerFlushesOnClose)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 1;
+    config.SlicesPerContainer = 0;
+    config.WriteCrai = true;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        writer.Write(MakeMappedRecord("a", "AAAA"));
+        writer.Write(MakeMappedRecord("b", "CCCC"));
+        writer.Write(MakeMappedRecord("c", "GGGG"));
+        writer.Close();
+    }
+
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    ASSERT_EQ(std::size(index.EntriesForReference(0)), 3u);
+    const auto entries = index.EntriesForReference(0);
+    EXPECT_EQ(entries[0].ContainerOffset, entries[1].ContainerOffset);
+    EXPECT_EQ(entries[1].ContainerOffset, entries[2].ContainerOffset);
+}
+
+TEST_F(CramWriterReaderTest, MultiSliceCraiRegionQuery)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.RecordsPerSlice = 1;
+    config.SlicesPerContainer = 3;
+    config.WriteCrai = true;
+
+    BamRecord r1 = MakeMappedRecord("early", "AAAAA");
+    r1.Pos(10);
+    BamRecord r2 = MakeMappedRecord("target", "CCCCC");
+    r2.Pos(50);
+    BamRecord r3 = MakeMappedRecord("late", "GGGGG");
+    r3.Pos(200);
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        writer.Write(r1);
+        writer.Write(r2);
+        writer.Write(r3);
+        writer.Close();
+    }
+
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    CramReader reader{tmpPath};
+    const auto queried = reader.Query(index, 0, 48, 56);
+
+    ASSERT_EQ(std::size(queried), 1u);
+    EXPECT_EQ(queried.front().Name(), "target");
+}
+
+TEST_F(CramWriterReaderTest, CompressionLevelRoundTrip)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.CompressionLevel = 1;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        writer.Write(MakeUnmappedRecord("level_test", "ACGTACGTACGT"));
+        writer.Close();
+    }
+
+    CramReader reader{tmpPath};
+    const auto record = reader.ReadRecord();
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->Name(), "level_test");
+    EXPECT_EQ(record->Sequence(), "ACGTACGTACGT");
+}
+
+TEST_F(CramWriterReaderTest, UseTempFileAtomicWrite)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    CramWriterConfig config;
+    config.UseTempFile = true;
+
+    {
+        CramWriter writer{tmpPath, header, config};
+        writer.Write(MakeUnmappedRecord("atomic", "ACGT"));
+        EXPECT_FALSE(std::filesystem::exists(tmpPath));
+        writer.Close();
+    }
+
+    EXPECT_TRUE(std::filesystem::exists(tmpPath));
+
+    CramReader reader{tmpPath};
+    const auto record = reader.ReadRecord();
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->Name(), "atomic");
 }
 
 TEST_F(CramWriterReaderTest, GzipCompressionRoundTrip)

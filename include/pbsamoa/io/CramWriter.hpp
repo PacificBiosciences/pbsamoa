@@ -30,6 +30,12 @@ struct CramWriterConfig
     /// \brief Maximum number of records per slice.
     std::int32_t RecordsPerSlice{10000};
 
+    /// \brief Maximum number of slices per container.
+    ///
+    /// A value of 1 preserves the original one-slice-per-container behavior.
+    /// A value <= 0 means "unlimited" and only flushes at Close().
+    std::int32_t SlicesPerContainer{1};
+
     /// \brief CRAM major version (must be 3).
     std::uint8_t MajorVersion{3};
 
@@ -47,6 +53,14 @@ struct CramWriterConfig
     ///
     /// 0 disables parallel compression and uses synchronous encoding.
     std::size_t CompressionWorkers{0};
+
+    /// \brief Optional compression level for method-specific codecs.
+    ///
+    /// For gzip this maps to libdeflate levels [0, 12].
+    std::optional<int> CompressionLevel{};
+
+    /// \brief Write through a temporary file and atomically rename on Close().
+    bool UseTempFile{false};
 };
 
 /// \brief Writes CRAM files from BamRecord and RawRecord inputs.

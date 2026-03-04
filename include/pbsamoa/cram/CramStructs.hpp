@@ -215,6 +215,26 @@ struct CramCompressionHeader
 };
 
 // ---------------------------------------------------------------------------
+// Composed Types
+// ---------------------------------------------------------------------------
+
+/// \brief A fully-formed CRAM slice: parsed slice header + data blocks.
+struct CramSlice
+{
+    CramSliceHeader Header;
+    CramBlock CoreBlock;
+    std::vector<CramBlock> ExternalBlocks;
+};
+
+/// \brief A fully-formed CRAM container: header + compression header + slices.
+struct CramContainer
+{
+    CramContainerHeader Header;
+    CramCompressionHeader CompressionHeader;
+    std::vector<CramSlice> Slices;
+};
+
+// ---------------------------------------------------------------------------
 // EOF marker
 // ---------------------------------------------------------------------------
 
@@ -265,6 +285,24 @@ CramCompressionHeader ParseCompressionHeader(std::span<const std::byte> data);
 
 /// \brief Serialize a compression header to bytes.
 std::vector<std::byte> SerializeCompressionHeader(const CramCompressionHeader& header);
+
+/// \brief Serialize a complete slice (slice header block + data blocks).
+std::vector<std::byte> SerializeSlice(const CramSlice& slice);
+
+/// \brief Compute serialized byte size of a slice without allocating output
+/// bytes.
+std::size_t SerializedSliceSize(const CramSlice& slice);
+
+/// \brief Serialize a complete container (header + payload blocks).
+std::vector<std::byte> SerializeContainer(const CramContainer& container);
+
+/// \brief Parse a full container payload (bytes after the container header).
+///
+/// \param header Parsed container header for this payload.
+/// \param payload Raw payload bytes of length \c header.Length.
+/// \returns Parsed container with decompressed compression/slice headers and
+///          still-compressed data blocks.
+CramContainer ParseContainer(const CramContainerHeader& header, std::span<const std::byte> payload);
 
 /// \brief Check if bytes match the CRAM EOF marker.
 bool IsCramEofMarker(std::span<const std::byte> data);

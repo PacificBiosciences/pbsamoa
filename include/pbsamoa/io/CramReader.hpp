@@ -2,6 +2,7 @@
 #define PBSAMOA_IO_CRAMREADER_HPP
 
 #include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/index/CraiIndex.hpp>
 
@@ -51,6 +52,10 @@ public:
     /// \brief Read the next record. Returns nullopt at EOF.
     std::optional<BamRecord> ReadRecord();
 
+    /// \brief Read the next record as an owning RawRecord. Returns nullopt at
+    /// EOF.
+    std::optional<RawRecord> ReadRawRecord();
+
     /// \brief Return records overlapping [beg, end) from CRAI-indexed CRAM
     /// slices.
     ///
@@ -58,6 +63,11 @@ public:
     /// 0-based exclusive. For unmapped queries, use refId = -1.
     std::vector<BamRecord> Query(const CraiIndex& index, std::int32_t refId, std::int32_t beg,
                                  std::int32_t end);
+
+    /// \brief Return raw BAM-layout records overlapping [beg, end) from
+    /// CRAI-indexed CRAM slices.
+    std::vector<RawRecord> QueryRaw(const CraiIndex& index, std::int32_t refId, std::int32_t beg,
+                                    std::int32_t end);
 
     /// \brief Range interface for iteration.
     class RecordRange : public std::ranges::view_interface<RecordRange>
@@ -89,6 +99,37 @@ public:
     };
 
     RecordRange Records();
+
+    /// \brief Range interface for iteration over RawRecord output.
+    class RawRecordRange : public std::ranges::view_interface<RawRecordRange>
+    {
+    public:
+        class Iterator
+        {
+        public:
+            Iterator();
+            explicit Iterator(CramReader* reader);
+
+            const RawRecord& operator*() const;
+            const RawRecord* operator->() const;
+            Iterator& operator++();
+            void operator++(int);
+            bool operator==(const Iterator& other) const;
+
+        private:
+            CramReader* reader_{nullptr};
+            std::optional<RawRecord> current_;
+        };
+
+        explicit RawRecordRange(CramReader* reader);
+        Iterator begin();
+        Iterator end();
+
+    private:
+        CramReader* reader_;
+    };
+
+    RawRecordRange RawRecords();
 
 private:
     struct Impl;

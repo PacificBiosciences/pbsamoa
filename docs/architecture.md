@@ -115,13 +115,19 @@ Key relationships:
   `span<const byte>`, and `RawRecordBatch` (via `WriteBatch()`).
 
 - **CramReader** owns CRAM container/slice decode state and produces owned
-  `BamRecord` objects. It supports optional reference-based decoding and
-  region queries via `CraiIndex`.
+  `BamRecord` objects. Container payload parsing is centralized through
+  `ParseContainer(...)`, then slices are decompressed/decoded in order.
+  It supports optional reference-based decoding and region queries via
+  `CraiIndex`, plus `RawRecord` accessors that serialize decoded records into
+  BAM layout on demand.
 
-- **CramWriter** encodes `BamRecord` and `RawRecord` input into CRAM
-  containers/slices with configurable block codecs and optional
-  per-data-series overrides. It can emit a samtools-compatible CRAI
-  sidecar during write.
+- **CramWriter** uses a two-level write buffer:
+  `pendingRecords` (records for the current slice) and `pendingSlices`
+  (completed slices for the current container). `RecordsPerSlice` controls
+  slice boundaries; `SlicesPerContainer` controls container flush boundaries.
+  Slice encode/compress can run in parallel, while container writes are kept
+  ordered with an async write future. It can emit a samtools-compatible CRAI
+  sidecar with per-slice offsets.
 
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.
