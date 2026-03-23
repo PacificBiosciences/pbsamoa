@@ -51,7 +51,9 @@ libdeflate_dep = dependency(
     include_type: 'system',
 )
 
-deps = [libdeflate_dep, dependency('threads')]
+pbcopper_dep = dependency('pbcopper', include_type: 'system')
+
+deps = [pbcopper_dep, libdeflate_dep, dependency('threads')]
 
 # Native CRAM implementation intentionally does not depend on htslib.
 bzip2_dep = dependency('bzip2', required: false, include_type: 'system')
@@ -112,6 +114,7 @@ if not meson.is_subproject()
         description: 'PacBio SAM/BAM/BAI C++23 library',
         filebase: 'pbsamoa',
         name: 'pbsamoa',
+        requires: 'pbcopper',
         version: meson.project_version(),
     )
 endif

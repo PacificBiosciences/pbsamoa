@@ -9,7 +9,7 @@
 #include "CramInternal.hpp"
 #include "WriterUtils.hpp"
 
-#include <parallel/ThreadPool.h>
+#include <pbcopper/parallel/ThreadPool.h>
 
 #include <htscodecs/fqzcomp_qual.h>
 

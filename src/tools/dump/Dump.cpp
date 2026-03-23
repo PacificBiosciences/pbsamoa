@@ -13,7 +13,7 @@
 #include <pbsamoa/io/CramReader.hpp>
 #include <pbsamoa/io/SamReader.hpp>
 
-#include <parallel/ThreadPool.h>
+#include <pbcopper/parallel/ThreadPool.h>
 
 #include <algorithm>
 #include <array>

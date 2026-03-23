@@ -4,7 +4,7 @@
 #include "LibdeflateUtils.hpp"
 #include "WriterUtils.hpp"
 
-#include <parallel/ThreadPool.h>
+#include <pbcopper/parallel/ThreadPool.h>
 #include <rigtorp/SPSCQueue.hpp>
 
 #include <libdeflate.h>

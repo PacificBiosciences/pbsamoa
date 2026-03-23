@@ -6,7 +6,7 @@
 #include <pbsamoa/io/BamCollection.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
-#include <parallel/ThreadPool.h>
+#include <pbcopper/parallel/ThreadPool.h>
 #include <rigtorp/SPSCQueue.hpp>
 
 #include <atomic>

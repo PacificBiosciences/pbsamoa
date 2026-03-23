@@ -8,7 +8,7 @@
 #include "CramInternal.hpp"
 #include "CramMd5.hpp"
 
-#include <parallel/ThreadPool.h>
+#include <pbcopper/parallel/ThreadPool.h>
 
 #include <algorithm>
 #include <array>
