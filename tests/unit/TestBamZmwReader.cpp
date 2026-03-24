@@ -205,6 +205,38 @@ TEST_F(BamZmwReaderTest, GetNextPreservesZmwOrderWithPrefetch)
     EXPECT_EQ(reader.CurrentZmw().zmw, 7);
 }
 
+TEST_F(BamZmwReaderTest, SinglePathVectorSupportsChunking)
+{
+    WriteBamWithZmws({{42, 2}, {99, 3}, {7, 1}});
+
+    BamZmwReader reader{
+        std::vector<std::filesystem::path>{tmpBamPath_},
+        BamZmwReaderConfig{
+            .Reader =
+                BamRecordReaderConfig{
+                    .RawReaderConfig =
+                        {
+                            .ChunkNum = 1,
+                            .TotalChunks = 1,
+                        },
+                    .DecodeWorkers = 0,
+                },
+            .PrefetchCapacityZmws = 2,
+        },
+    };
+
+    std::vector<BamRecord> group;
+    std::size_t totalRecords{0};
+    std::vector<std::int32_t> zmws;
+    while (reader.GetNext(group)) {
+        totalRecords += std::size(group);
+        zmws.push_back(reader.CurrentZmw().zmw);
+    }
+
+    EXPECT_EQ(totalRecords, 6u);
+    EXPECT_EQ((std::vector<std::int32_t>{42, 99, 7}), zmws);
+}
+
 TEST_F(BamZmwReaderTest, QueueDepthNeverExceedsConfiguredCapacity)
 {
     WriteBamWithZmws({{42, 2}, {99, 2}, {7, 2}});

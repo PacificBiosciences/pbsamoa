@@ -417,6 +417,19 @@ TEST_F(BamRawReaderWhitelistTest, ChunkingCanProduceEmptyChunk)
     EXPECT_EQ(count, 0u);
 }
 
+TEST_F(BamRawReaderWhitelistTest, SinglePathVectorSupportsChunking)
+{
+    BamRawReader reader{std::vector<std::filesystem::path>{tmpBamPath_},
+                        BamRawReaderConfig{.ChunkNum = 1, .TotalChunks = 1}};
+
+    std::size_t count{0};
+    for ([[maybe_unused]] const auto& rec : reader.Records()) {
+        ++count;
+    }
+
+    EXPECT_EQ(count, 6u);
+}
+
 TEST_F(BamRawReaderWhitelistTest, ChunkingWithManyChunksStillCoversAllRecords)
 {
     std::size_t total{0};

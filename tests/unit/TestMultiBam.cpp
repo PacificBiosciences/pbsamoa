@@ -160,6 +160,16 @@ TEST_F(MultiBamTest, BamRawReaderSupportsSequentialMultiBamInput)
     EXPECT_THROW(reader.Tell(), std::logic_error);
 }
 
+TEST_F(MultiBamTest, BamRawReaderRejectsChunkingForTrueMultiBamInput)
+{
+    WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("movie/42/0_100", 10)});
+    WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("movie/99/0_100", 20)});
+
+    EXPECT_THROW((BamRawReader{std::vector<std::filesystem::path>{bam1_, bam2_},
+                               BamRawReaderConfig{.ChunkNum = 1, .TotalChunks = 1}}),
+                 std::invalid_argument);
+}
+
 TEST_F(MultiBamTest, BamRecordReaderSupportsSequentialAndQueriedMultiBamInput)
 {
     WriteBam(bam1_, MakeHeader("rg1", "sample1"),

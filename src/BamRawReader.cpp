@@ -283,18 +283,30 @@ BamRawReader::BamRawReader(const std::filesystem::path& path, BamRawReaderConfig
 }
 
 BamRawReader::BamRawReader(BamCollection collection, BamRawReaderConfig config)
-    : impl_{std::make_unique<Impl>(std::move(collection), config)}
 {
+    if (collection.Size() == 1) {
+        impl_ = std::make_unique<Impl>(collection.Files().front().Filename(), std::move(config));
+        return;
+    }
+    impl_ = std::make_unique<Impl>(std::move(collection), std::move(config));
 }
 
 BamRawReader::BamRawReader(std::vector<std::filesystem::path> paths, BamRawReaderConfig config)
-    : BamRawReader{BamCollection{std::move(paths)}, config}
 {
+    if (std::size(paths) == 1) {
+        impl_ = std::make_unique<Impl>(paths.front(), std::move(config));
+        return;
+    }
+    impl_ = std::make_unique<Impl>(BamCollection{std::move(paths)}, std::move(config));
 }
 
 BamRawReader::BamRawReader(std::vector<BamFile> files, BamRawReaderConfig config)
-    : BamRawReader{BamCollection{std::move(files)}, config}
 {
+    if (std::size(files) == 1) {
+        impl_ = std::make_unique<Impl>(files.front().Filename(), std::move(config));
+        return;
+    }
+    impl_ = std::make_unique<Impl>(BamCollection{std::move(files)}, std::move(config));
 }
 
 BamRawReader::~BamRawReader() = default;
