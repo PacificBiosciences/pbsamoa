@@ -963,18 +963,49 @@ struct ZmwGroup {
 ```
 
 Groups consecutive records by ZMW identity. Wraps a `BamRecordReader` and
-does synchronous grouping — no background threads. Assumes the source
-yields records grouped by ZMW (standard PacBio BAM ordering).
+uses a background producer thread to prefetch complete ZMW groups into a
+bounded queue. Assumes the source yields records grouped by ZMW
+(standard PacBio BAM ordering).
+
+### Configuration
+
+```cpp
+struct BamZmwReaderConfig
+{
+    BamRecordReaderConfig Reader{};
+    std::size_t PrefetchCapacityZmws{4};
+};
+```
+
+Use `Reader` for the underlying `BamRecordReader` settings and
+`PrefetchCapacityZmws` for the ZMW-group queue depth.
+
+`PrefetchCapacityZmws` is measured in complete prefetched ZMW groups, not
+records or bytes.
 
 ### Construction
 
 ```cpp
 // Takes ownership of BamRecordReader
-BamZmwReader reader{BamRecordReader{"movie.bam"}};
+BamZmwReader reader{
+    BamRecordReader{"movie.bam"},
+    BamZmwReaderConfig{.PrefetchCapacityZmws = 4},
+};
 
 // With custom config
-BamZmwReader reader{BamRecordReader{"movie.bam",
-    BamRecordReaderConfig{.DecodeWorkers = 0}}};
+BamZmwReader reader{
+    BamRecordReader{"movie.bam", BamRecordReaderConfig{.DecodeWorkers = 0}},
+    BamZmwReaderConfig{.PrefetchCapacityZmws = 2},
+};
+
+// Convenience constructor from paths
+BamZmwReader reader{
+    std::vector<std::filesystem::path>{"movie1.bam", "movie2.bam"},
+    BamZmwReaderConfig{
+        .Reader = BamRecordReaderConfig{.DecodeWorkers = 0},
+        .PrefetchCapacityZmws = 2,
+    },
+};
 ```
 
 ### Reading
@@ -988,6 +1019,19 @@ while (reader.GetNext(records)) {
     // records contains all alignments for one ZMW
 }
 ```
+
+### Metrics
+
+```cpp
+ZmwReaderMetrics m = reader.GetMetrics();
+double fullness = static_cast<double>(m.QueueDepth) / m.ConfiguredCapacity;
+```
+
+`ZmwReaderMetrics` fields:
+
+- Capacity/occupancy: `ConfiguredCapacity`, `QueueDepth`, `PeakQueueDepth`
+- Throughput: `GroupsProduced`, `GroupsConsumed`
+- Stalls: `ProducerStalls`, `ConsumerStalls`
 
 ## ZmiBamWriter
 
@@ -1116,6 +1160,7 @@ via relaxed atomics — diff two snapshots for per-second rates.
 | `BgzfMetrics`      | `BamRawReader::GetMetrics()`    |
 | `DecodeMetrics`    | (internal to `ReaderMetrics`)   |
 | `ReaderMetrics`    | `BamRecordReader::GetMetrics()` |
+| `ZmwReaderMetrics` | `BamZmwReader::GetMetrics()`    |
 | `BgzfWriteMetrics` | (internal to `WriterMetrics`)   |
 | `WriterMetrics`    | `BamWriter::GetMetrics()`       |
 
@@ -1127,3 +1172,9 @@ Pool (via `PoolMetrics Pool`): `QueueDepth`, `PeakQueueDepth`, `ActiveWorkers`,
 Queue: `RecordsProduced`, `RecordsConsumed`.
 Stalls: `IoStalls`, `ConsumerStalls`, `ReaderStalls`.
 Timing (ns): `IoReadNs`, `DecompressNs`, `RecordParseNs`.
+
+### ZmwReaderMetrics fields
+
+Capacity/occupancy: `ConfiguredCapacity`, `QueueDepth`, `PeakQueueDepth`.
+Throughput: `GroupsProduced`, `GroupsConsumed`.
+Stalls: `ProducerStalls`, `ConsumerStalls`.

@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -158,6 +159,92 @@ TEST_F(BamZmwReaderTest, HeaderForwarded)
     WriteBamWithZmws({{42, 1}});
     const BamZmwReader zmwReader{MakeReader()};
     EXPECT_EQ(zmwReader.Header().Version(), "1.6");
+}
+
+TEST_F(BamZmwReaderTest, MetricsStartEmptyWithConfiguredCapacity)
+{
+    WriteBamWithZmws({{42, 2}, {99, 2}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+
+    const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_EQ(m.ConfiguredCapacity, 2u);
+    EXPECT_EQ(m.GroupsConsumed, 0u);
+}
+
+TEST_F(BamZmwReaderTest, RejectsZeroPrefetchCapacity)
+{
+    WriteBamWithZmws({{42, 1}});
+    EXPECT_THROW((BamZmwReader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 0}}),
+                 std::invalid_argument);
+}
+
+TEST_F(BamZmwReaderTest, MetricsShowBufferedGroupsBeforeConsumption)
+{
+    WriteBamWithZmws({{42, 2}, {99, 3}, {7, 1}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    const ZmwReaderMetrics before = reader.GetMetrics();
+    EXPECT_GT(before.QueueDepth, 0u);
+    EXPECT_LE(before.QueueDepth, before.ConfiguredCapacity);
+}
+
+TEST_F(BamZmwReaderTest, GetNextPreservesZmwOrderWithPrefetch)
+{
+    WriteBamWithZmws({{42, 2}, {99, 3}, {7, 1}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+
+    std::vector<BamRecord> group;
+    ASSERT_TRUE(reader.GetNext(group));
+    EXPECT_EQ(reader.CurrentZmw().zmw, 42);
+
+    ASSERT_TRUE(reader.GetNext(group));
+    EXPECT_EQ(reader.CurrentZmw().zmw, 99);
+
+    ASSERT_TRUE(reader.GetNext(group));
+    EXPECT_EQ(reader.CurrentZmw().zmw, 7);
+}
+
+TEST_F(BamZmwReaderTest, QueueDepthNeverExceedsConfiguredCapacity)
+{
+    WriteBamWithZmws({{42, 2}, {99, 2}, {7, 2}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 1}};
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_LE(m.QueueDepth, 1u);
+    EXPECT_LE(m.PeakQueueDepth, 1u);
+}
+
+TEST_F(BamZmwReaderTest, MetricsAdvanceAsGroupsAreConsumed)
+{
+    WriteBamWithZmws({{42, 1}, {99, 1}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+
+    std::vector<BamRecord> group;
+    ASSERT_TRUE(reader.GetNext(group));
+    const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_EQ(m.GroupsConsumed, 1u);
+}
+
+TEST_F(BamZmwReaderTest, ProducerStallsWhenQueueIsFull)
+{
+    WriteBamWithZmws({{42, 1}, {99, 1}, {7, 1}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 1}};
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_GT(m.ProducerStalls, 0u);
+}
+
+TEST_F(BamZmwReaderTest, EarlyDestructionDoesNotHang)
+{
+    WriteBamWithZmws({{42, 2}, {99, 2}, {7, 2}, {8, 2}});
+    {
+        BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 1}};
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    SUCCEED();
 }
 
 TEST_F(BamZmwReaderTest, SplitZmwAcrossCalls)

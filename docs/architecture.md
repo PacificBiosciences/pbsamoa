@@ -297,7 +297,7 @@ virtualOffset)` entries in BAM write order. BGZF-compressed.
 
 **BamZmwReader** — Groups consecutive records by ZMW identity, producing
 groups of `BamRecord` objects (one group per ZMW). Wraps a `BamRecordReader`
-and does synchronous grouping.
+and prefetches complete groups into a bounded queue on a background thread.
 
 **ZmiBamWriter** — Writes a BAM and its `.zmi` index simultaneously.
 
@@ -306,7 +306,10 @@ and does synchronous grouping.
 The three-layer reader stack:
 
 ```
- BamZmwReader::GetNext()        (synchronous ZMW grouping)
+ BamZmwReader::GetNext()        (consume prefetched ZMW groups)
+      │
+      ▼
+ BamZmwReader jthread           (group records, fill ZMW queue)
       │
       ▼
  BamRecordReader::ReadRecord()  (pops from SPSC queue)
@@ -328,11 +331,11 @@ The three-layer reader stack:
                 └──────── push BamRecord → SPSC queue ──────────┘
 ```
 
-**BamZmwReader** is synchronous — it calls `BamRecordReader::ReadRecord()`
-in a loop, accumulating records with the same ZMW hole number parsed from
-the read name (`movie/zmw/start_end`). When a different ZMW is encountered,
-the accumulated group is returned and the new record is stashed as
-`pending_` for the next call.
+**BamZmwReader** runs a producer thread that calls `BamRecordReader::ReadRecord()`
+in a loop, accumulates records with the same ZMW hole number parsed from the
+read name (`movie/zmw/start_end`), and publishes each complete group to a
+bounded queue. `GetNext()` consumes those prefetched groups, so downstream work
+can overlap with grouping of upcoming ZMWs.
 
 ---
 
@@ -424,11 +427,14 @@ monitoring.
 - **DecodeMetrics** — decode pool stats, throughput, stall counters, timing
 - **ReaderMetrics** — composite of `BgzfMetrics` + `DecodeMetrics` +
   `TotalRecordsRead`, returned by `BamRecordReader::GetMetrics()`
+- **ZmwReaderMetrics** — `BamZmwReader` prefetch queue capacity, occupancy,
+  throughput, and stall counters
 - **BgzfWriteMetrics** — compression pool stats, stall counters, throughput,
   timing
 - **WriterMetrics** — composite of `BgzfWriteMetrics` +
   `TotalRecordsWritten`, returned by `BamWriter::GetMetrics()`
 
-`BamRawReader::GetMetrics()` returns `BgzfMetrics` directly. All snapshots
-are captured via relaxed atomics — diff two snapshots to compute per-second
-rates.
+`BamRawReader::GetMetrics()` returns `BgzfMetrics` directly. `BamZmwReader`
+returns `ZmwReaderMetrics` from its group-prefetch layer. All snapshots are
+captured via cheap state reads; diff two snapshots to compute per-second
+rates where appropriate.

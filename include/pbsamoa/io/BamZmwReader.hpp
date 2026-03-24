@@ -2,6 +2,7 @@
 #define PBSAMOA_IO_BAMZMWREADER_HPP
 
 #include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/Metrics.hpp>
 #include <pbsamoa/index/ZmwIndex.hpp>
 #include <pbsamoa/io/BamCollection.hpp>
 #include <pbsamoa/io/BamFile.hpp>
@@ -21,21 +22,28 @@ struct ZmwGroup
     std::vector<BamRecord> records;
 };
 
+struct BamZmwReaderConfig
+{
+    BamRecordReaderConfig Reader{};
+    std::size_t PrefetchCapacityZmws{4};
+};
+
 /// \brief Reads BAM records grouped by ZMW identity.
 ///
 /// Wraps a BamRecordReader and yields groups of consecutive records that share
 /// the same `(rgId, zmw)`, where `rgId` is parsed from the `RG` tag's base
 /// PacBio read-group ID when present and falls back to `0` otherwise.
-/// Assumes the source yields records already grouped by this identity.
+/// Uses a background producer thread to prefetch complete ZMW groups into a
+/// bounded queue. Assumes the source yields records already grouped by this
+/// identity.
 class BamZmwReader
 {
 public:
     /// \param[in] reader pre-decode record reader (takes ownership)
-    explicit BamZmwReader(BamRecordReader reader);
-    explicit BamZmwReader(BamCollection collection, BamRecordReaderConfig config = {});
-    explicit BamZmwReader(std::vector<std::filesystem::path> paths,
-                          BamRecordReaderConfig config = {});
-    explicit BamZmwReader(std::vector<BamFile> files, BamRecordReaderConfig config = {});
+    explicit BamZmwReader(BamRecordReader reader, BamZmwReaderConfig config = {});
+    explicit BamZmwReader(BamCollection collection, BamZmwReaderConfig config = {});
+    explicit BamZmwReader(std::vector<std::filesystem::path> paths, BamZmwReaderConfig config = {});
+    explicit BamZmwReader(std::vector<BamFile> files, BamZmwReaderConfig config = {});
     ~BamZmwReader();
 
     BamZmwReader(const BamZmwReader&) = delete;
@@ -58,6 +66,9 @@ public:
     /// When chunking is active, returns the chunk-scoped count (no extra I/O).
     /// Otherwise, falls back to opening the ZMW index. Returns -1 on failure.
     [[nodiscard]] std::int32_t NumZmws() const;
+
+    /// \brief Snapshot of BamZmwReader prefetch queue metrics.
+    [[nodiscard]] ZmwReaderMetrics GetMetrics() const;
 
 private:
     struct Impl;

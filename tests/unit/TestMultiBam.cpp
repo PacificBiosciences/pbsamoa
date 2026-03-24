@@ -205,7 +205,10 @@ TEST_F(MultiBamTest, BamZmwReaderSupportsMultiBamInput)
              {MakeRecord("movie/42/100_200", 20), MakeRecord("movie/99/0_100", 30)});
 
     BamZmwReader reader{std::vector<std::filesystem::path>{bam1_, bam2_},
-                        BamRecordReaderConfig{.DecodeWorkers = 0}};
+                        BamZmwReaderConfig{
+                            .Reader = BamRecordReaderConfig{.DecodeWorkers = 0},
+                            .PrefetchCapacityZmws = 2,
+                        }};
     std::vector<BamRecord> group;
 
     ASSERT_TRUE(reader.GetNext(group));

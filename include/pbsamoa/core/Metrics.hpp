@@ -83,6 +83,20 @@ struct ReaderMetrics
     bool ParallelDecode{false};         ///< true if DecodeWorkers > 0
 };
 
+/// \brief Snapshot of BamZmwReader prefetch queue metrics.
+struct ZmwReaderMetrics
+{
+    std::size_t ConfiguredCapacity{0};
+    std::size_t QueueDepth{0};
+    std::size_t PeakQueueDepth{0};
+
+    std::uint64_t GroupsProduced{0};
+    std::uint64_t GroupsConsumed{0};
+
+    std::uint64_t ProducerStalls{0};
+    std::uint64_t ConsumerStalls{0};
+};
+
 /// \brief Snapshot of BGZF writer pipeline metrics.
 struct BgzfWriteMetrics
 {
