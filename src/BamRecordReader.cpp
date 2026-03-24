@@ -210,7 +210,8 @@ struct BamRecordReader::Impl
                     if (stopToken.stop_requested()) {
                         return;
                     }
-                    while (!queue_.try_push(QueueItem{std::move(rec)})) {
+                    QueueItem item{std::move(rec)};
+                    while (!queue_.try_push(std::move(item))) {
                         if (stopToken.stop_requested()) {
                             return;
                         }

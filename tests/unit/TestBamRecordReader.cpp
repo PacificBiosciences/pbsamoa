@@ -184,5 +184,38 @@ TEST(BamRecordReader, EarlyDestruction)
     SUCCEED();
 }
 
+// Regression: ProducerLoop's try_push retry moved from the record twice,
+// producing phantom default-constructed BamRecords when the SPSC queue was full.
+TEST(BamRecordReader, NoPhantomRecordsOnQueueBackpressure)
+{
+    const auto path = tests::DataDir / "benchmark.bam";
+
+    // Ground truth via raw reader
+    std::size_t rawCount{0};
+    {
+        BamRawReader raw{path};
+        while (raw.ReadRecord().has_value()) {
+            ++rawCount;
+        }
+    }
+    ASSERT_GT(rawCount, 0U);
+
+    // Tiny queue (capacity=2) forces heavy try_push backpressure.
+    // Before the fix, every failed try_push would move-from the record,
+    // and the retry would push an empty (phantom) record.
+    BamRecordReader reader{path, BamRecordReaderConfig{
+                                     .DecodeWorkers = 2,
+                                     .OutputCapacity = 2,
+                                 }};
+
+    std::size_t count{0};
+    while (const auto rec = reader.ReadRecord()) {
+        ASSERT_FALSE(std::empty(rec->Name())) << "phantom record at index " << count
+                                              << " (empty name, tags=" << rec->Tags().Size() << ")";
+        ++count;
+    }
+    EXPECT_EQ(count, rawCount);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio
