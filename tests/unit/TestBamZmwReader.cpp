@@ -227,6 +227,16 @@ TEST_F(BamZmwReaderTest, MetricsAdvanceAsGroupsAreConsumed)
     EXPECT_EQ(m.GroupsConsumed, 1u);
 }
 
+TEST_F(BamZmwReaderTest, MetricsExposeUnderlyingReaderSnapshot)
+{
+    WriteBamWithZmws({{42, 2}, {99, 1}});
+    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+
+    const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_GE(m.Reader.Decode.RecordsProduced, m.Reader.Decode.RecordsConsumed);
+    EXPECT_GE(m.Reader.Bgzf.RecordsProduced, m.Reader.Bgzf.RecordsConsumed);
+}
+
 TEST_F(BamZmwReaderTest, ProducerStallsWhenQueueIsFull)
 {
     WriteBamWithZmws({{42, 1}, {99, 1}, {7, 1}});

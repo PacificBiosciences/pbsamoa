@@ -95,6 +95,8 @@ struct ZmwReaderMetrics
 
     std::uint64_t ProducerStalls{0};
     std::uint64_t ConsumerStalls{0};
+
+    ReaderMetrics Reader{};
 };
 
 /// \brief Snapshot of BGZF writer pipeline metrics.

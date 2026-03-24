@@ -248,6 +248,7 @@ ZmwReaderMetrics BamZmwReader::GetMetrics() const
     const std::lock_guard lock{impl_->mutex_};
     ZmwReaderMetrics metrics{impl_->metrics_};
     metrics.QueueDepth = impl_->queue_.size();
+    metrics.Reader = impl_->reader_.GetMetrics();
     return metrics;
 }
 
