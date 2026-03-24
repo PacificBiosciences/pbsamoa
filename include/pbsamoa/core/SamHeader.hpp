@@ -1,11 +1,15 @@
 #ifndef PBSAMOA_CORE_SAMHEADER_HPP
 #define PBSAMOA_CORE_SAMHEADER_HPP
 
+#include <pbcopper/data/Strand.h>
+
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <cstddef>
@@ -36,10 +40,14 @@ private:
     std::vector<std::pair<std::string, std::string>> customTags_;
 };
 
+/// \brief Parsed key=value fields from a PacBio @RG DS tag.
+using DsTagFields = std::vector<std::pair<std::string, std::string>>;
+
 /// \brief A single @RG read group entry.
 ///
 /// Required field (ID) stored directly. All optional fields
 /// (SM, PL, LB, PU, CN, DS, DT, FO, KS, PG, PI, PM, BC) in tag map.
+/// PacBio-specific DS tag fields are accessible via named accessors.
 class ReadGroup
 {
 public:
@@ -47,14 +55,69 @@ public:
 
     std::string_view Id() const;
 
+    // --- Generic tag access ---
+
     const std::string* GetTag(std::string_view key) const;
     void SetTag(std::string key, std::string value);
     std::span<const std::pair<std::string, std::string>> CustomTags() const;
 
+    // --- PacBio convenience accessors ---
+
+    /// \brief Movie name from the PU tag.
+    const std::string* MovieName() const;
+
+    // --- PacBio DS tag field accessors ---
+
+    /// \brief Access a DS field by key. Returns nullptr if DS tag absent or key not found.
+    const std::string* DsField(std::string_view key) const;
+
+    /// \brief Set a DS field, creating or updating the DS tag as needed.
+    void SetDsField(std::string key, std::string value);
+
+    /// \brief Parse the full DS tag into key-value fields.
+    DsTagFields ParsedDsFields() const;
+
+    /// \brief Replace the entire DS tag from a DsTagFields collection.
+    void SetDsFields(std::span<const std::pair<std::string, std::string>> fields);
+
+    /// \brief Read type (e.g. "SUBREAD", "CCS").
+    const std::string* ReadType() const;
+    /// \brief Binding kit part number.
+    const std::string* BindingKit() const;
+    /// \brief Sequencing kit part number.
+    const std::string* SequencingKit() const;
+    /// \brief Basecaller version string.
+    const std::string* BasecallerVersion() const;
+
 private:
     std::string id_;
     std::vector<std::pair<std::string, std::string>> customTags_;
+
+    /// \brief Lazily parsed DS tag fields cache.
+    mutable std::optional<DsTagFields> parsedDs_;
+
+    const DsTagFields& EnsureParsedDs() const;
+    void InvalidateDsCache();
 };
+
+// --- PacBio read group ID generation ---
+
+/// \brief Generate a PacBio read group ID from movie name, read type, and optional strand.
+///
+/// Computes MD5("{movieName}//{readType}[//fwd|//rev]") and returns the first
+/// 8 hex characters.
+std::string MakeReadGroupId(std::string_view movieName, std::string_view readType,
+                            std::optional<Data::Strand> strand = std::nullopt);
+
+/// \brief Generate a barcoded PacBio read group ID.
+///
+/// Returns MakeReadGroupId(movieName, readType, strand) + "/" + barcodeSuffix.
+std::string MakeReadGroupId(std::string_view movieName, std::string_view readType,
+                            std::string_view barcodeSuffix,
+                            std::optional<Data::Strand> strand = std::nullopt);
+
+/// \brief Strip barcode suffix from a read group ID, returning the base hash.
+std::string_view ReadGroupBaseId(std::string_view readGroupId);
 
 /// \brief A single @PG program record entry.
 ///
