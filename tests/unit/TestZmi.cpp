@@ -307,7 +307,7 @@ TEST_F(ZmiBamWriterTest, UseTempFileAtomicWrite)
     EXPECT_TRUE(std::filesystem::exists(std::filesystem::path{tmpBamPath_.string() + ".zmi"}));
 }
 
-TEST_F(ZmiWriterTest, FromPbiRoundTrip)
+TEST_F(ZmiWriterTest, FromPbiRoundTripWithBasicDataOnly)
 {
     // Construct a minimal synthetic PBI file with 3 records.
     // PBI layout: BGZF([32-byte header][rgId*3][qStart*3][qEnd*3][holeNumber*3][readQual*3][ctxtFlag*3][fileOffset*3])
@@ -328,8 +328,8 @@ TEST_F(ZmiWriterTest, FromPbiRoundTrip)
         // Version at offset 4 (uint32 LE) — 0x030000
         const std::uint32_t version{0x030000};
         WriteAt(raw, 4, version);
-        // pbiFlags at offset 8 (uint16 LE) — 0x0001 (BasicData present)
-        const std::uint16_t flags{1};
+        // pbiFlags at offset 8 (uint16 LE) — 0x0000 (no optional sections)
+        const std::uint16_t flags{0};
         WriteAt(raw, 8, flags);
         // numReads at offset 10 (uint32 LE) — 3
         const std::uint32_t numReads{3};
@@ -408,31 +408,6 @@ TEST_F(ZmiWriterTest, FromPbiThrowsOnIncompleteBasicData)
         const std::uint32_t version{0x030000};
         const std::uint16_t flags{1};
         const std::uint32_t numReads{1};
-        WriteAt(raw, 4, version);
-        WriteAt(raw, 8, flags);
-        WriteAt(raw, 10, numReads);
-
-        BgzfWriter bgzf{pbiPath};
-        bgzf.Write(raw);
-    }
-
-    EXPECT_THROW(ZmwIndex::FromPbi(pbiPath), std::runtime_error);
-}
-
-TEST_F(ZmiWriterTest, FromPbiThrowsWhenBasicDataFlagMissing)
-{
-    const std::filesystem::path pbiPath{tempDir_.File("missing_basic_data_flags.pbi")};
-
-    {
-        std::vector<std::byte> raw(32, std::byte{0});
-        raw[0] = std::byte{'P'};
-        raw[1] = std::byte{'B'};
-        raw[2] = std::byte{'I'};
-        raw[3] = std::byte{'\1'};
-
-        const std::uint32_t version{0x030000};
-        const std::uint16_t flags{0};  // BasicData missing
-        const std::uint32_t numReads{0};
         WriteAt(raw, 4, version);
         WriteAt(raw, 8, flags);
         WriteAt(raw, 10, numReads);

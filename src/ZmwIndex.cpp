@@ -58,7 +58,6 @@ constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536};
 // PBI format constants
 constexpr std::size_t PBI_HEADER_SIZE{32};
 constexpr std::array<char, 4> PBI_MAGIC{'P', 'B', 'I', '\1'};
-constexpr std::uint16_t PBI_FLAG_BASIC_DATA{0x0001U};
 
 std::filesystem::path SidecarPath(const std::filesystem::path& bamPath, std::string_view suffix)
 {
@@ -203,11 +202,6 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     if (std::memcmp(std::data(data), std::data(PBI_MAGIC), 4) != 0) {
         throw std::runtime_error{"PBI file has invalid magic bytes"};
     }
-    const std::uint16_t pbiFlags{ReadU16LE(std::data(data) + 8)};
-    if ((pbiFlags & PBI_FLAG_BASIC_DATA) == 0U) {
-        throw std::runtime_error{"PBI file missing BasicData section"};
-    }
-
     // Read numReads from offset 10 (uint32 LE)
     const std::uint32_t numReads{ReadU32LE(std::data(data) + 10)};
 
