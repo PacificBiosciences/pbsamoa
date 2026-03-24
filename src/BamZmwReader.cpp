@@ -108,5 +108,7 @@ ZmwIdentity BamZmwReader::CurrentZmw() const { return impl_->currentZmw_; }
 
 const SamHeader& BamZmwReader::Header() const { return impl_->header_; }
 
+std::int32_t BamZmwReader::NumZmws() const { return impl_->reader_.NumZmws(); }
+
 }  // namespace Samoa
 }  // namespace PacBio

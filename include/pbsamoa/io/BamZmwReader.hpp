@@ -54,6 +54,11 @@ public:
     /// \brief Access the header from the underlying source.
     const SamHeader& Header() const;
 
+    /// \brief Number of unique ZMWs this reader will yield.
+    /// When chunking is active, returns the chunk-scoped count (no extra I/O).
+    /// Otherwise, falls back to opening the ZMW index. Returns -1 on failure.
+    [[nodiscard]] std::int32_t NumZmws() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

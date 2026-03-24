@@ -183,6 +183,7 @@ struct BamRawReader::Impl
 
     std::optional<std::size_t> recordLimit;
     std::size_t recordsRead{0};
+    std::int32_t numZmws_{-1};
     std::unique_ptr<CollectionState> collection;
 
     bool IsCollection() const { return static_cast<bool>(collection); }
@@ -258,6 +259,8 @@ struct BamRawReader::Impl
             recordLimit = std::size_t{0};
             return;
         }
+
+        numZmws_ = static_cast<std::int32_t>(endIdx - startIdx);
 
         const std::span<const ZmwIdentity> chunkZmws{std::data(unique) + startIdx,
                                                      static_cast<std::size_t>(endIdx - startIdx)};
@@ -589,6 +592,24 @@ BamRawReader::WhitelistRange BamRawReader::Whitelist(const ZmwWhitelist& whiteli
     std::vector<std::int64_t> offsets{whitelist.Resolve(index)};
     auto syncReader{std::make_unique<BamRawReader>(impl_->path)};
     return WhitelistRange{std::move(syncReader), std::move(offsets)};
+}
+
+std::int32_t BamRawReader::NumZmws() const
+{
+    if (impl_->collection) {
+        return -1;
+    }
+    if (impl_->numZmws_ >= 0) {
+        return impl_->numZmws_;
+    }
+    // Fallback: open the ZMW index to compute the total count.
+    // This only runs for non-chunked single-file reads where
+    // ApplyChunkConfig did not already populate the count.
+    try {
+        impl_->numZmws_ = static_cast<std::int32_t>(ZmwIndex::Open(impl_->path).NumZmws());
+    } catch (...) {
+    }
+    return impl_->numZmws_;
 }
 
 // --- GetMetrics ---

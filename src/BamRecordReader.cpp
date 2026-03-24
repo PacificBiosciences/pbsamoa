@@ -341,6 +341,8 @@ BamRecordReader& BamRecordReader::operator=(BamRecordReader&&) noexcept = defaul
 
 const SamHeader& BamRecordReader::Header() const { return impl_->header_; }
 
+std::int32_t BamRecordReader::NumZmws() const { return impl_->viewReader_.NumZmws(); }
+
 std::optional<BamRecord> BamRecordReader::ReadRecord()
 {
     if (impl_->eof_) {

@@ -47,6 +47,10 @@ public:
 
     const SamHeader& Header() const;
 
+    /// \brief Number of unique ZMWs this reader will yield.
+    /// Returns -1 when the count is not available.
+    [[nodiscard]] std::int32_t NumZmws() const;
+
     /// \brief Read next pre-decoded record. Returns nullopt at EOF.
     /// \throws std::runtime_error if the producer thread encountered an error.
     std::optional<BamRecord> ReadRecord();

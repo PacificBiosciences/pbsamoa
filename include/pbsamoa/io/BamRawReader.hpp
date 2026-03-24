@@ -215,6 +215,10 @@ public:
 
     WhitelistRange Whitelist(const ZmwWhitelist& whitelist);
 
+    /// \brief Number of unique ZMWs this reader will yield.
+    /// Returns -1 when the count is not available (no chunking, or multi-file input).
+    [[nodiscard]] std::int32_t NumZmws() const;
+
     /// \brief Snapshot of BGZF pipeline metrics. Thread-safe, lock-free.
     /// In sync mode (BgzfWorkers == 0), only RecordsConsumed is populated.
     BgzfMetrics GetMetrics() const;
