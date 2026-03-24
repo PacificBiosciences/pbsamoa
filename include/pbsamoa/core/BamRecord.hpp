@@ -5,6 +5,12 @@
 #include <pbsamoa/core/TagClipping.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
+#include <pbcopper/data/Accuracy.h>
+#include <pbcopper/data/Frames.h>
+#include <pbcopper/data/LocalContextFlags.h>
+#include <pbcopper/data/SNR.h>
+
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -86,6 +92,50 @@ public:
 
     /// \brief Mutable access to the tag map.
     TagMap& MutableTags();
+
+    // --- PacBio BAM accessors ---
+
+    /// \brief Full read name (e.g. "movie/123/0_1000").
+    std::string FullName() const;
+
+    /// \brief Movie name extracted from the read name prefix before the first '/'.
+    std::string MovieName() const;
+
+    /// \brief ZMW hole number extracted from the read name.
+    std::int32_t HoleNumber() const;
+
+    /// \brief Query start position. Uses 'qs' tag if present, otherwise parses from read name.
+    std::int32_t QueryStart() const;
+
+    /// \brief Query end position. Uses 'qe' tag if present, otherwise parses from read name.
+    std::int32_t QueryEnd() const;
+
+    /// \brief Read group ID from the 'RG' auxiliary tag.
+    std::string ReadGroupId() const;
+
+    /// \brief Local context flags from the 'cx' tag. Returns nullopt if absent.
+    std::optional<Data::LocalContextFlags> LocalContextFlags() const;
+
+    /// \brief Set local context flags in the 'cx' tag.
+    void LocalContextFlags(Data::LocalContextFlags flags);
+
+    /// \brief Signal-to-noise ratios from the 'sn' tag (4-element float array).
+    Data::SNR SignalToNoise() const;
+
+    /// \brief Read accuracy from the 'rq' tag.
+    Data::Accuracy ReadAccuracy() const;
+
+    /// \brief Pulse widths from the 'pw' tag. Returns nullopt if absent.
+    std::optional<Data::Frames> PulseWidth() const;
+
+    /// \brief Inter-pulse durations from the 'ip' tag. Returns nullopt if absent.
+    std::optional<Data::Frames> IPD() const;
+
+    /// \brief Wall-clock start time from the 'ws' tag. Returns nullopt if absent.
+    std::optional<std::int32_t> WallStart() const;
+
+    /// \brief Wall-clock end time from the 'we' tag. Returns nullopt if absent.
+    std::optional<std::int32_t> WallEnd() const;
 
 private:
     std::string name_;

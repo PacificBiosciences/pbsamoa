@@ -13,6 +13,10 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <variant>
+#include <vector>
+
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -359,6 +363,234 @@ BamRecord BamRecord::Clipped(ClipType type, std::int32_t start, std::int32_t end
 }
 
 TagMap& BamRecord::MutableTags() { return tags_; }
+
+// --- PacBio BAM accessors ---
+
+namespace {
+
+constexpr TagKey CX_TAG{'c', 'x'};
+constexpr TagKey SN_TAG{'s', 'n'};
+constexpr TagKey RQ_TAG{'r', 'q'};
+constexpr TagKey PW_TAG{'p', 'w'};
+constexpr TagKey IP_TAG{'i', 'p'};
+constexpr TagKey WS_TAG{'w', 's'};
+constexpr TagKey WE_TAG{'w', 'e'};
+
+std::int32_t TagToInt32(const TagValue& value)
+{
+    if (const auto* integral{std::get_if<std::int64_t>(&value)}; integral != nullptr) {
+        return static_cast<std::int32_t>(*integral);
+    }
+    if (const auto* character{std::get_if<char>(&value)}; character != nullptr) {
+        return static_cast<std::int32_t>(*character);
+    }
+    throw std::runtime_error{"Expected integral PacBio BAM tag"};
+}
+
+float TagToFloat(const TagValue& value)
+{
+    if (const auto* floating{std::get_if<float>(&value)}; floating != nullptr) {
+        return *floating;
+    }
+    throw std::runtime_error{"Expected floating-point PacBio BAM tag"};
+}
+
+const TagValue& RequiredTag(const TagMap& tags, TagKey key, std::string_view missingMessage)
+{
+    const auto* tag{tags.Get(key)};
+    if (tag == nullptr) {
+        throw std::runtime_error{std::string{missingMessage}};
+    }
+    return *tag;
+}
+
+const TagArray& RequiredTagArray(const TagValue& value, std::string_view malformedMessage)
+{
+    const auto* array{std::get_if<TagArray>(&value)};
+    if (array == nullptr) {
+        throw std::runtime_error{std::string{malformedMessage}};
+    }
+    return *array;
+}
+
+std::optional<std::int32_t> OptionalIntTag(const TagMap& tags, TagKey key)
+{
+    if (const auto* tag{tags.Get(key)}; tag != nullptr) {
+        return TagToInt32(*tag);
+    }
+    return std::nullopt;
+}
+
+std::string_view QueryIntervalText(std::string_view fullName)
+{
+    const std::size_t lastSlash{fullName.rfind('/')};
+    if (lastSlash == std::string_view::npos) {
+        throw std::runtime_error{"Malformed PacBio BAM read name: " + std::string{fullName}};
+    }
+    return fullName.substr(lastSlash + 1);
+}
+
+std::pair<std::int32_t, std::int32_t> ParseQueryInterval(std::string_view fullName)
+{
+    const std::string_view interval{QueryIntervalText(fullName)};
+    const std::size_t underscore{interval.find('_')};
+    if (underscore == std::string_view::npos) {
+        throw std::runtime_error{"Malformed PacBio BAM query interval: " + std::string{interval}};
+    }
+    return {
+        std::stoi(std::string{interval.substr(0, underscore)}),
+        std::stoi(std::string{interval.substr(underscore + 1)}),
+    };
+}
+
+std::vector<std::uint8_t> ToUInt8Vector(const TagArray& array)
+{
+    std::vector<std::uint8_t> result;
+    result.reserve(array.Count());
+    const auto data{array.Data()};
+    switch (array.ElementType()) {
+        case 'C':
+            for (const std::byte value : data) {
+                result.push_back(static_cast<std::uint8_t>(value));
+            }
+            return result;
+        case 'c':
+            for (const std::byte value : data) {
+                result.push_back(static_cast<std::uint8_t>(static_cast<std::int8_t>(value)));
+            }
+            return result;
+        default:
+            throw std::runtime_error{"Expected uint8/int8 BAM tag array"};
+    }
+}
+
+template <typename T>
+std::vector<T> DecodePodArray(const TagArray& array)
+{
+    std::vector<T> result(array.Count());
+    std::memcpy(result.data(), array.Data().data(), std::size(result) * sizeof(T));
+    return result;
+}
+
+Data::Frames FramesFromTagArray(const TagArray& array)
+{
+    switch (array.ElementType()) {
+        case 'C':
+        case 'c':
+            return Data::Frames::Decode(ToUInt8Vector(array));
+        case 'S':
+            return Data::Frames{DecodePodArray<std::uint16_t>(array)};
+        case 's': {
+            const auto values{DecodePodArray<std::int16_t>(array)};
+            return Data::Frames{std::vector<std::uint16_t>(values.begin(), values.end())};
+        }
+        case 'I': {
+            const auto values{DecodePodArray<std::uint32_t>(array)};
+            return Data::Frames{std::vector<std::uint16_t>(values.begin(), values.end())};
+        }
+        case 'i': {
+            const auto values{DecodePodArray<std::int32_t>(array)};
+            return Data::Frames{std::vector<std::uint16_t>(values.begin(), values.end())};
+        }
+        default:
+            throw std::runtime_error{"Unsupported PacBio BAM frame array type"};
+    }
+}
+
+std::optional<Data::Frames> OptionalFramesTag(const TagMap& tags, TagKey key,
+                                              std::string_view malformedMessage)
+{
+    const auto* tag{tags.Get(key)};
+    if (tag == nullptr) {
+        return std::nullopt;
+    }
+    return FramesFromTagArray(RequiredTagArray(*tag, malformedMessage));
+}
+
+}  // namespace
+
+std::string BamRecord::FullName() const { return std::string{name_}; }
+
+std::string BamRecord::MovieName() const { return std::string{name_.substr(0, name_.find('/'))}; }
+
+std::int32_t BamRecord::HoleNumber() const
+{
+    const std::size_t firstSlash{name_.find('/')};
+    if (firstSlash == std::string::npos) {
+        throw std::runtime_error{"Malformed PacBio BAM read name: " + name_};
+    }
+    const std::size_t secondSlash{name_.find('/', firstSlash + 1)};
+    const std::string_view holeField{
+        std::string_view{name_}.substr(firstSlash + 1, secondSlash - (firstSlash + 1))};
+    return std::stoi(std::string{holeField});
+}
+
+std::int32_t BamRecord::QueryStart() const
+{
+    if (const auto* tag{tags_.Get(QS_TAG)}; tag != nullptr) {
+        return TagToInt32(*tag);
+    }
+    return ParseQueryInterval(name_).first;
+}
+
+std::int32_t BamRecord::QueryEnd() const
+{
+    if (const auto* tag{tags_.Get(QE_TAG)}; tag != nullptr) {
+        return TagToInt32(*tag);
+    }
+    return ParseQueryInterval(name_).second;
+}
+
+std::string BamRecord::ReadGroupId() const
+{
+    const TagValue& tag{RequiredTag(tags_, RG_TAG, "PacBio BAM record is missing RG tag")};
+    if (const auto* readGroupId{std::get_if<std::string>(&tag)}; readGroupId != nullptr) {
+        return *readGroupId;
+    }
+    throw std::runtime_error{"PacBio BAM RG tag is not a string"};
+}
+
+std::optional<Data::LocalContextFlags> BamRecord::LocalContextFlags() const
+{
+    if (const auto value{OptionalIntTag(tags_, CX_TAG)}; value.has_value()) {
+        return static_cast<Data::LocalContextFlags>(*value);
+    }
+    return std::nullopt;
+}
+
+void BamRecord::LocalContextFlags(Data::LocalContextFlags flags)
+{
+    tags_.Set(CX_TAG, static_cast<std::int64_t>(flags));
+}
+
+Data::SNR BamRecord::SignalToNoise() const
+{
+    const TagValue& tag{RequiredTag(tags_, SN_TAG, "PacBio BAM record is missing sn tag")};
+    const TagArray& array{RequiredTagArray(tag, "PacBio BAM sn tag is malformed")};
+    if (array.ElementType() != 'f') {
+        throw std::runtime_error{"PacBio BAM sn tag is malformed"};
+    }
+    return Data::SNR{DecodePodArray<float>(array)};
+}
+
+Data::Accuracy BamRecord::ReadAccuracy() const
+{
+    return TagToFloat(RequiredTag(tags_, RQ_TAG, "PacBio BAM record is missing rq tag"));
+}
+
+std::optional<Data::Frames> BamRecord::PulseWidth() const
+{
+    return OptionalFramesTag(tags_, PW_TAG, "PacBio BAM pw tag is malformed");
+}
+
+std::optional<Data::Frames> BamRecord::IPD() const
+{
+    return OptionalFramesTag(tags_, IP_TAG, "PacBio BAM ip tag is malformed");
+}
+
+std::optional<std::int32_t> BamRecord::WallStart() const { return OptionalIntTag(tags_, WS_TAG); }
+
+std::optional<std::int32_t> BamRecord::WallEnd() const { return OptionalIntTag(tags_, WE_TAG); }
 
 }  // namespace Samoa
 }  // namespace PacBio
