@@ -46,6 +46,7 @@ lib = library(
         'CramWriter.cpp',
         'GenomicInterval.cpp',
         'LibraryInfo.cpp',
+        'Md5.cpp',
         'RawRecord.cpp',
         'SamHeader.cpp',
         'SamReader.cpp',
