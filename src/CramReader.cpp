@@ -7,6 +7,7 @@
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
 #include "CramMd5.hpp"
+#include "ReaderUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
 
@@ -15,18 +16,15 @@
 #include <atomic>
 #include <format>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <unordered_map>
 #include <vector>
 
 #include <cctype>
 #include <cstdlib>
-#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -121,6 +119,42 @@ std::vector<std::vector<TagTriple>> ParseTagDictionary(std::span<const std::byte
     return dictionary;
 }
 
+char ByteToChar(std::byte value) { return static_cast<char>(std::to_integer<std::uint8_t>(value)); }
+
+std::uint8_t ByteToUInt8(std::byte value) { return std::to_integer<std::uint8_t>(value); }
+
+bool IsZeroByte(std::byte value) { return value == std::byte{0}; }
+
+bool IsNonZeroByte(std::byte value) { return value != std::byte{0}; }
+
+template <typename T, typename Converter>
+void CopyBytesTo(std::span<const std::byte> source, std::span<T> destination,
+                 std::size_t destOffset, Converter convert)
+{
+    const std::size_t sourceSize{std::size(source)};
+    const std::size_t destinationSize{std::size(destination)};
+    if (destOffset >= destinationSize) {
+        return;
+    }
+
+    const std::size_t copyLen{std::ranges::min(sourceSize, destinationSize - destOffset)};
+    for (std::size_t i{0}; i < copyLen; ++i) {
+        destination[destOffset + i] = convert(source[i]);
+    }
+}
+
+void CopyBytesToString(std::span<const std::byte> source, std::string& destination,
+                       std::size_t destOffset)
+{
+    CopyBytesTo(source, std::span<char>{destination}, destOffset, ByteToChar);
+}
+
+void CopyBytesToVector(std::span<const std::byte> source, std::vector<std::uint8_t>& destination,
+                       std::size_t destOffset)
+{
+    CopyBytesTo(source, std::span<std::uint8_t>{destination}, destOffset, ByteToUInt8);
+}
+
 libdeflate_decompressor* ThreadLocalGzipDecompressor()
 {
     const thread_local CramGzipDecompressorContext THREAD_LOCAL_GZIP_DECOMPRESSOR_CONTEXT{};
@@ -142,11 +176,6 @@ void AppendCigarOp(std::vector<CigarOp>& cigar, CigarOpType type, std::int32_t l
         return;
     }
     cigar.push_back(CigarOp{type, ulen});
-}
-
-void ApplyDecodedTag(BamRecord& record, TagKey key, char type, std::span<const std::byte> payload)
-{
-    record.MutableTags().Set(key, DecodeTagValueFromBamPayload(type, payload));
 }
 
 RawRecord ToRawRecord(const BamRecord& record)
@@ -193,12 +222,68 @@ std::vector<std::byte> DecodeRequiredFixedWidthPayload(char type, CramCodec& cod
         type, DecodeRequiredByteArrayPayload(type, codec, coreReader, extStore), expectedWidth);
 }
 
+void DecodeReadName(std::string& readName, CramCodec& codec, CramBitReader& coreReader,
+                    CramExternalBlockStore& extStore)
+{
+    const auto nameView = codec.DecodeByteArrayView(coreReader, extStore);
+    readName.assign(reinterpret_cast<const char*>(nameView.data()), std::size(nameView));
+}
+
+void DecodeQualityArray(std::vector<std::uint8_t>& qualities, CramCodec& codec,
+                        CramBitReader& coreReader, CramExternalBlockStore& extStore,
+                        std::int32_t readLength)
+{
+    qualities.reserve(readLength);
+    for (std::int32_t qi = 0; qi < readLength; ++qi) {
+        qualities.push_back(static_cast<std::uint8_t>(codec.DecodeByte(coreReader, extStore)));
+    }
+}
+
 std::int32_t FeatureLengthOrOne(const DecodedFeature& feature)
 {
     if (feature.Length > 0) {
         return feature.Length;
     }
     return 1;
+}
+
+void AppendBytes(std::vector<std::byte>& destination, std::span<const std::byte> source)
+{
+    destination.insert(std::end(destination), std::begin(source), std::end(source));
+}
+
+struct DecompressBlocksWorker
+{
+    std::vector<CramBlock>* Blocks;
+    std::atomic<std::int32_t>* NextBlock;
+    std::int32_t TotalBlocks;
+
+    void operator()(std::int32_t) const
+    {
+        while (true) {
+            const std::int32_t blockIndex = NextBlock->fetch_add(1, std::memory_order_relaxed);
+            if (blockIndex >= TotalBlocks) {
+                break;
+            }
+            auto& block = (*Blocks)[static_cast<std::size_t>(blockIndex)];
+            DecompressCramBlock(block, ThreadLocalGzipDecompressor());
+        }
+    }
+};
+
+std::int32_t DecodeEncodedItf8(std::span<const std::byte> encoded)
+{
+    std::size_t bytesRead = 0;
+    return ReadItf8(encoded, bytesRead);
+}
+
+void DecodeSubstitutionMatrixRow(std::array<std::array<char, 4>, 5>& matrix, std::size_t row,
+                                 std::array<char, 4> symbols, std::uint8_t packed)
+{
+    for (int i = 0; i < 4; ++i) {
+        const std::size_t idx = (packed >> (6 - 2 * i)) & 0x03;
+        matrix[row][idx] = symbols[static_cast<std::size_t>(i)];
+    }
 }
 
 std::vector<std::byte> DecodeTagPayload(char type, CramCodec& codec, CramBitReader& coreReader,
@@ -290,6 +375,16 @@ std::vector<std::byte> DecodeTagPayload(char type, CramCodec& codec, CramBitRead
     }
 }
 
+template <typename Key>
+CramCodec* LookupSortedCodec(std::span<const std::pair<Key, CramCodec*>> codecs, const Key& key)
+{
+    const auto it = std::ranges::lower_bound(codecs, key, {}, &std::pair<Key, CramCodec*>::first);
+    if (it != std::end(codecs) && it->first == key) {
+        return it->second;
+    }
+    return nullptr;
+}
+
 std::array<std::array<char, 4>, 5> BuildSubstitutionMatrixLookup(
     std::span<const std::byte, 5> encoded)
 {
@@ -301,22 +396,15 @@ std::array<std::array<char, 4>, 5> BuildSubstitutionMatrixLookup(
         {{'A', 'C', 'G', 'T'}},  // N
     }};
 
-    if (std::ranges::all_of(encoded, [](std::byte b) { return b == std::byte{0}; })) {
+    if (std::ranges::all_of(encoded, IsZeroByte)) {
         return matrix;
     }
 
-    auto decodeRow = [&](std::size_t row, std::array<char, 4> symbols, std::uint8_t packed) {
-        for (int i = 0; i < 4; ++i) {
-            const std::size_t idx = (packed >> (6 - 2 * i)) & 0x03;
-            matrix[row][idx] = symbols[static_cast<std::size_t>(i)];
-        }
-    };
-
-    decodeRow(0, {'C', 'G', 'T', 'N'}, static_cast<std::uint8_t>(encoded[0]));
-    decodeRow(1, {'A', 'G', 'T', 'N'}, static_cast<std::uint8_t>(encoded[1]));
-    decodeRow(2, {'A', 'C', 'T', 'N'}, static_cast<std::uint8_t>(encoded[2]));
-    decodeRow(3, {'A', 'C', 'G', 'N'}, static_cast<std::uint8_t>(encoded[3]));
-    decodeRow(4, {'A', 'C', 'G', 'T'}, static_cast<std::uint8_t>(encoded[4]));
+    DecodeSubstitutionMatrixRow(matrix, 0, {'C', 'G', 'T', 'N'}, ByteToUInt8(encoded[0]));
+    DecodeSubstitutionMatrixRow(matrix, 1, {'A', 'G', 'T', 'N'}, ByteToUInt8(encoded[1]));
+    DecodeSubstitutionMatrixRow(matrix, 2, {'A', 'C', 'T', 'N'}, ByteToUInt8(encoded[2]));
+    DecodeSubstitutionMatrixRow(matrix, 3, {'A', 'C', 'G', 'N'}, ByteToUInt8(encoded[3]));
+    DecodeSubstitutionMatrixRow(matrix, 4, {'A', 'C', 'G', 'T'}, ByteToUInt8(encoded[4]));
 
     return matrix;
 }
@@ -343,7 +431,7 @@ std::size_t RefBaseRowIndex(char base)
 
 bool HasNonZeroRefMd5(std::span<const std::byte, 16> refMd5)
 {
-    return std::ranges::any_of(refMd5, [](std::byte b) { return b != std::byte{0}; });
+    return std::ranges::any_of(refMd5, IsNonZeroByte);
 }
 
 bool SliceRequiresReferenceMd5Validation(const CramSliceHeader& sliceHeader, bool referenceRequired)
@@ -561,6 +649,11 @@ struct SliceQueryCandidate
     std::int64_t SliceSize{};
 };
 
+std::array<std::int64_t, 3> SliceQueryCandidateKey(const SliceQueryCandidate& candidate)
+{
+    return {candidate.ContainerOffset, candidate.SliceOffset, candidate.SliceSize};
+}
+
 std::vector<SliceQueryCandidate> BuildSliceCandidates(const CraiIndex& index, std::int32_t refId,
                                                       std::int32_t beg, std::int32_t end)
 {
@@ -588,32 +681,17 @@ std::vector<SliceQueryCandidate> BuildSliceCandidates(const CraiIndex& index, st
         });
     }
 
-    std::ranges::sort(candidates,
-                      [](const SliceQueryCandidate& lhs, const SliceQueryCandidate& rhs) {
-                          if (lhs.ContainerOffset != rhs.ContainerOffset) {
-                              return lhs.ContainerOffset < rhs.ContainerOffset;
-                          }
-                          if (lhs.SliceOffset != rhs.SliceOffset) {
-                              return lhs.SliceOffset < rhs.SliceOffset;
-                          }
-                          return lhs.SliceSize < rhs.SliceSize;
-                      });
+    std::ranges::sort(candidates, {}, SliceQueryCandidateKey);
     const auto duplicateStart =
-        std::ranges::unique(candidates, {}, [](const SliceQueryCandidate& candidate) {
-            return std::tie(candidate.ContainerOffset, candidate.SliceOffset, candidate.SliceSize);
-        });
+        std::ranges::unique(candidates, std::ranges::equal_to{}, SliceQueryCandidateKey);
     candidates.erase(duplicateStart.begin(), std::end(candidates));
     return candidates;
 }
 
 std::int64_t QueryRecordEnd(const BamRecord& record)
 {
-    const std::int64_t pos = record.Pos();
-    std::int64_t end = record.ReferenceEnd();
-    if (end <= pos) {
-        end = pos + 1;
-    }
-    return end;
+    const std::int64_t pos{record.Pos()};
+    return NonEmptyAlignmentEnd(pos, static_cast<std::int64_t>(record.ReferenceEnd()));
 }
 
 bool KeepRecordForQuery(const BamRecord& record, std::int32_t refId, std::int32_t beg,
@@ -668,6 +746,69 @@ struct CramReader::Impl
     CramGzipDecompressorContext gzipContext;
     std::shared_ptr<Parallel::ThreadPool<>> decompressionPool;
 
+    static std::optional<char> ReferenceBaseAt(const DecodeRecordContext& ctx, std::int32_t refId,
+                                               std::int32_t refPos1Based)
+    {
+        if (!std::empty(ctx.EmbeddedReference) && ctx.SliceHeader.RefSeqId >= 0 && refId >= 0 &&
+            refId == ctx.SliceHeader.RefSeqId && ctx.SliceHeader.AlignmentStart > 0 &&
+            refPos1Based >= ctx.SliceHeader.AlignmentStart) {
+            const auto offset =
+                static_cast<std::size_t>(refPos1Based - ctx.SliceHeader.AlignmentStart);
+            if (offset < std::size(ctx.EmbeddedReference)) {
+                return static_cast<char>(static_cast<std::uint8_t>(ctx.EmbeddedReference[offset]));
+            }
+        }
+
+        if (refId >= 0 && static_cast<std::size_t>(refId) < std::size(ctx.ExternalReferenceById) &&
+            !ctx.ExternalReferenceById[static_cast<std::size_t>(refId)].empty() &&
+            refPos1Based > 0) {
+            const std::size_t idx = refPos1Based - 1;
+            const auto& ref = ctx.ExternalReferenceById[static_cast<std::size_t>(refId)];
+            if (idx < std::size(ref)) {
+                return ref[idx];
+            }
+        }
+        return std::nullopt;
+    }
+
+    static CramCodec* LookupCodec(const DecodeRecordContext& ctx, const CramDataSeries dataSeries)
+    {
+        return LookupSortedCodec(ctx.Codecs, dataSeries);
+    }
+
+    static CramCodec* LookupTagCodec(const DecodeRecordContext& ctx, const std::int32_t contentId)
+    {
+        return LookupSortedCodec(ctx.TagCodecs, contentId);
+    }
+
+    static char SubstitutionBase(const DecodeRecordContext& ctx, std::int32_t refId,
+                                 std::uint8_t code, std::int32_t refPos1Based)
+    {
+        const auto refBase = ReferenceBaseAt(ctx, refId, refPos1Based).value_or('N');
+        return ctx.SubstitutionMatrix[RefBaseRowIndex(refBase)][code & 0x03];
+    }
+
+    static void FillReferenceMatches(std::string& sequence, const DecodeRecordContext& ctx,
+                                     std::int32_t refId, std::int32_t readPos1Based,
+                                     std::int32_t refPos1Based, std::int32_t length)
+    {
+        for (std::int32_t i = 0; i < length; ++i) {
+            const std::size_t readIndex = readPos1Based - 1 + i;
+            if (readIndex >= std::size(sequence)) {
+                break;
+            }
+            if (const auto refBase = ReferenceBaseAt(ctx, refId, refPos1Based + i); refBase) {
+                sequence[readIndex] = *refBase;
+            }
+        }
+    }
+
+    static void WriteFeatureData(std::string& sequence, std::int32_t readPos1Based,
+                                 std::span<const std::byte> dataBytes)
+    {
+        CopyBytesToString(dataBytes, sequence, readPos1Based - 1);
+    }
+
     void Open()
     {
         if (!gzipContext.Decompressor) {
@@ -707,7 +848,7 @@ struct CramReader::Impl
     {
         std::filesystem::path referencePath = config.ReferencePath;
         if (referencePath.empty()) {
-            if (const char* envRef = std::getenv("PBSAMOA_CRAM_REFERENCE"); envRef != nullptr) {
+            if (const char* envRef = std::getenv("PBSAMOA_CRAM_REFERENCE"); envRef) {
                 referencePath = envRef;
             }
         }
@@ -800,40 +941,33 @@ struct CramReader::Impl
             }
         }
 
-        auto appendEncoded = [&](std::vector<std::byte> encoded) {
-            headerBytes.insert(std::end(headerBytes), std::begin(encoded), std::end(encoded));
-        };
-        auto decodeItf8 = [&](const std::vector<std::byte>& encoded) {
-            std::size_t n = 0;
-            return ReadItf8(encoded, n);
-        };
-
-        appendEncoded(ReadVarIntBytes(Itf8EncodedLength,
-                                      "container ref_seq_id"));                    // ref_seq_id
-        appendEncoded(ReadVarIntBytes(Itf8EncodedLength, "container start_pos"));  // start_pos
-        appendEncoded(ReadVarIntBytes(Itf8EncodedLength,
-                                      "container alignment_span"));  // alignment_span
-        appendEncoded(ReadVarIntBytes(Itf8EncodedLength,
-                                      "container num_records"));  // num_records
-        appendEncoded(
-            ReadVarIntBytes(Ltf8EncodedLength, "container record_counter"));   // record_counter
-        appendEncoded(ReadVarIntBytes(Ltf8EncodedLength, "container bases"));  // bases
-        appendEncoded(ReadVarIntBytes(Itf8EncodedLength,
-                                      "container num_blocks"));  // num_blocks
+        AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength,
+                                                 "container ref_seq_id"));  // ref_seq_id
+        AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength,
+                                                 "container start_pos"));  // start_pos
+        AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength,
+                                                 "container alignment_span"));  // alignment_span
+        AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength,
+                                                 "container num_records"));  // num_records
+        AppendBytes(headerBytes, ReadVarIntBytes(Ltf8EncodedLength,
+                                                 "container record_counter"));  // record_counter
+        AppendBytes(headerBytes, ReadVarIntBytes(Ltf8EncodedLength, "container bases"));  // bases
+        AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength,
+                                                 "container num_blocks"));  // num_blocks
 
         const auto landmarkCountEncoded =
             ReadVarIntBytes(Itf8EncodedLength, "container landmark_count");
-        appendEncoded(landmarkCountEncoded);
-        const auto landmarkCount = decodeItf8(landmarkCountEncoded);
+        AppendBytes(headerBytes, landmarkCountEncoded);
+        const auto landmarkCount = DecodeEncodedItf8(landmarkCountEncoded);
         if (landmarkCount < 0) {
             throw std::runtime_error("CramReader: negative landmark count in container header");
         }
         for (std::int32_t i = 0; i < landmarkCount; ++i) {
-            appendEncoded(ReadVarIntBytes(Itf8EncodedLength, "container landmark"));
+            AppendBytes(headerBytes, ReadVarIntBytes(Itf8EncodedLength, "container landmark"));
         }
 
         const auto crc = ReadExactBytes(4, "container header CRC32");
-        headerBytes.insert(std::end(headerBytes), std::begin(crc), std::end(crc));
+        AppendBytes(headerBytes, crc);
 
         return headerBytes;
     }
@@ -962,7 +1096,7 @@ struct CramReader::Impl
             nextComputedSliceOffset = sliceOffset + sliceSize;
 
             const bool shouldDecodeSlice =
-                !targetSlice.has_value() ||
+                !targetSlice ||
                 ((targetSlice->SliceOffset == sliceOffset) &&
                  ((targetSlice->SliceSize <= 0) || (targetSlice->SliceSize == sliceSize)));
             if (!shouldDecodeSlice) {
@@ -1067,21 +1201,8 @@ struct CramReader::Impl
         std::atomic<std::int32_t> nextBlock{0};
         const std::int32_t totalBlocks = std::size(blocks);
         const std::int32_t taskCount = std::ranges::min(workers, std::size(blocks));
-
-        Parallel::Dispatch(
-            decompressionPool,
-            [blocksPtr = std::addressof(blocks), &nextBlock, totalBlocks](std::int32_t) {
-                while (true) {
-                    const std::int32_t blockIndex =
-                        nextBlock.fetch_add(1, std::memory_order_relaxed);
-                    if (blockIndex >= totalBlocks) {
-                        break;
-                    }
-                    auto& block = (*blocksPtr)[static_cast<std::size_t>(blockIndex)];
-                    DecompressCramBlock(block, ThreadLocalGzipDecompressor());
-                }
-            },
-            taskCount);
+        const DecompressBlocksWorker worker{&blocks, &nextBlock, totalBlocks};
+        Parallel::Dispatch(decompressionPool, worker, taskCount);
     }
 
     std::vector<BamRecord> LoadIndexedSliceRecords(const SliceQueryCandidate& candidate)
@@ -1143,52 +1264,35 @@ struct CramReader::Impl
 
     void DecodeRecord(BamRecord& record, DecodeRecordContext& ctx)
     {
-        auto getCodec = [&](CramDataSeries ds) -> CramCodec* {
-            const auto it = std::ranges::lower_bound(ctx.Codecs, ds, {},
-                                                     &std::pair<CramDataSeries, CramCodec*>::first);
-            if (it != std::end(ctx.Codecs) && it->first == ds) {
-                return it->second;
-            }
-            return nullptr;
-        };
-        auto getTagCodec = [&](std::int32_t contentId) -> CramCodec* {
-            const auto it = std::ranges::lower_bound(ctx.TagCodecs, contentId, {},
-                                                     &std::pair<std::int32_t, CramCodec*>::first);
-            if (it != std::end(ctx.TagCodecs) && it->first == contentId) {
-                return it->second;
-            }
-            return nullptr;
-        };
-
         // BF - BAM bit flags
         std::uint16_t bamFlags = 0;
-        if (auto* codec = getCodec(CramDataSeries::BF)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::BF)) {
             bamFlags = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
         }
 
         // CF - CRAM bit flags
         std::int32_t cramFlags = 0;
-        if (auto* codec = getCodec(CramDataSeries::CF)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::CF)) {
             cramFlags = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
         }
 
         // RI - reference sequence id (only in multi-ref slices)
         std::int32_t refId = ctx.SliceHeader.RefSeqId;
         if (ctx.SliceHeader.RefSeqId == -2) {
-            if (auto* codec = getCodec(CramDataSeries::RI)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::RI)) {
                 refId = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
         }
 
         // RL - read length
         std::int32_t readLength = 0;
-        if (auto* codec = getCodec(CramDataSeries::RL)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::RL)) {
             readLength = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
         }
 
         // AP - alignment position
         std::int32_t pos = 0;
-        if (auto* codec = getCodec(CramDataSeries::AP)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::AP)) {
             const auto apValue =
                 static_cast<std::int64_t>(codec->DecodeInt(ctx.CoreReader, ctx.ExtStore));
             if (ctx.ApDelta) {
@@ -1203,17 +1307,15 @@ struct CramReader::Impl
 
         // RG - read group
         std::int32_t readGroup = -1;
-        if (auto* codec = getCodec(CramDataSeries::RG)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::RG)) {
             readGroup = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
         }
 
         // RN - read name (if preserved)
         std::string readName;
         if (ctx.ReadNamesIncluded) {
-            if (auto* codec = getCodec(CramDataSeries::RN)) {
-                const auto nameView = codec->DecodeByteArrayView(ctx.CoreReader, ctx.ExtStore);
-                readName.assign(reinterpret_cast<const char*>(nameView.data()),
-                                std::size(nameView));
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::RN)) {
+                DecodeReadName(readName, *codec, ctx.CoreReader, ctx.ExtStore);
             }
         }
 
@@ -1223,36 +1325,34 @@ struct CramReader::Impl
         std::int32_t tlen = 0;
         ctx.DownstreamMateDistance = -1;
         if (cramFlags & CRAM_FLAG_DETACHED) {
-            if (auto* codec = getCodec(CramDataSeries::MF)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::MF)) {
                 codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);  // mate flags
             }
-            if (auto* codec = getCodec(CramDataSeries::NS)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::NS)) {
                 nextRefId = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
-            if (auto* codec = getCodec(CramDataSeries::NP)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::NP)) {
                 nextPos = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore) - 1;  // 0-based
             }
-            if (auto* codec = getCodec(CramDataSeries::TS)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::TS)) {
                 tlen = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
 
             // RN after mate info if not preserved globally
             if (!ctx.ReadNamesIncluded) {
-                if (auto* codec = getCodec(CramDataSeries::RN)) {
-                    const auto nameView = codec->DecodeByteArrayView(ctx.CoreReader, ctx.ExtStore);
-                    readName.assign(reinterpret_cast<const char*>(nameView.data()),
-                                    std::size(nameView));
+                if (auto* codec = LookupCodec(ctx, CramDataSeries::RN)) {
+                    DecodeReadName(readName, *codec, ctx.CoreReader, ctx.ExtStore);
                 }
             }
         } else if (cramFlags & CRAM_FLAG_HAS_MATE_DOWNSTREAM) {
-            if (auto* codec = getCodec(CramDataSeries::NF)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::NF)) {
                 ctx.DownstreamMateDistance = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
         }
 
         // TL - tag IDs dictionary index
         std::int32_t tagListIndex{0};
-        if (auto* codec = getCodec(CramDataSeries::TL)) {
+        if (auto* codec = LookupCodec(ctx, CramDataSeries::TL)) {
             tagListIndex = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
         }
 
@@ -1266,7 +1366,7 @@ struct CramReader::Impl
             // Mapped read
             // FN - number of read features
             std::int32_t numFeatures = 0;
-            if (auto* codec = getCodec(CramDataSeries::FN)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::FN)) {
                 numFeatures = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
 
@@ -1277,12 +1377,12 @@ struct CramReader::Impl
             std::int32_t prevFeaturePos = 0;
             for (std::int32_t fi = 0; fi < numFeatures; ++fi) {
                 DecodedFeature feature;
-                if (auto* codec = getCodec(CramDataSeries::FC)) {
+                if (auto* codec = LookupCodec(ctx, CramDataSeries::FC)) {
                     feature.Code = static_cast<char>(
                         static_cast<std::uint8_t>(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore)));
                 }
 
-                if (auto* codec = getCodec(CramDataSeries::FP)) {
+                if (auto* codec = LookupCodec(ctx, CramDataSeries::FP)) {
                     const auto delta = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
                     prevFeaturePos += delta;
                     feature.ReadPos = prevFeaturePos;
@@ -1290,11 +1390,11 @@ struct CramReader::Impl
 
                 switch (feature.Code) {
                     case 'B':
-                        if (auto* baseCodec = getCodec(CramDataSeries::BA)) {
+                        if (auto* baseCodec = LookupCodec(ctx, CramDataSeries::BA)) {
                             feature.Data.push_back(
                                 baseCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.IsSubstitutionCode = false;
-                        } else if (auto* subCodec = getCodec(CramDataSeries::BS)) {
+                        } else if (auto* subCodec = LookupCodec(ctx, CramDataSeries::BS)) {
                             feature.Data.push_back(
                                 subCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.IsSubstitutionCode = true;
@@ -1302,65 +1402,65 @@ struct CramReader::Impl
                         feature.Length = 1;
                         break;
                     case 'X':
-                        if (auto* codec = getCodec(CramDataSeries::BS)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::BS)) {
                             feature.Data.push_back(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.IsSubstitutionCode = true;
                         }
                         feature.Length = 1;
                         break;
                     case 'I':
-                        if (auto* codec = getCodec(CramDataSeries::IN)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::IN)) {
                             feature.Data = codec->DecodeByteArray(ctx.CoreReader, ctx.ExtStore);
                             feature.Length = std::size(feature.Data);
                         }
                         break;
                     case 'D':
-                        if (auto* codec = getCodec(CramDataSeries::DL)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::DL)) {
                             feature.Length = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
                         }
                         break;
                     case 'i':
-                        if (auto* codec = getCodec(CramDataSeries::BA)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::BA)) {
                             feature.Data.push_back(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.Length = 1;
                         }
                         break;
                     case 'b':
-                        if (auto* codec = getCodec(CramDataSeries::BB)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::BB)) {
                             feature.Data = codec->DecodeByteArray(ctx.CoreReader, ctx.ExtStore);
                             feature.Length = std::size(feature.Data);
                         }
                         break;
                     case 'q':
-                        if (auto* codec = getCodec(CramDataSeries::QS)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::QS)) {
                             feature.Data.push_back(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.Length = 1;
                         }
                         break;
                     case 'Q':
-                        if (auto* codec = getCodec(CramDataSeries::QQ)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::QQ)) {
                             feature.Data = codec->DecodeByteArray(ctx.CoreReader, ctx.ExtStore);
                             feature.Length = std::size(feature.Data);
                         }
                         break;
                     case 'S':
-                        if (auto* codec = getCodec(CramDataSeries::SC)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::SC)) {
                             feature.Data = codec->DecodeByteArray(ctx.CoreReader, ctx.ExtStore);
                             feature.Length = std::size(feature.Data);
                         }
                         break;
                     case 'N':
-                        if (auto* codec = getCodec(CramDataSeries::RS)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::RS)) {
                             feature.Length = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
                         }
                         break;
                     case 'P':
-                        if (auto* codec = getCodec(CramDataSeries::PD)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::PD)) {
                             feature.Length = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
                         }
                         break;
                     case 'H':
-                        if (auto* codec = getCodec(CramDataSeries::HC)) {
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::HC)) {
                             feature.Length = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
                         }
                         break;
@@ -1372,18 +1472,15 @@ struct CramReader::Impl
             }
 
             // MQ - mapping quality
-            if (auto* codec = getCodec(CramDataSeries::MQ)) {
+            if (auto* codec = LookupCodec(ctx, CramDataSeries::MQ)) {
                 mapQ = codec->DecodeInt(ctx.CoreReader, ctx.ExtStore);
             }
 
             // QS - quality scores (if stored as array)
             if (cramFlags & CRAM_FLAG_QUALITY_AS_ARRAY) {
-                if (auto* qsCodec = getCodec(CramDataSeries::QS)) {
-                    qualities.reserve(readLength);
-                    for (std::int32_t qi = 0; qi < readLength; ++qi) {
-                        qualities.push_back(static_cast<std::uint8_t>(
-                            qsCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore)));
-                    }
+                if (auto* qsCodec = LookupCodec(ctx, CramDataSeries::QS)) {
+                    DecodeQualityArray(qualities, *qsCodec, ctx.CoreReader, ctx.ExtStore,
+                                       readLength);
                 }
             } else if (readLength > 0) {
                 qualities.assign(readLength, 0xFF);
@@ -1392,15 +1489,8 @@ struct CramReader::Impl
                         std::empty(feature.Data)) {
                         continue;
                     }
-                    const std::size_t destOffset = feature.ReadPos - 1;
-                    if (destOffset >= std::size(qualities)) {
-                        continue;
-                    }
-                    const auto copyLen = std::ranges::min(std::size(feature.Data),
-                                                          std::size(qualities) - destOffset);
-                    for (std::size_t i = 0; i < copyLen; ++i) {
-                        qualities[destOffset + i] = static_cast<std::uint8_t>(feature.Data[i]);
-                    }
+                    CopyBytesToVector(feature.Data, qualities,
+                                      static_cast<std::size_t>(feature.ReadPos - 1));
                 }
             }
 
@@ -1409,71 +1499,14 @@ struct CramReader::Impl
                 sequence.assign(readLength, 'N');
             }
 
-            const auto refBaseAt = [&](std::int32_t refPos1Based) -> std::optional<char> {
-                if (!std::empty(ctx.EmbeddedReference) && ctx.SliceHeader.RefSeqId >= 0 &&
-                    refId >= 0 && refId == ctx.SliceHeader.RefSeqId &&
-                    ctx.SliceHeader.AlignmentStart > 0 &&
-                    refPos1Based >= ctx.SliceHeader.AlignmentStart) {
-                    const auto offset =
-                        static_cast<std::size_t>(refPos1Based - ctx.SliceHeader.AlignmentStart);
-                    if (offset < std::size(ctx.EmbeddedReference)) {
-                        return static_cast<char>(
-                            static_cast<std::uint8_t>(ctx.EmbeddedReference[offset]));
-                    }
-                }
-
-                if (refId >= 0 &&
-                    static_cast<std::size_t>(refId) < std::size(ctx.ExternalReferenceById) &&
-                    !ctx.ExternalReferenceById[static_cast<std::size_t>(refId)].empty() &&
-                    refPos1Based > 0) {
-                    const std::size_t idx = refPos1Based - 1;
-                    const auto& ref = ctx.ExternalReferenceById[static_cast<std::size_t>(refId)];
-                    if (idx < std::size(ref)) {
-                        return ref[idx];
-                    }
-                }
-                return std::nullopt;
-            };
-
-            const auto substitutionBase = [&](std::uint8_t code, std::int32_t refPos1Based) {
-                const auto refBase = refBaseAt(refPos1Based).value_or('N');
-                return ctx.SubstitutionMatrix[RefBaseRowIndex(refBase)][code & 0x03];
-            };
-
-            auto fillReferenceMatches = [&](std::int32_t readPos1Based, std::int32_t refPos1Based,
-                                            std::int32_t length) {
-                for (std::int32_t i = 0; i < length; ++i) {
-                    const std::size_t readIndex = readPos1Based - 1 + i;
-                    if (readIndex >= std::size(sequence)) {
-                        break;
-                    }
-                    if (const auto refBase = refBaseAt(refPos1Based + i); refBase.has_value()) {
-                        sequence[readIndex] = *refBase;
-                    }
-                }
-            };
-
-            auto writeFeatureData = [&](std::int32_t readPos1Based,
-                                        std::span<const std::byte> dataBytes) {
-                const std::size_t destOffset = readPos1Based - 1;
-                if (destOffset >= std::size(sequence)) {
-                    return;
-                }
-                const auto copyLen =
-                    std::ranges::min(std::size(dataBytes), std::size(sequence) - destOffset);
-                for (std::size_t i = 0; i < copyLen; ++i) {
-                    sequence[destOffset + i] =
-                        static_cast<char>(static_cast<std::uint8_t>(dataBytes[i]));
-                }
-            };
-
             std::int32_t currentReadPos{1};
             std::int32_t currentRefPos{pos + 1};  // 1-based reference coordinate
             for (const auto& feature : features) {
                 if (feature.ReadPos > currentReadPos) {
                     const auto matchLen = feature.ReadPos - currentReadPos;
                     AppendCigarOp(cigar, CigarOpType::M, matchLen);
-                    fillReferenceMatches(currentReadPos, currentRefPos, matchLen);
+                    FillReferenceMatches(sequence, ctx, refId, currentReadPos, currentRefPos,
+                                         matchLen);
                     currentReadPos += matchLen;
                     currentRefPos += matchLen;
                 }
@@ -1481,7 +1514,7 @@ struct CramReader::Impl
                 switch (feature.Code) {
                     case 'b':
                         if (feature.Length > 0) {
-                            writeFeatureData(currentReadPos, feature.Data);
+                            WriteFeatureData(sequence, currentReadPos, feature.Data);
                             AppendCigarOp(cigar, CigarOpType::M, feature.Length);
                             currentReadPos += feature.Length;
                             currentRefPos += feature.Length;
@@ -1494,8 +1527,8 @@ struct CramReader::Impl
                             char base = 'N';
                             if (!std::empty(feature.Data)) {
                                 if (feature.IsSubstitutionCode) {
-                                    base = substitutionBase(
-                                        static_cast<std::uint8_t>(feature.Data.front()),
+                                    base = SubstitutionBase(
+                                        ctx, refId, static_cast<std::uint8_t>(feature.Data.front()),
                                         currentRefPos);
                                 } else {
                                     base = static_cast<char>(
@@ -1515,7 +1548,7 @@ struct CramReader::Impl
                             insLen = feature.Length;
                         }
                         if (insLen > 0) {
-                            writeFeatureData(currentReadPos, feature.Data);
+                            WriteFeatureData(sequence, currentReadPos, feature.Data);
                             AppendCigarOp(cigar, CigarOpType::I, insLen);
                             currentReadPos += insLen;
                         }
@@ -1523,14 +1556,14 @@ struct CramReader::Impl
                     }
                     case 'i':
                         if (!std::empty(feature.Data)) {
-                            writeFeatureData(currentReadPos, {feature.Data.data(), 1});
+                            WriteFeatureData(sequence, currentReadPos, {feature.Data.data(), 1});
                         }
                         AppendCigarOp(cigar, CigarOpType::I, 1);
                         currentReadPos += 1;
                         break;
                     case 'S':
                         if (feature.Length > 0) {
-                            writeFeatureData(currentReadPos, feature.Data);
+                            WriteFeatureData(sequence, currentReadPos, feature.Data);
                             AppendCigarOp(cigar, CigarOpType::S, feature.Length);
                             currentReadPos += feature.Length;
                         }
@@ -1563,7 +1596,7 @@ struct CramReader::Impl
             if (readLength >= currentReadPos) {
                 const auto tailLen = readLength - currentReadPos + 1;
                 AppendCigarOp(cigar, CigarOpType::M, tailLen);
-                fillReferenceMatches(currentReadPos, currentRefPos, tailLen);
+                FillReferenceMatches(sequence, ctx, refId, currentReadPos, currentRefPos, tailLen);
             }
             if (std::empty(cigar) && readLength > 0) {
                 AppendCigarOp(cigar, CigarOpType::M, readLength);
@@ -1571,7 +1604,7 @@ struct CramReader::Impl
         } else {
             // Unmapped read
             sequence.resize(readLength);
-            if (auto* baCodec = getCodec(CramDataSeries::BA)) {
+            if (auto* baCodec = LookupCodec(ctx, CramDataSeries::BA)) {
                 for (std::int32_t bi = 0; bi < readLength; ++bi) {
                     sequence[bi] = static_cast<char>(static_cast<std::uint8_t>(
                         baCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore)));
@@ -1580,12 +1613,9 @@ struct CramReader::Impl
 
             // QS quality scores
             if (cramFlags & CRAM_FLAG_QUALITY_AS_ARRAY) {
-                if (auto* qsCodec = getCodec(CramDataSeries::QS)) {
-                    qualities.reserve(readLength);
-                    for (std::int32_t qi = 0; qi < readLength; ++qi) {
-                        qualities.push_back(static_cast<std::uint8_t>(
-                            qsCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore)));
-                    }
+                if (auto* qsCodec = LookupCodec(ctx, CramDataSeries::QS)) {
+                    DecodeQualityArray(qualities, *qsCodec, ctx.CoreReader, ctx.ExtStore,
+                                       readLength);
                 }
             }
         }
@@ -1612,10 +1642,11 @@ struct CramReader::Impl
             tagListIndex < static_cast<std::int32_t>(std::size(ctx.TagDictionary))) {
             for (const auto& tag : ctx.TagDictionary[tagListIndex]) {
                 const auto contentId = TagContentId(tag.Tag1, tag.Tag2, tag.Type);
-                if (auto* codec = getTagCodec(contentId)) {
+                if (auto* codec = LookupTagCodec(ctx, contentId)) {
                     const auto payload =
                         DecodeTagPayload(tag.Type, *codec, ctx.CoreReader, ctx.ExtStore);
-                    ApplyDecodedTag(record, TagKey{tag.Tag1, tag.Tag2}, tag.Type, payload);
+                    record.MutableTags().Set(TagKey{tag.Tag1, tag.Tag2},
+                                             DecodeTagValueFromBamPayload(tag.Type, payload));
                 }
             }
         }
@@ -1630,6 +1661,22 @@ struct CramReader::Impl
 // ---------------------------------------------------------------------------
 // CramReader
 // ---------------------------------------------------------------------------
+
+namespace {
+
+std::optional<BamRecord> TakePendingRecord(std::vector<BamRecord>& pendingRecords,
+                                           std::size_t& pendingIdx)
+{
+    if (pendingIdx >= std::size(pendingRecords)) {
+        return std::nullopt;
+    }
+
+    const std::size_t idx{pendingIdx};
+    ++pendingIdx;
+    return std::move(pendingRecords[idx]);
+}
+
+}  // namespace
 
 CramReader::CramReader(const std::filesystem::path& path, const CramReaderConfig& config)
     : impl_{std::make_unique<Impl>()}
@@ -1647,35 +1694,21 @@ const SamHeader& CramReader::Header() const { return impl_->header; }
 
 std::optional<BamRecord> CramReader::ReadRecord()
 {
-    // Return from pending records buffer
-    if (impl_->pendingIdx < std::size(impl_->pendingRecords)) {
-        const std::size_t idx{impl_->pendingIdx};
-        ++impl_->pendingIdx;
-        return std::move(impl_->pendingRecords[idx]);
+    if (auto record{TakePendingRecord(impl_->pendingRecords, impl_->pendingIdx)}) {
+        return record;
     }
 
-    // Load next container
-    if (impl_->atEof) {
+    if (impl_->atEof || !impl_->LoadNextContainer()) {
         return std::nullopt;
     }
 
-    if (!impl_->LoadNextContainer()) {
-        return std::nullopt;
-    }
-
-    if (impl_->pendingIdx < std::size(impl_->pendingRecords)) {
-        const std::size_t idx{impl_->pendingIdx};
-        ++impl_->pendingIdx;
-        return std::move(impl_->pendingRecords[idx]);
-    }
-
-    return std::nullopt;
+    return TakePendingRecord(impl_->pendingRecords, impl_->pendingIdx);
 }
 
 std::optional<RawRecord> CramReader::ReadRawRecord()
 {
     auto record = ReadRecord();
-    if (!record.has_value()) {
+    if (!record) {
         return std::nullopt;
     }
     return ToRawRecord(*record);
@@ -1741,10 +1774,7 @@ CramReader::RecordRange::Iterator::Iterator() = default;
 
 CramReader::RecordRange::Iterator::Iterator(CramReader* reader) : reader_{reader}
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
 }
 
 const BamRecord& CramReader::RecordRange::Iterator::operator*() const { return *current_; }
@@ -1753,10 +1783,7 @@ const BamRecord* CramReader::RecordRange::Iterator::operator->() const { return 
 
 CramReader::RecordRange::Iterator& CramReader::RecordRange::Iterator::operator++()
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
     return *this;
 }
 
@@ -1786,10 +1813,7 @@ CramReader::RawRecordRange::Iterator::Iterator() = default;
 
 CramReader::RawRecordRange::Iterator::Iterator(CramReader* reader) : reader_{reader}
 {
-    current_ = reader_->ReadRawRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_, &CramReader::ReadRawRecord);
 }
 
 const RawRecord& CramReader::RawRecordRange::Iterator::operator*() const { return *current_; }
@@ -1798,10 +1822,7 @@ const RawRecord* CramReader::RawRecordRange::Iterator::operator->() const { retu
 
 CramReader::RawRecordRange::Iterator& CramReader::RawRecordRange::Iterator::operator++()
 {
-    current_ = reader_->ReadRawRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_, &CramReader::ReadRawRecord);
     return *this;
 }
 

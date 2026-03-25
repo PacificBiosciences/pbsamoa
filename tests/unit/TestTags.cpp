@@ -88,15 +88,15 @@ TEST(TagMap, SetAndGet)
     TagMap tags;
     tags.Set(TagKey{'N', 'M'}, TagValue{std::int64_t{5}});
 
-    const TagValue* val{tags.Get(TagKey{'N', 'M'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'N', 'M'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<std::int64_t>(*val), 5);
 }
 
 TEST(TagMap, GetMissing)
 {
     const TagMap tags;
-    EXPECT_EQ(tags.Get(TagKey{'N', 'M'}), nullptr);
+    EXPECT_FALSE(tags.Get(TagKey{'N', 'M'}));
 }
 
 TEST(TagMap, SetOverwrites)
@@ -117,7 +117,7 @@ TEST(TagMap, Remove)
 
     EXPECT_TRUE(tags.Remove(TagKey{'N', 'M'}));
     EXPECT_EQ(tags.Size(), 1U);
-    EXPECT_EQ(tags.Get(TagKey{'N', 'M'}), nullptr);
+    EXPECT_FALSE(tags.Get(TagKey{'N', 'M'}));
 
     EXPECT_FALSE(tags.Remove(TagKey{'X', 'X'}));
 }
@@ -249,8 +249,8 @@ TEST(TagBamParse, IntegerTypeC)
     const std::vector<std::byte> data{MakeBamIntTag('N', 'M', 'C', 5)};
     const TagMap tags{ParseTagsFromBam(data)};
     ASSERT_EQ(tags.Size(), 1U);
-    const TagValue* val{tags.Get(TagKey{'N', 'M'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'N', 'M'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<std::int64_t>(*val), 5);
 }
 
@@ -258,8 +258,8 @@ TEST(TagBamParse, IntegerTypeI)
 {
     const std::vector<std::byte> data{MakeBamIntTag('X', 'Y', 'I', 100000)};
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'X', 'Y'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'X', 'Y'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<std::int64_t>(*val), 100000);
 }
 
@@ -267,8 +267,8 @@ TEST(TagBamParse, SignedInt)
 {
     const std::vector<std::byte> data{MakeBamIntTag('A', 'S', 'c', -10)};
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'A', 'S'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'A', 'S'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<std::int64_t>(*val), -10);
 }
 
@@ -276,8 +276,8 @@ TEST(TagBamParse, StringTypeZ)
 {
     const std::vector<std::byte> data{MakeBamStringTag('R', 'G', 'Z', "group1")};
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'R', 'G'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'R', 'G'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<std::string>(*val), "group1");
 }
 
@@ -285,8 +285,8 @@ TEST(TagBamParse, CharTypeA)
 {
     const std::vector<std::byte> data{MakeBamCharTag('X', 'S', '+')};
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'X', 'S'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'X', 'S'})};
+    ASSERT_TRUE(val);
     EXPECT_EQ(std::get<char>(*val), '+');
 }
 
@@ -294,8 +294,8 @@ TEST(TagBamParse, FloatType)
 {
     const std::vector<std::byte> data{MakeBamFloatTag('Z', 'S', 3.14f)};
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'Z', 'S'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'Z', 'S'})};
+    ASSERT_TRUE(val);
     EXPECT_FLOAT_EQ(std::get<float>(*val), 3.14f);
 }
 
@@ -328,8 +328,8 @@ TEST(TagBamParse, ArrayTypeBI)
     }
 
     const TagMap tags{ParseTagsFromBam(data)};
-    const TagValue* val{tags.Get(TagKey{'X', 'A'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{tags.Get(TagKey{'X', 'A'})};
+    ASSERT_TRUE(val);
     ASSERT_TRUE(std::holds_alternative<TagArray>(*val));
 
     const TagArray& arr{std::get<TagArray>(*val)};
@@ -348,7 +348,7 @@ TEST(TagBamParse, EmptyData)
 TEST(TagSamParse, IntegerTag)
 {
     const ParsedTag result{ParseTagFromSam("NM:i:5")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(result->first, TagKey('N', 'M'));
     EXPECT_EQ(std::get<std::int64_t>(result->second), 5);
 }
@@ -356,42 +356,42 @@ TEST(TagSamParse, IntegerTag)
 TEST(TagSamParse, NegativeInteger)
 {
     const ParsedTag result{ParseTagFromSam("AS:i:-10")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(std::get<std::int64_t>(result->second), -10);
 }
 
 TEST(TagSamParse, StringTag)
 {
     const ParsedTag result{ParseTagFromSam("RG:Z:lane1")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(std::get<std::string>(result->second), "lane1");
 }
 
 TEST(TagSamParse, StringWithColons)
 {
     const ParsedTag result{ParseTagFromSam("SA:Z:ref,29,-,6H5M,17,0;")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(std::get<std::string>(result->second), "ref,29,-,6H5M,17,0;");
 }
 
 TEST(TagSamParse, CharTag)
 {
     const ParsedTag result{ParseTagFromSam("XS:A:+")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(std::get<char>(result->second), '+');
 }
 
 TEST(TagSamParse, FloatTag)
 {
     const ParsedTag result{ParseTagFromSam("ZS:f:3.14")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_NEAR(std::get<float>(result->second), 3.14f, 0.001f);
 }
 
 TEST(TagSamParse, ArrayTag)
 {
     const ParsedTag result{ParseTagFromSam("XA:B:i,10,20,30")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     const TagArray& arr{std::get<TagArray>(result->second)};
     EXPECT_EQ(arr.ElementType(), 'i');
     EXPECT_EQ(arr.Count(), 3U);
@@ -399,23 +399,23 @@ TEST(TagSamParse, ArrayTag)
 
 TEST(TagSamParse, InvalidFormat)
 {
-    EXPECT_FALSE(ParseTagFromSam("invalid").has_value());
-    EXPECT_FALSE(ParseTagFromSam("NM").has_value());
-    EXPECT_FALSE(ParseTagFromSam("").has_value());
+    EXPECT_FALSE(ParseTagFromSam("invalid"));
+    EXPECT_FALSE(ParseTagFromSam("NM"));
+    EXPECT_FALSE(ParseTagFromSam(""));
 }
 
 TEST(TagSamParse, RejectsTrailingJunkInNumericValue)
 {
-    EXPECT_FALSE(ParseTagFromSam("NM:i:5x").has_value());
-    EXPECT_FALSE(ParseTagFromSam("ZS:f:3.14abc").has_value());
+    EXPECT_FALSE(ParseTagFromSam("NM:i:5x"));
+    EXPECT_FALSE(ParseTagFromSam("ZS:f:3.14abc"));
 }
 
 TEST(TagSamParse, RejectsInvalidArrayElements)
 {
-    EXPECT_FALSE(ParseTagFromSam("XA:B:i,10,20x,30").has_value());
-    EXPECT_FALSE(ParseTagFromSam("XA:B:C,10,999").has_value());
-    EXPECT_FALSE(ParseTagFromSam("XA:B:Q,1,2").has_value());
-    EXPECT_FALSE(ParseTagFromSam("XA:B:i,").has_value());
+    EXPECT_FALSE(ParseTagFromSam("XA:B:i,10,20x,30"));
+    EXPECT_FALSE(ParseTagFromSam("XA:B:C,10,999"));
+    EXPECT_FALSE(ParseTagFromSam("XA:B:Q,1,2"));
+    EXPECT_FALSE(ParseTagFromSam("XA:B:i,"));
 }
 
 // --- SAM Tag Serialization Tests ---
@@ -507,7 +507,7 @@ TEST(TagSerialize, BamRoundTripMixed)
 TEST(TagSamParse, HexStringTag)
 {
     const ParsedTag result{ParseTagFromSam("BC:H:1AE1")};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(result->first, TagKey('B', 'C'));
     ASSERT_TRUE(std::holds_alternative<HexString>(result->second));
     EXPECT_EQ(std::get<HexString>(result->second).value, "1AE1");
@@ -515,8 +515,8 @@ TEST(TagSamParse, HexStringTag)
 
 TEST(TagSamParse, RejectsInvalidHexStringTag)
 {
-    EXPECT_FALSE(ParseTagFromSam("BC:H:ABC").has_value());   // odd length
-    EXPECT_FALSE(ParseTagFromSam("BC:H:1AG1").has_value());  // non-hex char
+    EXPECT_FALSE(ParseTagFromSam("BC:H:ABC"));   // odd length
+    EXPECT_FALSE(ParseTagFromSam("BC:H:1AG1"));  // non-hex char
 }
 
 TEST(TagSerialize, ToSamHexString)
@@ -534,8 +534,8 @@ TEST(TagSerialize, BamRoundTripHexString)
     const TagMap parsed{ParseTagsFromBam(bamBytes)};
 
     ASSERT_EQ(parsed.Size(), 1U);
-    const TagValue* val{parsed.Get(TagKey{'B', 'C'})};
-    ASSERT_NE(val, nullptr);
+    const auto* val{parsed.Get(TagKey{'B', 'C'})};
+    ASSERT_TRUE(val);
     ASSERT_TRUE(std::holds_alternative<HexString>(*val));
     EXPECT_EQ(std::get<HexString>(*val).value, "1AE1");
 }

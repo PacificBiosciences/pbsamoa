@@ -16,11 +16,13 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include <cstdlib>
@@ -34,16 +36,28 @@ std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
 
 namespace {
 
+std::vector<std::byte> CopyRawBlock(std::span<const std::byte> data)
+{
+    return {std::begin(data), std::end(data)};
+}
+
+std::vector<std::byte> DecompressRawBlock(std::span<const std::byte> data,
+                                          std::size_t /* rawSize */)
+{
+    return CopyRawBlock(data);
+}
+
 template <typename T>
-T CheckedSizeCast(const std::size_t size, const char* errorMessage)
+T CheckedSizeCast(const std::size_t size, const std::string_view context,
+                  const std::string_view reason)
 {
     if (size > static_cast<std::size_t>(std::numeric_limits<T>::max())) {
-        throw std::runtime_error(errorMessage);
+        throw std::runtime_error(std::format("{}: {}", context, reason));
     }
     return static_cast<T>(size);
 }
 
-std::vector<std::byte> CopyAndFree(unsigned char* ptr, std::size_t size, const char* context)
+std::vector<std::byte> CopyAndFree(unsigned char* ptr, std::size_t size, std::string_view context)
 {
     if (!ptr) {
         throw std::runtime_error(std::format("{}: codec returned null output", context));
@@ -56,111 +70,118 @@ std::vector<std::byte> CopyAndFree(unsigned char* ptr, std::size_t size, const c
     return output;
 }
 
-std::vector<std::byte> CopyAndFree(char* ptr, std::size_t size, const char* context)
-{
-    return CopyAndFree(reinterpret_cast<unsigned char*>(ptr), size, context);
-}
-
 unsigned char* NonConstBytes(std::span<const std::byte> data)
 {
     return reinterpret_cast<unsigned char*>(const_cast<std::byte*>(data.data()));
 }
 
-std::vector<std::byte> CramRans4x8Decompress(std::span<const std::byte> data, std::size_t rawSize)
+template <typename SizeType, typename DecompressFn>
+std::vector<std::byte> CheckedDecompress(std::span<const std::byte> data, std::size_t rawSize,
+                                         std::string_view context, DecompressFn decompressFn)
 {
     if (rawSize == 0) {
         return {};
     }
-    const unsigned int inputSize = CheckedSizeCast<unsigned int>(
-        std::size(data), "CramRans4x8Decompress: input/output size too large");
-    const unsigned int expectedOutputSize = CheckedSizeCast<unsigned int>(
-        rawSize, "CramRans4x8Decompress: input/output size too large");
 
-    unsigned int outSize = 0;
-    auto* out = rans_uncompress(NonConstBytes(data), inputSize, &outSize);
+    const SizeType inputSize{
+        CheckedSizeCast<SizeType>(std::size(data), context, "input/output size too large")};
+    const SizeType expectedOutputSize{
+        CheckedSizeCast<SizeType>(rawSize, context, "input/output size too large")};
+
+    SizeType outSize{0};
+    auto* out = decompressFn(NonConstBytes(data), inputSize, &outSize);
     if (outSize != expectedOutputSize) {
         std::free(out);
-        throw std::runtime_error("CramRans4x8Decompress: decompressed size mismatch");
+        throw std::runtime_error(std::format("{}: decompressed size mismatch", context));
     }
-    return CopyAndFree(out, outSize, "CramRans4x8Decompress");
+    return CopyAndFree(out, static_cast<std::size_t>(outSize), context);
+}
+
+template <typename SizeType, typename CompressFn>
+std::vector<std::byte> CheckedCompress(std::span<const std::byte> data, std::string_view context,
+                                       CompressFn compressFn)
+{
+    if (std::empty(data)) {
+        return {};
+    }
+
+    const SizeType inputSize{
+        CheckedSizeCast<SizeType>(std::size(data), context, "input size too large")};
+
+    SizeType outSize{0};
+    auto* out = compressFn(NonConstBytes(data), inputSize, &outSize);
+    return CopyAndFree(out, static_cast<std::size_t>(outSize), context);
+}
+
+unsigned char* Rans4x8DecompressBytes(unsigned char* input, unsigned int inputSize,
+                                      unsigned int* outSize)
+{
+    return rans_uncompress(input, inputSize, outSize);
+}
+
+unsigned char* Rans4x8CompressBytes(unsigned char* input, unsigned int inputSize,
+                                    unsigned int* outSize)
+{
+    return rans_compress(input, inputSize, outSize, 1);
+}
+
+unsigned char* Rans4x16DecompressBytes(unsigned char* input, unsigned int inputSize,
+                                       unsigned int* outSize)
+{
+    return rans_uncompress_4x16(input, inputSize, outSize);
+}
+
+unsigned char* Rans4x16CompressBytes(unsigned char* input, unsigned int inputSize,
+                                     unsigned int* outSize)
+{
+    return rans_compress_4x16(input, inputSize, outSize, 1);
+}
+
+unsigned char* AdaptiveArithDecompressBytes(unsigned char* input, unsigned int inputSize,
+                                            unsigned int* outSize)
+{
+    return arith_uncompress(input, inputSize, outSize);
+}
+
+unsigned char* AdaptiveArithCompressBytes(unsigned char* input, unsigned int inputSize,
+                                          unsigned int* outSize)
+{
+    return arith_compress(input, inputSize, outSize, 1);
+}
+
+std::vector<std::byte> CramRans4x8Decompress(std::span<const std::byte> data, std::size_t rawSize)
+{
+    return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x8Decompress",
+                                           Rans4x8DecompressBytes);
 }
 
 std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data)
 {
-    if (std::empty(data)) {
-        return {};
-    }
-    const unsigned int inputSize =
-        CheckedSizeCast<unsigned int>(std::size(data), "CramRans4x8Compress: input size too large");
-
-    unsigned int outSize = 0;
-    auto* out = rans_compress(NonConstBytes(data), inputSize, &outSize, 1);
-    return CopyAndFree(out, outSize, "CramRans4x8Compress");
+    return CheckedCompress<unsigned int>(data, "CramRans4x8Compress", Rans4x8CompressBytes);
 }
 
 std::vector<std::byte> CramRans4x16Decompress(std::span<const std::byte> data, std::size_t rawSize)
 {
-    if (rawSize == 0) {
-        return {};
-    }
-    const unsigned int inputSize = CheckedSizeCast<unsigned int>(
-        std::size(data), "CramRans4x16Decompress: input/output size too large");
-    const unsigned int expectedOutputSize = CheckedSizeCast<unsigned int>(
-        rawSize, "CramRans4x16Decompress: input/output size too large");
-
-    unsigned int outSize = 0;
-    auto* out = rans_uncompress_4x16(NonConstBytes(data), inputSize, &outSize);
-    if (outSize != expectedOutputSize) {
-        std::free(out);
-        throw std::runtime_error("CramRans4x16Decompress: decompressed size mismatch");
-    }
-    return CopyAndFree(out, outSize, "CramRans4x16Decompress");
+    return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x16Decompress",
+                                           Rans4x16DecompressBytes);
 }
 
 std::vector<std::byte> CramRans4x16Compress(std::span<const std::byte> data)
 {
-    if (std::empty(data)) {
-        return {};
-    }
-    const unsigned int inputSize = CheckedSizeCast<unsigned int>(
-        std::size(data), "CramRans4x16Compress: input size too large");
-
-    unsigned int outSize = 0;
-    auto* out = rans_compress_4x16(NonConstBytes(data), inputSize, &outSize, 1);
-    return CopyAndFree(out, outSize, "CramRans4x16Compress");
+    return CheckedCompress<unsigned int>(data, "CramRans4x16Compress", Rans4x16CompressBytes);
 }
 
 std::vector<std::byte> CramAdaptiveArithDecompress(std::span<const std::byte> data,
                                                    std::size_t rawSize)
 {
-    if (rawSize == 0) {
-        return {};
-    }
-    const unsigned int inputSize = CheckedSizeCast<unsigned int>(
-        std::size(data), "CramAdaptiveArithDecompress: input/output size too large");
-    const unsigned int expectedOutputSize = CheckedSizeCast<unsigned int>(
-        rawSize, "CramAdaptiveArithDecompress: input/output size too large");
-
-    unsigned int outSize = 0;
-    auto* out = arith_uncompress(NonConstBytes(data), inputSize, &outSize);
-    if (outSize != expectedOutputSize) {
-        std::free(out);
-        throw std::runtime_error("CramAdaptiveArithDecompress: decompressed size mismatch");
-    }
-    return CopyAndFree(out, outSize, "CramAdaptiveArithDecompress");
+    return CheckedDecompress<unsigned int>(data, rawSize, "CramAdaptiveArithDecompress",
+                                           AdaptiveArithDecompressBytes);
 }
 
 std::vector<std::byte> CramAdaptiveArithCompress(std::span<const std::byte> data)
 {
-    if (std::empty(data)) {
-        return {};
-    }
-    const unsigned int inputSize = CheckedSizeCast<unsigned int>(
-        std::size(data), "CramAdaptiveArithCompress: input size too large");
-
-    unsigned int outSize = 0;
-    auto* out = arith_compress(NonConstBytes(data), inputSize, &outSize, 1);
-    return CopyAndFree(out, outSize, "CramAdaptiveArithCompress");
+    return CheckedCompress<unsigned int>(data, "CramAdaptiveArithCompress",
+                                         AdaptiveArithCompressBytes);
 }
 
 std::vector<std::byte> CramFqzcompDecompress(std::span<const std::byte> data, std::size_t rawSize)
@@ -176,7 +197,7 @@ std::vector<std::byte> CramFqzcompDecompress(std::span<const std::byte> data, st
         std::free(out);
         throw std::runtime_error("CramFqzcompDecompress: decompressed size mismatch");
     }
-    return CopyAndFree(out, outSize, "CramFqzcompDecompress");
+    return CopyAndFree(reinterpret_cast<unsigned char*>(out), outSize, "CramFqzcompDecompress");
 }
 
 std::vector<std::byte> CramFqzcompCompressSingleRecord(std::span<const std::byte> data)
@@ -184,11 +205,11 @@ std::vector<std::byte> CramFqzcompCompressSingleRecord(std::span<const std::byte
     if (std::empty(data)) {
         return {};
     }
-    const std::uint32_t readLen = CheckedSizeCast<std::uint32_t>(
-        std::size(data), "CramFqzcompCompressSingleRecord: input size too large");
-    std::uint32_t flags = 0;
-    return CramFqzcompCompress(data, std::span<const std::uint32_t>{&readLen, 1},
-                               std::span<const std::uint32_t>{&flags, 1});
+    const std::uint32_t readLen{CheckedSizeCast<std::uint32_t>(
+        std::size(data), "CramFqzcompCompressSingleRecord", "input size too large")};
+    const std::array<std::uint32_t, 1> recordLengths{readLen};
+    const std::array<std::uint32_t, 1> recordFlags{0};
+    return CramFqzcompCompress(data, recordLengths, recordFlags);
 }
 
 std::vector<std::byte> CramNameTokeniserDecompress(std::span<const std::byte> data,
@@ -197,10 +218,10 @@ std::vector<std::byte> CramNameTokeniserDecompress(std::span<const std::byte> da
     if (rawSize == 0) {
         return {};
     }
-    const std::uint32_t inputSize = CheckedSizeCast<std::uint32_t>(
-        std::size(data), "CramNameTokeniserDecompress: input size too large");
+    const std::uint32_t inputSize{CheckedSizeCast<std::uint32_t>(
+        std::size(data), "CramNameTokeniserDecompress", "input size too large")};
 
-    std::uint32_t outSize = 0;
+    std::uint32_t outSize{0};
     auto* out = tok3_decode_names(NonConstBytes(data), inputSize, &outSize);
     if (outSize != rawSize) {
         std::free(out);
@@ -214,8 +235,8 @@ std::vector<std::byte> CramNameTokeniserCompress(std::span<const std::byte> data
     if (std::empty(data)) {
         return {};
     }
-    const int inputSize =
-        CheckedSizeCast<int>(std::size(data), "CramNameTokeniserCompress: input size too large");
+    const int inputSize{
+        CheckedSizeCast<int>(std::size(data), "CramNameTokeniserCompress", "input size too large")};
 
     int outLen = 0;
     int lastStart = 0;
@@ -230,6 +251,18 @@ std::vector<std::byte> CramNameTokeniserCompress(std::span<const std::byte> data
     return CopyAndFree(out, static_cast<std::size_t>(outLen), "CramNameTokeniserCompress");
 }
 
+void WarmLibdeflateDispatch(libdeflate_decompressor* decompressor, std::span<const std::byte> data,
+                            std::size_t rawSize)
+{
+    // libdeflate lazily initializes a global decompression dispatch
+    // function. Force that initialization once on a single thread before
+    // parallel decoding.
+    std::vector<std::byte> warmupOutput(rawSize);
+    std::size_t warmupOut = 0;
+    (void)libdeflate_gzip_decompress(decompressor, data.data(), std::size(data),
+                                     warmupOutput.data(), rawSize, &warmupOut);
+}
+
 }  // namespace
 
 std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
@@ -241,10 +274,10 @@ std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
             "CramFqzcompCompress: recordLengths and "
             "recordFlags must have equal size");
     }
-    const int numRecords = CheckedSizeCast<int>(
-        std::size(recordLengths), "CramFqzcompCompress: record metadata size too large");
-    const std::uint32_t inputSize = CheckedSizeCast<std::uint32_t>(
-        std::size(data), "CramFqzcompCompress: input size too large");
+    const int numRecords{CheckedSizeCast<int>(std::size(recordLengths), "CramFqzcompCompress",
+                                              "record metadata size too large")};
+    const std::uint32_t inputSize{CheckedSizeCast<std::uint32_t>(
+        std::size(data), "CramFqzcompCompress", "input size too large")};
 
     std::uint64_t totalLength = 0;
     for (const std::uint32_t length : recordLengths) {
@@ -264,7 +297,7 @@ std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
     std::size_t outSize = 0;
     auto* out = fqz_compress(3 << 8, &slice, reinterpret_cast<char*>(NonConstBytes(data)),
                              inputSize, &outSize, 0, nullptr);
-    return CopyAndFree(out, outSize, "CramFqzcompCompress");
+    return CopyAndFree(reinterpret_cast<unsigned char*>(out), outSize, "CramFqzcompCompress");
 }
 
 // ---------------------------------------------------------------------------
@@ -281,24 +314,17 @@ std::vector<std::byte> CramGzipDecompress(std::span<const std::byte> data, std::
 {
     LibdeflateDecompressorPtr ownedDecompressor{};
     auto* activeDecompressor = decompressor;
-    if (activeDecompressor == nullptr) {
+    if (!activeDecompressor) {
         ownedDecompressor.reset(libdeflate_alloc_decompressor());
         activeDecompressor = ownedDecompressor.get();
     }
-    if (activeDecompressor == nullptr) {
+    if (!activeDecompressor) {
         throw std::runtime_error("CramGzipDecompress: failed to allocate decompressor");
     }
 
     static std::once_flag libdeflateDispatchInitialized;
-    std::call_once(libdeflateDispatchInitialized, [activeDecompressor, data, rawSize]() {
-        // libdeflate lazily initializes a global decompression dispatch
-        // function. Force that initialization once on a single thread before
-        // parallel decoding.
-        std::vector<std::byte> warmupOutput(rawSize);
-        std::size_t warmupOut = 0;
-        (void)libdeflate_gzip_decompress(activeDecompressor, data.data(), std::size(data),
-                                         warmupOutput.data(), rawSize, &warmupOut);
-    });
+    std::call_once(libdeflateDispatchInitialized, WarmLibdeflateDispatch, activeDecompressor, data,
+                   rawSize);
 
     std::vector<std::byte> output(rawSize);
     std::size_t actualOut = 0;
@@ -336,7 +362,7 @@ std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data,
 {
     LibdeflateCompressorPtr ownedCompressor{};
     auto* activeCompressor = compressor;
-    if (activeCompressor == nullptr) {
+    if (!activeCompressor) {
         const int level = compressionLevel.value_or(DEFAULT_GZIP_COMPRESSION_LEVEL);
         if (level < 0 || level > 12) {
             throw std::runtime_error(
@@ -345,7 +371,7 @@ std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data,
         ownedCompressor.reset(libdeflate_alloc_compressor(level));
         activeCompressor = ownedCompressor.get();
     }
-    if (activeCompressor == nullptr) {
+    if (!activeCompressor) {
         throw std::runtime_error("CramGzipCompress: failed to allocate compressor");
     }
 
@@ -455,18 +481,17 @@ CompressionRegistry::CompressionRegistry()
 {
     // Register raw (no-op)
     methods_[0] = {
-        .Compress = [](std::span<const std::byte> data) -> std::vector<std::byte> {
-            return {data.begin(), data.end()};
-        },
-        .Decompress = [](std::span<const std::byte> data, std::size_t /*rawSize*/)
-            -> std::vector<std::byte> { return {data.begin(), data.end()}; },
+        .Compress = CopyRawBlock,
+        .Decompress = DecompressRawBlock,
     };
 
     // Register gzip
     methods_[1] = {
-        .Compress = [](std::span<const std::byte> data) { return CramGzipCompress(data); },
-        .Decompress = [](std::span<const std::byte> data,
-                         std::size_t rawSize) { return CramGzipDecompress(data, rawSize); },
+        .Compress =
+            static_cast<std::vector<std::byte> (*)(std::span<const std::byte>)>(&CramGzipCompress),
+        .Decompress =
+            static_cast<std::vector<std::byte> (*)(std::span<const std::byte>, std::size_t)>(
+                &CramGzipDecompress),
     };
 
     methods_[4] = {
@@ -529,27 +554,28 @@ bool CompressionRegistry::HasMethod(std::uint8_t methodId) const
     return methods_.contains(methodId);
 }
 
+const CompressionRegistry::MethodEntry& CompressionRegistry::LookupMethod(
+    const std::uint8_t methodId) const
+{
+    const auto it = methods_.find(methodId);
+    if (it == methods_.end()) {
+        throw std::runtime_error{
+            std::format("CompressionRegistry: unsupported method {}", methodId)};
+    }
+    return it->second;
+}
+
 std::vector<std::byte> CompressionRegistry::Decompress(CramBlockMethod method,
                                                        std::span<const std::byte> data,
                                                        std::size_t rawSize) const
 {
-    const auto id = std::to_underlying(method);
-    const auto it = methods_.find(id);
-    if (it == methods_.end()) {
-        throw std::runtime_error{std::format("CompressionRegistry: unsupported method {}", id)};
-    }
-    return it->second.Decompress(data, rawSize);
+    return LookupMethod(std::to_underlying(method)).Decompress(data, rawSize);
 }
 
 std::vector<std::byte> CompressionRegistry::Compress(CramBlockMethod method,
                                                      std::span<const std::byte> data) const
 {
-    const auto id = std::to_underlying(method);
-    const auto it = methods_.find(id);
-    if (it == methods_.end()) {
-        throw std::runtime_error{std::format("CompressionRegistry: unsupported method {}", id)};
-    }
-    return it->second.Compress(data);
+    return LookupMethod(std::to_underlying(method)).Compress(data);
 }
 
 // ---------------------------------------------------------------------------

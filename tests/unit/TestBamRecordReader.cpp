@@ -7,12 +7,25 @@
 
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cstddef>
+#include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
+
+namespace {
+
+template <typename Source>
+void ExpectHeaderForwardedFromSingleInput(Source&& source, const BamRecordReaderConfig& config)
+{
+    const BamRecordReader reader{std::forward<Source>(source), config};
+    EXPECT_EQ(reader.Header().Version(), "1.6");
+}
+
+}  // namespace
 
 TEST(BamRecordReader, ReadRecordsMatchViewReaderToOwned)
 {
@@ -21,11 +34,10 @@ TEST(BamRecordReader, ReadRecordsMatchViewReaderToOwned)
                                  BamRecordReaderConfig{.DecodeWorkers = 0}};
 
     std::size_t count{0};
-    for (auto viewRec = viewReader.ReadRecord(); viewRec.has_value();
-         viewRec = viewReader.ReadRecord()) {
+    while (const auto viewRec = viewReader.ReadRecord()) {
         const BamRecord owned{viewRec->ToOwned()};
         const auto decoded{recordReader.ReadRecord()};
-        ASSERT_TRUE(decoded.has_value()) << "at record " << count;
+        ASSERT_TRUE(decoded) << "at record " << count;
         EXPECT_EQ(decoded->Name(), owned.Name()) << "at record " << count;
         EXPECT_EQ(decoded->Flag(), owned.Flag()) << "at record " << count;
         EXPECT_EQ(decoded->Pos(), owned.Pos()) << "at record " << count;
@@ -34,7 +46,7 @@ TEST(BamRecordReader, ReadRecordsMatchViewReaderToOwned)
         EXPECT_EQ(decoded->Sequence(), owned.Sequence()) << "at record " << count;
         ++count;
     }
-    EXPECT_FALSE(recordReader.ReadRecord().has_value());
+    EXPECT_FALSE(recordReader.ReadRecord());
     EXPECT_GT(count, 0U);
 }
 
@@ -45,11 +57,29 @@ TEST(BamRecordReader, HeaderForwarded)
     EXPECT_EQ(reader.Header().Version(), "1.6");
 }
 
+TEST(BamRecordReader, SingleInputConstructorsPreserveSingleFileRawReader)
+{
+    const std::filesystem::path path{tests::DataDir / "spec_example.bam"};
+    const BamRecordReaderConfig config{
+        .RawReaderConfig =
+            {
+                .Whitelist = ZmwWhitelist{std::vector<std::int32_t>{42}},
+            },
+        .DecodeWorkers = 0,
+    };
+
+    EXPECT_NO_THROW(ExpectHeaderForwardedFromSingleInput(BamCollection{path}, config));
+    EXPECT_NO_THROW(
+        ExpectHeaderForwardedFromSingleInput(std::vector<std::filesystem::path>{path}, config));
+    EXPECT_NO_THROW(
+        ExpectHeaderForwardedFromSingleInput(std::vector<BamFile>{BamFile{path}}, config));
+}
+
 TEST(BamRecordReader, HeaderOnlyBamProducesNoRecords)
 {
     BamRecordReader reader{tests::DataDir / "header_only.bam",
                            BamRecordReaderConfig{.DecodeWorkers = 0}};
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST(BamRecordReader, RangeInterface)
@@ -66,7 +96,7 @@ TEST(BamRecordReader, RangeInterface)
 
 TEST(BamRecordReader, ParallelDecodeMatchesSerial)
 {
-    const auto path = tests::DataDir / "spec_example.bam";
+    const auto path{tests::DataDir / "spec_example.bam"};
     BamRecordReader serial{path, BamRecordReaderConfig{.DecodeWorkers = 0}};
     BamRecordReader parallel{path, BamRecordReaderConfig{
                                        .RawReaderConfig = {.BgzfWorkers = 2},
@@ -78,7 +108,7 @@ TEST(BamRecordReader, ParallelDecodeMatchesSerial)
         const auto s{serial.ReadRecord()};
         const auto p{parallel.ReadRecord()};
         ASSERT_EQ(s.has_value(), p.has_value()) << "at record " << count;
-        if (!s.has_value()) {
+        if (!s) {
             break;
         }
         EXPECT_EQ(s->Name(), p->Name()) << "at record " << count;
@@ -91,7 +121,7 @@ TEST(BamRecordReader, ParallelDecodeMatchesSerial)
 
 TEST(BamRecordReader, ManyRecordsParallel)
 {
-    const auto path = tests::DataDir / "many_records.bam";
+    const auto path{tests::DataDir / "many_records.bam"};
     if (!std::filesystem::exists(path)) {
         GTEST_SKIP() << "many_records.bam not generated";
     }
@@ -123,7 +153,7 @@ TEST(BamRecordReader, TagFilterDropTags)
         const auto full{noFilter.ReadRecord()};
         const auto filtered{withFilter.ReadRecord()};
         ASSERT_EQ(full.has_value(), filtered.has_value());
-        if (!full.has_value()) {
+        if (!full) {
             break;
         }
         // Core fields match
@@ -148,7 +178,7 @@ TEST(BamRecordReader, TagFilterKeepTags)
         const auto full{noFilter.ReadRecord()};
         const auto filtered{withFilter.ReadRecord()};
         ASSERT_EQ(full.has_value(), filtered.has_value());
-        if (!full.has_value()) {
+        if (!full) {
             break;
         }
         // Core fields match
@@ -167,7 +197,7 @@ TEST(BamRecordReader, TagFilterKeepTags)
 
 TEST(BamRecordReader, EarlyDestruction)
 {
-    const auto path = tests::DataDir / "many_records.bam";
+    const auto path{tests::DataDir / "many_records.bam"};
     if (!std::filesystem::exists(path)) {
         GTEST_SKIP() << "many_records.bam not generated";
     }
@@ -178,8 +208,8 @@ TEST(BamRecordReader, EarlyDestruction)
                                          .DecodeWorkers = 2,
                                      }};
         // Read just one record, then destroy
-        auto rec = reader.ReadRecord();
-        EXPECT_TRUE(rec.has_value());
+        const auto rec{reader.ReadRecord()};
+        EXPECT_TRUE(rec);
     }
     SUCCEED();
 }
@@ -188,13 +218,16 @@ TEST(BamRecordReader, EarlyDestruction)
 // producing phantom default-constructed BamRecords when the SPSC queue was full.
 TEST(BamRecordReader, NoPhantomRecordsOnQueueBackpressure)
 {
-    const auto path = tests::DataDir / "benchmark.bam";
+    const auto path{tests::DataDir / "benchmark.bam"};
+    if (!std::filesystem::exists(path)) {
+        GTEST_SKIP() << "benchmark.bam not generated";
+    }
 
     // Ground truth via raw reader
     std::size_t rawCount{0};
     {
         BamRawReader raw{path};
-        while (raw.ReadRecord().has_value()) {
+        while (raw.ReadRecord()) {
             ++rawCount;
         }
     }
@@ -215,6 +248,13 @@ TEST(BamRecordReader, NoPhantomRecordsOnQueueBackpressure)
         ++count;
     }
     EXPECT_EQ(count, rawCount);
+}
+
+TEST(BamRecordReader, NumZmwsWithoutZmiReturnsNegativeOne)
+{
+    // spec_example.bam has no ZMI, so NumZmws() should return -1.
+    const BamRecordReader reader{tests::DataDir / "spec_example.bam"};
+    EXPECT_EQ(reader.NumZmws(), -1);
 }
 
 }  // namespace Samoa

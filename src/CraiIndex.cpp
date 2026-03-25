@@ -24,10 +24,53 @@ namespace {
 
 constexpr std::size_t CRAI_COLUMN_COUNT{6};
 
+struct GzipMemberResult
+{
+    std::size_t consumed;
+    std::size_t produced;
+};
+
 std::runtime_error CraiGzipError(const std::filesystem::path& path)
 {
     return std::runtime_error{std::format(
         "CraiIndex: failed to decompress gzip data in {} (truncated or invalid)", path.string())};
+}
+
+GzipMemberResult DecompressGzipMember(const LibdeflateDecompressorPtr& decompressor,
+                                      std::span<const std::byte> compressed,
+                                      std::size_t inputOffset, std::vector<std::byte>& memberOutput,
+                                      const std::filesystem::path& path)
+{
+    std::size_t outCapacity{std::max<std::size_t>(64, std::size(compressed) - inputOffset)};
+
+    while (true) {
+        memberOutput.resize(outCapacity);
+
+        std::size_t consumed{0};
+        std::size_t produced{0};
+
+        const enum libdeflate_result rc {
+            libdeflate_gzip_decompress_ex(decompressor.get(), compressed.data() + inputOffset,
+                                          std::size(compressed) - inputOffset, memberOutput.data(),
+                                          std::size(memberOutput), &consumed, &produced)
+        };
+
+        if (rc == LIBDEFLATE_SUCCESS) {
+            if (consumed == 0) {
+                throw CraiGzipError(path);
+            }
+            return GzipMemberResult{consumed, produced};
+        }
+        if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
+            if (outCapacity >
+                std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(2)) {
+                throw CraiGzipError(path);
+            }
+            outCapacity *= 2;
+            continue;
+        }
+        throw CraiGzipError(path);
+    }
 }
 
 std::vector<std::byte> DecompressGzipMembers(std::span<const std::byte> compressed,
@@ -40,42 +83,22 @@ std::vector<std::byte> DecompressGzipMembers(std::span<const std::byte> compress
 
     std::vector<std::byte> decompressed;
     std::vector<std::byte> memberOutput;
+    const std::size_t compressedSize{std::size(compressed)};
     std::size_t inputOffset{0};
-    while (inputOffset < std::size(compressed)) {
-        std::size_t outCapacity = std::max<std::size_t>(64, std::size(compressed) - inputOffset);
-        bool memberDone{false};
-
-        while (!memberDone) {
-            memberOutput.resize(outCapacity);
-            std::size_t consumed{0};
-            std::size_t produced{0};
-            const auto rc = libdeflate_gzip_decompress_ex(
-                decompressor.get(), compressed.data() + inputOffset,
-                std::size(compressed) - inputOffset, memberOutput.data(), std::size(memberOutput),
-                &consumed, &produced);
-
-            if (rc == LIBDEFLATE_SUCCESS) {
-                if (consumed == 0) {
-                    throw CraiGzipError(path);
-                }
-                decompressed.insert(std::ranges::end(decompressed),
-                                    std::ranges::begin(memberOutput),
-                                    std::ranges::begin(memberOutput) + produced);
-                inputOffset += consumed;
-                memberDone = true;
-            } else if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
-                if (outCapacity >
-                    std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(2)) {
-                    throw CraiGzipError(path);
-                }
-                outCapacity *= 2;
-            } else {
-                throw CraiGzipError(path);
-            }
-        }
+    while (inputOffset < compressedSize) {
+        const GzipMemberResult member{
+            DecompressGzipMember(decompressor, compressed, inputOffset, memberOutput, path)};
+        decompressed.insert(std::ranges::end(decompressed), std::ranges::begin(memberOutput),
+                            std::ranges::begin(memberOutput) + member.produced);
+        inputOffset += member.consumed;
     }
 
     return decompressed;
+}
+
+std::string FieldContext(std::size_t lineNumber, std::string_view field)
+{
+    return std::format("CraiIndex: line {} field {}", lineNumber, field);
 }
 
 std::array<std::string_view, CRAI_COLUMN_COUNT> ParseColumns(std::string_view line,
@@ -84,9 +107,10 @@ std::array<std::string_view, CRAI_COLUMN_COUNT> ParseColumns(std::string_view li
     std::array<std::string_view, CRAI_COLUMN_COUNT> columns{};
     std::size_t columnCount{0};
     std::size_t fieldStart{0};
+    const std::size_t lineSize{std::size(line)};
 
-    for (std::size_t i{0}; i <= std::size(line); ++i) {
-        if (i == std::size(line) || line[i] == '\t') {
+    for (std::size_t i{0}; i <= lineSize; ++i) {
+        if (i == lineSize || line[i] == '\t') {
             if (columnCount < CRAI_COLUMN_COUNT) {
                 columns[columnCount] = line.substr(fieldStart, i - fieldStart);
             }
@@ -106,17 +130,18 @@ std::array<std::string_view, CRAI_COLUMN_COUNT> ParseColumns(std::string_view li
 CraiEntry ParseEntry(std::span<const std::string_view, CRAI_COLUMN_COUNT> columns,
                      std::size_t lineNumber)
 {
-    const auto fieldContext = [lineNumber](std::string_view field) {
-        return std::format("CraiIndex: line {} field {}", lineNumber, field);
-    };
-
     return CraiEntry{
-        .SequenceId = ParseInteger<std::int32_t>(columns[0], fieldContext("sequence_id")),
-        .AlignmentStart = ParseInteger<std::int64_t>(columns[1], fieldContext("alignment_start")),
-        .AlignmentSpan = ParseInteger<std::int64_t>(columns[2], fieldContext("alignment_span")),
-        .ContainerOffset = ParseInteger<std::int64_t>(columns[3], fieldContext("container_offset")),
-        .SliceOffset = ParseInteger<std::int64_t>(columns[4], fieldContext("slice_offset")),
-        .SliceSize = ParseInteger<std::int64_t>(columns[5], fieldContext("slice_size")),
+        .SequenceId =
+            ParseInteger<std::int32_t>(columns[0], FieldContext(lineNumber, "sequence_id")),
+        .AlignmentStart =
+            ParseInteger<std::int64_t>(columns[1], FieldContext(lineNumber, "alignment_start")),
+        .AlignmentSpan =
+            ParseInteger<std::int64_t>(columns[2], FieldContext(lineNumber, "alignment_span")),
+        .ContainerOffset =
+            ParseInteger<std::int64_t>(columns[3], FieldContext(lineNumber, "container_offset")),
+        .SliceOffset =
+            ParseInteger<std::int64_t>(columns[4], FieldContext(lineNumber, "slice_offset")),
+        .SliceSize = ParseInteger<std::int64_t>(columns[5], FieldContext(lineNumber, "slice_size")),
     };
 }
 
@@ -126,14 +151,15 @@ CraiIndex CraiIndex::FromFile(const std::filesystem::path& path)
 {
     const std::vector<std::byte> compressed = ReadAllBytes(path);
     const std::vector<std::byte> decompressed = DecompressGzipMembers(compressed, path);
-    const std::string text{reinterpret_cast<const char*>(decompressed.data()),
-                           std::size(decompressed)};
+    const std::string_view text{reinterpret_cast<const char*>(decompressed.data()),
+                                std::size(decompressed)};
+    const std::size_t textSize{std::size(text)};
 
     CraiIndex index;
     std::size_t lineNumber{1};
     std::size_t lineStart{0};
-    for (std::size_t i{0}; i <= std::size(text); ++i) {
-        if (i == std::size(text) || text[i] == '\n') {
+    for (std::size_t i{0}; i <= textSize; ++i) {
+        if (i == textSize || text[i] == '\n') {
             std::string_view line{text.data() + lineStart, i - lineStart};
             if (!std::empty(line) && line.back() == '\r') {
                 line.remove_suffix(1);
@@ -160,8 +186,9 @@ std::vector<CraiEntry> CraiIndex::EntriesForReference(std::int32_t refId) const
     }
 
     std::vector<CraiEntry> result;
-    result.reserve(std::size(it->second));
-    for (const std::size_t entryIndex : it->second) {
+    const auto& entryIndices{it->second};
+    result.reserve(entryIndices.size());
+    for (const std::size_t entryIndex : entryIndices) {
         result.push_back(entries_.at(entryIndex));
     }
     return result;

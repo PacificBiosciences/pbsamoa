@@ -105,6 +105,8 @@ public:
         private:
             QueryRange* range_{nullptr};
             std::optional<BamRecord> current_;
+
+            void Advance();
         };
 
         QueryRange(std::filesystem::path path, GenomicInterval interval,

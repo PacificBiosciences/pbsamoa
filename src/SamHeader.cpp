@@ -76,6 +76,27 @@ void AppendCustomTags(std::string& result,
     }
 }
 
+const std::string* FindValue(std::span<const std::pair<std::string, std::string>> fields,
+                             std::string_view key)
+{
+    const auto it{std::ranges::find(fields, key, &std::pair<std::string, std::string>::first)};
+    if (it == std::end(fields)) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void UpsertValue(std::vector<std::pair<std::string, std::string>>& fields, std::string key,
+                 std::string value)
+{
+    auto it{std::ranges::find(fields, key, &std::pair<std::string, std::string>::first)};
+    if (it != std::end(fields)) {
+        it->second = std::move(value);
+        return;
+    }
+    fields.emplace_back(std::move(key), std::move(value));
+}
+
 std::expected<std::int32_t, std::string> ParseInt32Field(std::string_view value,
                                                          std::string_view errorMessage)
 {
@@ -127,7 +148,7 @@ std::expected<PacBio::Samoa::ReferenceSequence, std::string> ParseReferenceSeque
             name = std::string{value};
         } else if (tag == "LN") {
             auto parsedLength{ParseInt32Field(value, "Invalid LN value in @SQ line")};
-            if (!parsedLength.has_value()) {
+            if (!parsedLength) {
                 return std::unexpected{std::move(parsedLength.error())};
             }
             length = *parsedLength;
@@ -139,13 +160,24 @@ std::expected<PacBio::Samoa::ReferenceSequence, std::string> ParseReferenceSeque
     if (std::empty(name)) {
         return std::unexpected{"Missing required SN field in @SQ line"};
     }
-    if (!length.has_value() || (*length < 0)) {
+    if (!length || (*length < 0)) {
         return std::unexpected{"Missing required LN field in @SQ line"};
     }
 
     PacBio::Samoa::ReferenceSequence ref{std::move(name), *length};
     MoveCustomTagsToRecord(tags, ref);
     return ref;
+}
+
+template <typename Record>
+std::expected<void, std::string> AppendParsedRecord(std::vector<Record>& records,
+                                                    std::expected<Record, std::string> parsed)
+{
+    if (!parsed) {
+        return std::unexpected{std::move(parsed.error())};
+    }
+    records.push_back(std::move(*parsed));
+    return {};
 }
 
 }  // namespace
@@ -157,22 +189,13 @@ namespace detail {
 const std::string* FindTag(std::span<const std::pair<std::string, std::string>> tags,
                            std::string_view key)
 {
-    const auto it{std::ranges::find(tags, key, &std::pair<std::string, std::string>::first)};
-    if (it == std::ranges::end(tags)) {
-        return nullptr;
-    }
-    return &it->second;
+    return FindValue(tags, key);
 }
 
 void UpsertTag(std::vector<std::pair<std::string, std::string>>& tags, std::string key,
                std::string value)
 {
-    auto it{std::ranges::find(tags, key, &std::pair<std::string, std::string>::first)};
-    if (it != std::ranges::end(tags)) {
-        it->second = std::move(value);
-    } else {
-        tags.emplace_back(std::move(key), std::move(value));
-    }
+    UpsertValue(tags, std::move(key), std::move(value));
 }
 
 }  // namespace detail
@@ -235,43 +258,38 @@ const std::string* ReadGroup::MovieName() const { return GetTag("PU"); }
 
 namespace {
 
+bool IsSpace(char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; }
+
 std::string TrimCopy(std::string_view text)
 {
-    const auto first{static_cast<std::size_t>(
-        std::ranges::find_if(text, [](unsigned char ch) { return std::isspace(ch) == 0; }) -
-        text.begin())};
+    const auto first{
+        static_cast<std::size_t>(std::ranges::find_if_not(text, IsSpace) - text.begin())};
     std::size_t last{std::size(text)};
-    while ((last > first) && (std::isspace(static_cast<unsigned char>(text[last - 1])) != 0)) {
+    while ((last > first) && IsSpace(text[last - 1])) {
         --last;
     }
     return std::string{text.substr(first, last - first)};
 }
 
+void AppendDsField(DsTagFields& fields, std::string_view token)
+{
+    const std::size_t equals{token.find('=')};
+    const std::string key{TrimCopy(token.substr(0, equals))};
+    std::string value;
+    if (equals != std::string_view::npos) {
+        value = TrimCopy(token.substr(equals + 1));
+    }
+    fields.emplace_back(key, value);
+}
+
 DsTagFields ParseDsTagImpl(std::string_view dsTag)
 {
     DsTagFields fields;
-
-    std::size_t start{0};
-    while (start <= std::size(dsTag)) {
-        const std::size_t end{dsTag.find(';', start)};
-        const std::string_view token{(end == std::string_view::npos)
-                                         ? dsTag.substr(start)
-                                         : dsTag.substr(start, end - start)};
+    for (const std::string_view token : Split(dsTag, ';')) {
         if (!token.empty()) {
-            const std::size_t equals{token.find('=')};
-            const std::string key{TrimCopy(token.substr(0, equals))};
-            const std::string value{(equals == std::string_view::npos)
-                                        ? std::string{}
-                                        : TrimCopy(token.substr(equals + 1))};
-            fields.emplace_back(key, value);
+            AppendDsField(fields, token);
         }
-
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
     }
-
     return fields;
 }
 
@@ -289,29 +307,17 @@ std::string BuildDsTagImpl(std::span<const std::pair<std::string, std::string>> 
     return result;
 }
 
-const std::string* FindInDsFields(const DsTagFields& fields, std::string_view key)
-{
-    const auto it{std::ranges::find(fields, key, &std::pair<std::string, std::string>::first)};
-    return (it == fields.end()) ? nullptr : &it->second;
-}
-
-void UpsertDsField(DsTagFields& fields, std::string key, std::string value)
-{
-    auto it{std::ranges::find(fields, key, &std::pair<std::string, std::string>::first)};
-    if (it != fields.end()) {
-        it->second = std::move(value);
-    } else {
-        fields.emplace_back(std::move(key), std::move(value));
-    }
-}
-
 }  // namespace
 
 const DsTagFields& ReadGroup::EnsureParsedDs() const
 {
-    if (!parsedDs_.has_value()) {
+    if (!parsedDs_) {
         const std::string* dsTag{GetTag("DS")};
-        parsedDs_ = dsTag ? ParseDsTagImpl(*dsTag) : DsTagFields{};
+        if (dsTag) {
+            parsedDs_.emplace(ParseDsTagImpl(*dsTag));
+        } else {
+            parsedDs_.emplace();
+        }
     }
     return *parsedDs_;
 }
@@ -320,13 +326,13 @@ void ReadGroup::InvalidateDsCache() { parsedDs_.reset(); }
 
 const std::string* ReadGroup::DsField(std::string_view key) const
 {
-    return FindInDsFields(EnsureParsedDs(), key);
+    return FindValue(EnsureParsedDs(), key);
 }
 
 void ReadGroup::SetDsField(std::string key, std::string value)
 {
-    auto fields{EnsureParsedDs()};  // copy
-    UpsertDsField(fields, std::move(key), std::move(value));
+    DsTagFields fields{EnsureParsedDs()};
+    UpsertValue(fields, std::move(key), std::move(value));
     SetTag("DS", BuildDsTagImpl(fields));
     parsedDs_ = std::move(fields);
 }
@@ -430,35 +436,42 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
                     header.subSort_ = std::string{value};
                 }
             }
-        } else if (recordType == "@SQ") {
-            auto reference{ParseReferenceSequenceRecord(fields)};
-            if (!reference.has_value()) {
-                return std::unexpected{std::move(reference.error())};
+            continue;
+        }
+        if (recordType == "@SQ") {
+            if (auto result =
+                    AppendParsedRecord(header.references_, ParseReferenceSequenceRecord(fields));
+                !result) {
+                return std::unexpected{std::move(result.error())};
             }
-            header.references_.push_back(std::move(*reference));
-
-        } else if (recordType == "@RG") {
-            auto readGroup{ParseTaggedRecord<ReadGroup>(fields, "ID",
-                                                        "Missing required ID field in @RG line")};
-            if (!readGroup.has_value()) {
-                return std::unexpected{std::move(readGroup.error())};
+            continue;
+        }
+        if (recordType == "@RG") {
+            if (auto result = AppendParsedRecord(
+                    header.readGroups_, ParseTaggedRecord<ReadGroup>(
+                                            fields, "ID", "Missing required ID field in @RG line"));
+                !result) {
+                return std::unexpected{std::move(result.error())};
             }
-            header.readGroups_.push_back(std::move(*readGroup));
-
-        } else if (recordType == "@PG") {
-            auto programRecord{ParseTaggedRecord<ProgramRecord>(
-                fields, "ID", "Missing required ID field in @PG line")};
-            if (!programRecord.has_value()) {
-                return std::unexpected{std::move(programRecord.error())};
+            continue;
+        }
+        if (recordType == "@PG") {
+            if (auto result =
+                    AppendParsedRecord(header.programRecords_,
+                                       ParseTaggedRecord<ProgramRecord>(
+                                           fields, "ID", "Missing required ID field in @PG line"));
+                !result) {
+                return std::unexpected{std::move(result.error())};
             }
-            header.programRecords_.push_back(std::move(*programRecord));
-
-        } else if (recordType == "@CO") {
+            continue;
+        }
+        if (recordType == "@CO") {
             // @CO line: everything after first tab is the comment
             const std::size_t tabPos{line.find('\t')};
             if (tabPos != std::string_view::npos) {
                 header.comments_.emplace_back(line.substr(tabPos + 1));
             }
+            continue;
         }
         // Ignore unknown header line types (forward compatibility)
     }
@@ -483,16 +496,12 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         return std::unexpected{"BAM header block truncated in header text"};
     }
 
-    // Parse SAM header text (may be NUL-padded)
     std::string_view headerText{reinterpret_cast<const char*>(std::data(data) + 8), lText};
-
-    // Strip trailing NULs
-    while (!std::empty(headerText) && headerText.back() == '\0') {
+    while (!std::empty(headerText) && (headerText.back() == '\0')) {
         headerText.remove_suffix(1);
     }
-
     std::expected<SamHeader, std::string> headerResult{FromText(headerText)};
-    if (!headerResult.has_value()) {
+    if (!headerResult) {
         return std::unexpected{std::move(headerResult.error())};
     }
     SamHeader header{std::move(*headerResult)};
@@ -518,8 +527,11 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         }
 
         // Name is NUL-terminated, lName includes the NUL
-        std::string name{reinterpret_cast<const char*>(std::data(data) + offset),
-                         lName > 0 ? lName - 1 : 0};
+        std::size_t nameLength{0};
+        if (lName != 0) {
+            nameLength = static_cast<std::size_t>(lName - 1);
+        }
+        std::string name{reinterpret_cast<const char*>(std::data(data) + offset), nameLength};
         offset += lName;
         const std::int32_t lRef{PacBio::Samoa::ReadI32LE(std::data(data) + offset)};
         offset += 4;

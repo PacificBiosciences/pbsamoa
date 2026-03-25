@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <functional>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <ranges>
@@ -27,15 +27,38 @@ namespace {
 std::string SnapshotStringTag(const TagMap& tags, TagKey key)
 {
     const TagValue* tagValue{tags.Get(key)};
-    if (tagValue == nullptr) {
+    if (!tagValue) {
         return {};
     }
 
     const auto* tagString{std::get_if<std::string>(tagValue)};
-    if (tagString == nullptr) {
+    if (!tagString) {
         return {};
     }
     return *tagString;
+}
+
+std::string_view TakeDelimitedSegment(std::string_view& text, char delimiter)
+{
+    const std::size_t delimiterPos{text.find(delimiter)};
+    if (delimiterPos == std::string_view::npos) {
+        const std::string_view segment{text};
+        text = {};
+        return segment;
+    }
+
+    const std::string_view segment{text.substr(0, delimiterPos)};
+    text = text.substr(delimiterPos + 1);
+    return segment;
+}
+
+template <typename Iterator>
+std::size_t PrefixTotalBefore(Iterator begin, Iterator position)
+{
+    if (position == begin) {
+        return 0;
+    }
+    return *std::prev(position);
 }
 
 bool ClearClipValue(TagValue& value)
@@ -97,13 +120,10 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
     std::vector<BasemodRecord> records;
 
     while (!std::empty(mm)) {
-        // Find the semicolon that terminates this modification record
-        const std::size_t semi{mm.find(';')};
-        const std::string_view segment{(semi != std::string_view::npos) ? mm.substr(0, semi) : mm};
+        const std::string_view segment{TakeDelimitedSegment(mm, ';')};
 
         if (std::size(segment) < 3) {
             // Minimum valid: "C+m" (3 chars)
-            mm = (semi != std::string_view::npos) ? mm.substr(semi + 1) : std::string_view{};
             continue;
         }
 
@@ -138,7 +158,6 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
         }
 
         records.push_back(std::move(rec));
-        mm = (semi != std::string_view::npos) ? mm.substr(semi + 1) : std::string_view{};
     }
 
     return records;
@@ -355,7 +374,7 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
                               std::size_t seqLength, const ClipContext& /*ctx*/) const
 {
     auto* arr = std::get_if<TagArray>(&value);
-    if (arr == nullptr) {
+    if (!arr) {
         return false;
     }
 
@@ -422,12 +441,10 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
 
     // Compute how many bases from the first retained run are clipped off the
     // front
-    const std::size_t lostPrefixBases{prefixSize -
-                                      ((prefixIt != prefixSum.begin()) ? *std::prev(prefixIt) : 0)};
+    const std::size_t lostPrefixBases{prefixSize - PrefixTotalBefore(prefixSum.begin(), prefixIt)};
 
     // Compute how many bases from the last retained run are clipped off the back
-    const std::size_t lostSuffixBases{suffixSize -
-                                      ((suffixIt != suffixSum.begin()) ? *std::prev(suffixIt) : 0)};
+    const std::size_t lostSuffixBases{suffixSize - PrefixTotalBefore(suffixSum.begin(), suffixIt)};
 
     // Build the new RLE pairs
     TagArray result{'C'};
@@ -482,7 +499,7 @@ void TagClipper::ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clip
     const ClipContext ctx{&tags, std::move(pulseCalls), sequence, std::move(basemodString)};
     for (const auto& [key, strategy] : registrations_) {
         const TagValue* existing{tags.Get(key)};
-        if (existing == nullptr) {
+        if (!existing) {
             continue;
         }
         TagValue val{*existing};

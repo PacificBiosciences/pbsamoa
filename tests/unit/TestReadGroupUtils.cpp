@@ -123,6 +123,19 @@ TEST(ReadGroupDs, ParsedDsFieldsRoundtrip)
     EXPECT_EQ(*dsTag, "A=1;B=2;C=3");
 }
 
+TEST(ReadGroupDs, ParsesWhitespaceAndTrailingDelimiter)
+{
+    ReadGroup rg{"test"};
+    rg.SetTag("DS", " READTYPE = SUBREAD ; CUSTOM = value ;");
+
+    const auto fields{rg.ParsedDsFields()};
+    ASSERT_EQ(std::size(fields), 2U);
+    EXPECT_EQ(fields[0].first, "READTYPE");
+    EXPECT_EQ(fields[0].second, "SUBREAD");
+    EXPECT_EQ(fields[1].first, "CUSTOM");
+    EXPECT_EQ(fields[1].second, "value");
+}
+
 TEST(ReadGroupDs, MovieNameFromPuTag)
 {
     ReadGroup rg{"test"};

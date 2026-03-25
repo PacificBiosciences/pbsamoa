@@ -1,5 +1,7 @@
 #include "BaiBuild.hpp"
 
+#include "../../PathUtils.hpp"
+
 #include <pbsamoa/index/BaiIndex.hpp>
 
 #include <filesystem>
@@ -20,7 +22,7 @@ int Runner(int argc, char** argv)
 
     const std::filesystem::path bamPath{argv[0]};
     const BaiIndex index{BaiIndex::Build(bamPath)};
-    const std::filesystem::path outPath{bamPath.string() + ".bai"};
+    const std::filesystem::path outPath{SidecarPath(bamPath, ".bai")};
     index.ToFile(outPath);
     std::println(stderr, "Index written to {}", outPath.string());
     return EXIT_SUCCESS;

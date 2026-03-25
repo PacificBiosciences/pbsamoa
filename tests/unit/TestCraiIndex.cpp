@@ -1,4 +1,4 @@
-#include "TestData.hpp"
+#include "TestTempDir.hpp"
 
 #include <pbsamoa/cram/CramCompression.hpp>
 #include <pbsamoa/index/CraiIndex.hpp>
@@ -18,6 +18,8 @@
 namespace PacBio {
 namespace Samoa {
 namespace {
+
+using tests::TempFileGuard;
 
 std::filesystem::path TempPath(std::string_view tag)
 {
@@ -47,28 +49,6 @@ std::filesystem::path WriteGzipText(std::string_view tag, std::string_view text)
     WriteBinary(path, compressed);
     return path;
 }
-
-class TempFileGuard
-{
-public:
-    explicit TempFileGuard(std::filesystem::path path) : path_{std::move(path)} {}
-
-    TempFileGuard(const TempFileGuard&) = delete;
-    TempFileGuard& operator=(const TempFileGuard&) = delete;
-    TempFileGuard(TempFileGuard&&) = delete;
-    TempFileGuard& operator=(TempFileGuard&&) = delete;
-
-    const std::filesystem::path& Path() const { return path_; }
-
-    ~TempFileGuard()
-    {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 }  // namespace
 

@@ -1,5 +1,7 @@
 #include <pbsamoa/io/BamFile.hpp>
 
+#include "PathUtils.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
@@ -15,20 +17,14 @@ namespace PacBio {
 namespace Samoa {
 namespace {
 
-std::filesystem::path IndexPathFor(const std::filesystem::path& bamPath)
-{
-    std::filesystem::path indexPath{bamPath};
-    indexPath += ".bai";
-    return indexPath;
-}
-
 bool StandardIndexNeedsRefresh(const std::filesystem::path& bamPath)
 {
-    const std::filesystem::path indexPath{IndexPathFor(bamPath)};
-    if (!std::filesystem::exists(indexPath) || !std::filesystem::exists(bamPath)) {
+    if (!std::filesystem::exists(bamPath)) {
         return true;
     }
-    return std::filesystem::last_write_time(indexPath) < std::filesystem::last_write_time(bamPath);
+    const std::filesystem::path indexPath{SidecarPath(bamPath, ".bai")};
+    return !std::filesystem::exists(indexPath) || (std::filesystem::last_write_time(indexPath) <
+                                                   std::filesystem::last_write_time(bamPath));
 }
 
 }  // namespace
@@ -62,10 +58,13 @@ bool BamFile::HasEOF() const
 
 bool BamFile::StandardIndexExists() const
 {
-    return std::filesystem::exists(IndexPathFor(fileName_));
+    return std::filesystem::exists(StandardIndexFilename());
 }
 
-std::filesystem::path BamFile::StandardIndexFilename() const { return IndexPathFor(fileName_); }
+std::filesystem::path BamFile::StandardIndexFilename() const
+{
+    return SidecarPath(fileName_, ".bai");
+}
 
 bool BamFile::StandardIndexIsNewer() const { return !StandardIndexNeedsRefresh(fileName_); }
 
@@ -86,8 +85,7 @@ std::string BamFile::ReferenceName(std::int32_t id) const
 
 std::uint32_t BamFile::ReferenceLength(std::string_view name) const
 {
-    const std::int32_t id{ReferenceId(name)};
-    return ReferenceLength(id);
+    return ReferenceLength(ReferenceId(name));
 }
 
 std::uint32_t BamFile::ReferenceLength(std::int32_t id) const

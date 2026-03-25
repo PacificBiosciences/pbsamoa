@@ -7,13 +7,19 @@
 
 namespace {
 
-void AppendBinRange(std::vector<std::uint16_t>& bins, std::int32_t begin, std::int32_t end,
-                    std::int32_t offset)
+struct BinLevel
 {
-    for (std::int32_t bin{offset + begin}; bin <= (offset + end); ++bin) {
-        bins.push_back(static_cast<std::uint16_t>(bin));
-    }
-}
+    std::int32_t shift;
+    std::int32_t offset;
+};
+
+constexpr std::array<BinLevel, 5> BIN_LEVELS{{
+    {26, 1},
+    {23, 9},
+    {20, 73},
+    {17, 585},
+    {14, 4681},
+}};
 
 }  // namespace
 
@@ -42,7 +48,7 @@ std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view tex
         const char* const opPos{parseResult.ptr};
 
         const std::optional<CigarOpType> opType{CharToCigarOp(*opPos)};
-        if (!opType.has_value()) {
+        if (!opType) {
             return std::unexpected{std::format("Invalid CIGAR op: {}", *opPos)};
         }
 
@@ -92,11 +98,13 @@ std::vector<std::uint16_t> Reg2Bins(std::int32_t beg, std::int32_t end)
     std::vector<std::uint16_t> bins;
     bins.reserve(32);
     bins.push_back(0);
-    AppendBinRange(bins, beg >> 26, inclusiveEnd >> 26, 1);
-    AppendBinRange(bins, beg >> 23, inclusiveEnd >> 23, 9);
-    AppendBinRange(bins, beg >> 20, inclusiveEnd >> 20, 73);
-    AppendBinRange(bins, beg >> 17, inclusiveEnd >> 17, 585);
-    AppendBinRange(bins, beg >> 14, inclusiveEnd >> 14, 4681);
+    for (const BinLevel& level : BIN_LEVELS) {
+        const std::int32_t beginBin{beg >> level.shift};
+        const std::int32_t endBin{inclusiveEnd >> level.shift};
+        for (std::int32_t bin{level.offset + beginBin}; bin <= (level.offset + endBin); ++bin) {
+            bins.push_back(static_cast<std::uint16_t>(bin));
+        }
+    }
     return bins;
 }
 

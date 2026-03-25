@@ -46,7 +46,7 @@ TEST(BamRawReader, ReadRecordsFromSpecExample)
 {
     BamRawReader reader{tests::DataDir / "spec_example.bam"};
     std::vector<std::string> names;
-    for (auto view = reader.ReadRecord(); view.has_value(); view = reader.ReadRecord()) {
+    for (auto view = reader.ReadRecord(); view; view = reader.ReadRecord()) {
         names.emplace_back(view->Name());
     }
     ASSERT_EQ(std::size(names), 6u);
@@ -57,7 +57,7 @@ TEST(BamRawReader, RecordFieldsDecodeCorrectly)
 {
     BamRawReader reader{tests::DataDir / "spec_example.bam"};
     const auto view = reader.ReadRecord();
-    ASSERT_TRUE(view.has_value());
+    ASSERT_TRUE(view);
     EXPECT_EQ(view->Name(), "r001");
     EXPECT_EQ(view->Flag(), 99u);
     EXPECT_EQ(view->RefId(), 0);
@@ -68,7 +68,7 @@ TEST(BamRawReader, RecordFieldsDecodeCorrectly)
 TEST(BamRawReader, HeaderOnlyBamProducesNoRecords)
 {
     BamRawReader reader{tests::DataDir / "header_only.bam"};
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST(BamRawReader, ThrowOnNonexistent)
@@ -82,7 +82,7 @@ TEST(BamRawReader, ReadBatchReturnsRecords)
 {
     BamRawReader reader{tests::DataDir / "spec_example.bam"};
     const auto batch = reader.ReadBatch(ByteLimit{1024U * 1024U});
-    ASSERT_TRUE(batch.has_value());
+    ASSERT_TRUE(batch);
     EXPECT_EQ(batch->RecordCount(), 6u);
 }
 
@@ -103,7 +103,7 @@ TEST(BamRawReader, ReadBatchRespectsLimit)
 TEST(BamRawReader, HeaderOnlyBamBatchReturnsNullopt)
 {
     BamRawReader reader{tests::DataDir / "header_only.bam"};
-    EXPECT_FALSE(reader.ReadBatch().has_value());
+    EXPECT_FALSE(reader.ReadBatch());
 }
 
 // --- Range interface ---
@@ -250,7 +250,7 @@ TEST(BamRawReader, PipelineMatchesSyncReadRecord)
         const auto pipeRec{pipeReader.ReadRecord()};
 
         ASSERT_EQ(syncRec.has_value(), pipeRec.has_value()) << "at record " << count;
-        if (!syncRec.has_value()) {
+        if (!syncRec) {
             break;
         }
 
@@ -396,7 +396,7 @@ TEST_F(BamRawReaderWhitelistTest, WhitelistRangeSurvivesEmptyCheckBeforeIteratio
     const ZmwWhitelist whitelist{std::vector<std::int32_t>{10, 30}};
 
     auto range = reader.Whitelist(whitelist);
-    EXPECT_FALSE(range.begin() == range.end());
+    EXPECT_NE(range.begin(), range.end());
 
     std::vector<std::string> names;
     for (const auto& rec : range) {
@@ -430,6 +430,27 @@ TEST_F(BamRawReaderWhitelistTest, SinglePathVectorSupportsChunking)
     EXPECT_EQ(count, 6u);
 }
 
+TEST(BamRawReader, MultiPathVectorRejectsChunking)
+{
+    const auto path = tests::DataDir / "spec_example.bam";
+    BamRawReaderConfig config{};
+    config.ChunkNum = 1;
+    config.TotalChunks = 2;
+
+    EXPECT_THROW((BamRawReader{std::vector<std::filesystem::path>{path, path}, config}),
+                 std::invalid_argument);
+}
+
+TEST(BamRawReader, MultiPathVectorRejectsWhitelist)
+{
+    const auto path = tests::DataDir / "spec_example.bam";
+    BamRawReaderConfig config{};
+    config.Whitelist.emplace(std::vector<std::int32_t>{42});
+
+    EXPECT_THROW((BamRawReader{std::vector<std::filesystem::path>{path, path}, config}),
+                 std::invalid_argument);
+}
+
 TEST_F(BamRawReaderWhitelistTest, ChunkingWithManyChunksStillCoversAllRecords)
 {
     std::size_t total{0};
@@ -455,6 +476,26 @@ TEST(BamRawReader, WhitelistAndChunkingMutuallyExclusive)
     EXPECT_THROW(BamRawReader(path, config), std::invalid_argument);
 }
 
+TEST_F(BamRawReaderWhitelistTest, NumZmwsSingleFile)
+{
+    // Single file with ZMI: 3 ZMWs (10, 20, 30), 2 records each
+    const BamRawReader reader{tmpBamPath_};
+    EXPECT_EQ(reader.NumZmws(), 3);
+}
+
+TEST_F(BamRawReaderWhitelistTest, NumZmwsChunked)
+{
+    BamRawReader reader{tmpBamPath_, BamRawReaderConfig{.ChunkNum = 1, .TotalChunks = 1}};
+    EXPECT_EQ(reader.NumZmws(), 3);
+}
+
+TEST(BamRawReader, NumZmwsCollectionReturnsNegativeOne)
+{
+    const auto path = tests::DataDir / "spec_example.bam";
+    BamRawReader reader{std::vector<std::filesystem::path>{path, path}};
+    EXPECT_EQ(reader.NumZmws(), -1);
+}
+
 TEST(BamRawReader, RecordLimitStopsEarly)
 {
     BamRawReader reader{tests::DataDir / "spec_example.bam", BamRawReaderConfig{.RecordLimit = 2}};
@@ -469,7 +510,7 @@ TEST(BamRawReader, SeekAndTell)
 {
     BamRawReader reader{tests::DataDir / "spec_example.bam"};
     const auto first{reader.ReadRecord()};
-    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first);
     const std::string firstName{std::string{first->Name()}};
 
     const VirtualOffset pos{reader.Tell()};

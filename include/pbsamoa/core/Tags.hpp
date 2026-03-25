@@ -1,18 +1,17 @@
 #ifndef PBSAMOA_CORE_TAGS_HPP
 #define PBSAMOA_CORE_TAGS_HPP
 
-#include <algorithm>
 #include <initializer_list>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 namespace PacBio {
 namespace Samoa {

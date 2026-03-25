@@ -217,7 +217,7 @@ TEST_F(ZmiBamWriterTest, WritesBamAndZmi)
 
     // BAM should be readable
     BamRawReader reader{tmpBamPath_};
-    EXPECT_TRUE(reader.ReadRecord().has_value());
+    EXPECT_TRUE(reader.ReadRecord());
 
     // ZMI should exist alongside BAM
     const std::filesystem::path zmiPath{tmpBamPath_.string() + ".zmi"};
@@ -575,9 +575,9 @@ TEST_F(ZmiBamWriterTest, WriteRawRecord)
     // Verify second file has the record
     BamRawReader reader2{tmpBam2};
     const auto rec2{reader2.ReadRecord()};
-    ASSERT_TRUE(rec2.has_value());
+    ASSERT_TRUE(rec2);
     EXPECT_EQ(rec2->Name(), "movie/42/0_100");
-    EXPECT_FALSE(reader2.ReadRecord().has_value());
+    EXPECT_FALSE(reader2.ReadRecord());
 
     std::filesystem::remove(tmpBam2);
     std::filesystem::remove(std::filesystem::path{tmpBam2.string() + ".zmi"});

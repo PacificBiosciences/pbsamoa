@@ -1,39 +1,17 @@
 #include <pbsamoa/io/ZmiBamWriter.hpp>
 
-#include "CramInternal.hpp"
+#include "PathUtils.hpp"
 #include "ZmwUtils.hpp"
 
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
 #include <pbsamoa/io/ZmiWriter.hpp>
 
-#include <string>
-
 #include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
-namespace {
-
-std::int32_t ReadGroupIdFromTags(const TagMap& tags)
-{
-    const TagValue* rgValue{tags.Get(RG_TAG)};
-    if ((rgValue == nullptr) || !std::holds_alternative<std::string>(*rgValue)) {
-        return 0;
-    }
-    return ParseReadGroupId(std::get<std::string>(*rgValue));
-}
-
-void AddRawRecordToIndex(ZmiWriter& zmi, std::int64_t virtualOffset,
-                         std::span<const std::byte> rawData)
-{
-    const RawRecord rawRecord{rawData};
-    const TagMap tags{rawRecord.ParseTags()};
-    zmi.AddRecord(ReadGroupIdFromTags(tags), ParseZmwFromName(rawRecord.Name()), virtualOffset);
-}
-
-}  // namespace
 
 struct ZmiBamWriter::Impl
 {
@@ -42,16 +20,17 @@ struct ZmiBamWriter::Impl
     bool closed{false};
 
     Impl(const std::filesystem::path& bamPath, const SamHeader& header, const BamWriterConfig& cfg)
-        : zmi{std::filesystem::path{bamPath.string() + ".zmi"},
-              ZmiWriterConfig{.UseTempFile = cfg.UseTempFile}}
+        : zmi{SidecarPath(bamPath, ".zmi"), ZmiWriterConfig{.UseTempFile = cfg.UseTempFile}}
         , bam{bamPath, header, cfg,
               [this](std::int64_t virtualOffset, std::span<const std::byte> rawData) {
-                  AddRawRecordToIndex(zmi, virtualOffset, rawData);
+                  const RawRecord rawRecord{rawData};
+                  const TagMap tags{rawRecord.ParseTags()};
+                  const ZmwIdentity identity{ParseZmwIdentity(rawRecord.Name(), tags)};
+                  zmi.AddRecord(identity.rgId, identity.zmw, virtualOffset);
               }}
     {
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 };
@@ -64,7 +43,7 @@ ZmiBamWriter::ZmiBamWriter(const std::filesystem::path& bamPath, const SamHeader
 
 ZmiBamWriter::~ZmiBamWriter()
 {
-    if ((impl_ != nullptr) && (!impl_->closed)) {
+    if (impl_ && !impl_->closed) {
         Close();
     }
 }

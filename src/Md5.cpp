@@ -3,9 +3,9 @@
 #include "Md5.hpp"
 
 #include <array>
-#include <format>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include <cstddef>
 #include <cstdint>
@@ -49,11 +49,11 @@ constexpr std::uint32_t LeftRotate(std::uint32_t x, std::uint32_t c)
     return (x << c) | (x >> (32 - c));
 }
 
-void Md5Transform(std::array<std::uint32_t, 4>& state, const std::uint8_t* block)
+void Md5Transform(std::array<std::uint32_t, 4>& state, std::span<const std::uint8_t, 64> block)
 {
-    std::array<std::uint32_t, 16> M;
+    std::array<std::uint32_t, 16> M{};
     for (std::size_t i{0}; i < 16; ++i) {
-        std::memcpy(&M[i], block + i * 4, 4);
+        std::memcpy(&M[i], std::data(block) + i * 4, 4);
     }
 
     std::uint32_t a{state[0]};
@@ -92,51 +92,65 @@ void Md5Transform(std::array<std::uint32_t, 4>& state, const std::uint8_t* block
 
 }  // namespace
 
-std::string Md5Hex(std::span<const std::byte> data)
+std::string Md5DigestToHex(std::span<const std::byte, 16> digest)
+{
+    static constexpr std::string_view HEX{"0123456789abcdef"};
+
+    std::string hex;
+    hex.resize(32);
+    for (std::size_t i{0}; i < 16; ++i) {
+        const std::uint8_t value{std::to_integer<std::uint8_t>(digest[i])};
+        hex[2 * i] = HEX[value >> 4];
+        hex[2 * i + 1] = HEX[value & 0x0F];
+    }
+    return hex;
+}
+
+std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
 {
     std::array<std::uint32_t, 4> state{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
 
     const std::uint64_t bitLen{static_cast<std::uint64_t>(std::size(data)) * 8};
 
     // Process complete 64-byte blocks.
+    const std::span<const std::uint8_t> bytes{reinterpret_cast<const std::uint8_t*>(data.data()),
+                                              std::size(data)};
     std::size_t offset{0};
-    while ((offset + 64) <= std::size(data)) {
-        Md5Transform(state, reinterpret_cast<const std::uint8_t*>(data.data()) + offset);
+    while ((offset + 64) <= std::size(bytes)) {
+        Md5Transform(state, bytes.subspan(offset).first<64>());
         offset += 64;
     }
 
     // Pad: remaining bytes + 0x80 + zeros + 8-byte length.
     std::array<std::uint8_t, 128> buffer{};
-    const std::size_t remaining{std::size(data) - offset};
-    std::memcpy(buffer.data(), reinterpret_cast<const std::uint8_t*>(data.data()) + offset,
-                remaining);
+    const std::size_t remaining{std::size(bytes) - offset};
+    std::memcpy(std::data(buffer), std::data(bytes) + offset, remaining);
     buffer[remaining] = 0x80;
 
-    const std::size_t padded{(remaining < 56) ? 64U : 128U};
-    std::memcpy(buffer.data() + padded - 8, &bitLen, 8);
+    std::size_t padded{64U};
+    if (remaining >= 56) {
+        padded = 128U;
+    }
+    std::memcpy(std::data(buffer) + padded - 8, &bitLen, 8);
 
-    Md5Transform(state, buffer.data());
-    if (padded == 128) {
-        Md5Transform(state, buffer.data() + 64);
+    const std::span<const std::uint8_t, 128> padSpan{buffer};
+    Md5Transform(state, padSpan.first<64>());
+    if (padded == 128U) {
+        Md5Transform(state, padSpan.last<64>());
     }
 
-    // Format as hex.
-    std::array<std::uint8_t, 16> digest;
-    std::memcpy(digest.data(), state.data(), 16);
-
-    std::string hex;
-    hex.reserve(32);
-    for (const std::uint8_t byte : digest) {
-        std::format_to(std::back_inserter(hex), "{:02x}", byte);
+    std::array<std::byte, 16> md5{};
+    for (std::size_t i{0}; i < std::size(state); ++i) {
+        for (std::size_t j{0}; j < 4; ++j) {
+            md5[i * 4 + j] = static_cast<std::byte>((state[i] >> (8 * j)) & 0xFFu);
+        }
     }
-    return hex;
+    return md5;
 }
 
-std::string Md5Hex(std::string_view text)
-{
-    return Md5Hex(std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
-                                             std::size(text)});
-}
+std::string Md5Hex(std::span<const std::byte> data) { return Md5DigestToHex(ComputeMd5(data)); }
+
+std::string Md5Hex(std::string_view text) { return Md5Hex(std::as_bytes(std::span{text})); }
 
 }  // namespace detail
 }  // namespace Samoa

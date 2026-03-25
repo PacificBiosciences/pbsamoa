@@ -19,13 +19,13 @@ void MergeCustomTags(Record& target, const Record& incoming, std::string_view la
 {
     for (const auto& [key, value] : incoming.CustomTags()) {
         const std::string* existing{target.GetTag(key)};
-        if (existing == nullptr) {
+        if (existing) {
+            if (*existing != value) {
+                throw std::runtime_error{
+                    std::format("BamCollection: conflicting {} tag '{}'", label, key)};
+            }
+        } else {
             target.SetTag(key, value);
-            continue;
-        }
-        if (*existing != value) {
-            throw std::runtime_error{
-                std::format("BamCollection: conflicting {} tag '{}'", label, key)};
         }
     }
 }
@@ -41,29 +41,29 @@ std::string MergeHdField(std::string_view lhs, std::string_view rhs, std::string
     throw std::runtime_error{std::format("BamCollection: conflicting @HD {}", label)};
 }
 
-template <typename Record, typename KeyFn, typename LabelFn>
+template <typename Record, typename KeyFn>
 void MergeNamedRecords(std::vector<Record>& target, const Record& incoming, KeyFn keyFn,
-                       LabelFn labelFn)
+                       std::string_view label)
 {
-    const auto key{std::invoke(keyFn, incoming)};
-    const auto it = std::ranges::find_if(
-        target, [&](const Record& record) { return std::invoke(keyFn, record) == key; });
+    const std::string_view key{std::invoke(keyFn, incoming)};
+    const auto it{std::ranges::find(target, key, keyFn)};
     if (it == std::ranges::end(target)) {
         target.push_back(incoming);
         return;
     }
-    MergeCustomTags(*it, incoming, labelFn(key));
+    MergeCustomTags(*it, incoming, std::format("{} '{}'", label, key));
 }
 
 void MergeReferences(SamHeader& merged, const SamHeader& incoming)
 {
     auto& mergedRefs{merged.ReferenceSequences()};
     const auto incomingRefs{incoming.ReferenceSequences()};
-    if (std::size(mergedRefs) != std::size(incomingRefs)) {
+    const std::size_t numRefs{std::size(mergedRefs)};
+    if (numRefs != std::size(incomingRefs)) {
         throw std::runtime_error{"BamCollection: conflicting reference counts"};
     }
 
-    for (std::size_t i{0}; i < std::size(mergedRefs); ++i) {
+    for (std::size_t i{0}; i < numRefs; ++i) {
         if ((mergedRefs[i].Name() != incomingRefs[i].Name()) ||
             (mergedRefs[i].Length() != incomingRefs[i].Length())) {
             throw std::runtime_error{
@@ -71,24 +71,6 @@ void MergeReferences(SamHeader& merged, const SamHeader& incoming)
         }
         MergeCustomTags(mergedRefs[i], incomingRefs[i],
                         std::format("reference '{}'", mergedRefs[i].Name()));
-    }
-}
-
-void MergeReadGroups(SamHeader& merged, const SamHeader& incoming)
-{
-    auto& mergedReadGroups{merged.ReadGroups()};
-    for (const ReadGroup& rg : incoming.ReadGroups()) {
-        MergeNamedRecords(mergedReadGroups, rg, &ReadGroup::Id,
-                          [](std::string_view id) { return std::format("read group '{}'", id); });
-    }
-}
-
-void MergePrograms(SamHeader& merged, const SamHeader& incoming)
-{
-    auto& mergedPrograms{merged.ProgramRecords()};
-    for (const ProgramRecord& pg : incoming.ProgramRecords()) {
-        MergeNamedRecords(mergedPrograms, pg, &ProgramRecord::Id,
-                          [](std::string_view id) { return std::format("program '{}'", id); });
     }
 }
 
@@ -113,8 +95,12 @@ void MergeHeader(SamHeader& merged, const SamHeader& incoming)
     merged.SetSubSort(MergeHdField(merged.SubSort(), incoming.SubSort(), "SS"));
 
     MergeReferences(merged, incoming);
-    MergeReadGroups(merged, incoming);
-    MergePrograms(merged, incoming);
+    for (const ReadGroup& readGroup : incoming.ReadGroups()) {
+        MergeNamedRecords(merged.ReadGroups(), readGroup, &ReadGroup::Id, "read group");
+    }
+    for (const ProgramRecord& program : incoming.ProgramRecords()) {
+        MergeNamedRecords(merged.ProgramRecords(), program, &ProgramRecord::Id, "program");
+    }
     MergeComments(merged, incoming);
 }
 
@@ -125,11 +111,12 @@ SamHeader MergeHeaders(std::span<const BamFile> files)
     }
 
     SamHeader merged{files.front().Header()};
-    for (std::size_t fileIndex{1}; fileIndex < std::size(files); ++fileIndex) {
+    const std::size_t numFiles{std::size(files)};
+    for (std::size_t fileIndex{1}; fileIndex < numFiles; ++fileIndex) {
         MergeHeader(merged, files[fileIndex].Header());
     }
 
-    if (std::size(files) > 1) {
+    if (numFiles > 1) {
         // A concatenated multi-file stream should not claim a stronger global
         // ordering guarantee than the collection layer can prove.
         merged.SetSortOrder("unknown");
@@ -143,9 +130,8 @@ SamHeader MergeHeaders(std::span<const BamFile> files)
 std::vector<BamFile> ToBamFiles(std::vector<std::filesystem::path> bams)
 {
     std::vector<BamFile> bamFiles;
-    const std::size_t bamCount{std::size(bams)};
-    bamFiles.reserve(bamCount);
-    for (auto& bam : bams) {
+    bamFiles.reserve(std::size(bams));
+    for (std::filesystem::path& bam : bams) {
         bamFiles.emplace_back(std::move(bam));
     }
     return bamFiles;

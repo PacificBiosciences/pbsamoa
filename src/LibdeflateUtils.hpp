@@ -10,12 +10,12 @@ namespace Samoa {
 
 struct LibdeflateDecompressorDeleter
 {
-    void operator()(libdeflate_decompressor* d) const { libdeflate_free_decompressor(d); }
+    void operator()(libdeflate_decompressor* d) const noexcept { libdeflate_free_decompressor(d); }
 };
 
 struct LibdeflateCompressorDeleter
 {
-    void operator()(libdeflate_compressor* c) const { libdeflate_free_compressor(c); }
+    void operator()(libdeflate_compressor* c) const noexcept { libdeflate_free_compressor(c); }
 };
 
 using LibdeflateDecompressorPtr =

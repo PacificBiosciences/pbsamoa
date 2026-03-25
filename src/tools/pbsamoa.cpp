@@ -12,6 +12,7 @@
 #include <array>
 #include <exception>
 #include <print>
+#include <ranges>
 #include <string_view>
 
 namespace {
@@ -35,19 +36,8 @@ constexpr std::array COMMANDS{
     CommandSpec{"bench", PacBio::Samoa::Bench::Runner},
 };
 
-const CommandSpec* FindCommand(std::string_view name)
-{
-    for (const CommandSpec& command : COMMANDS) {
-        if (command.Name == name) {
-            return &command;
-        }
-    }
-    return nullptr;
-}
-
 void PrintUsage()
 {
-    const std::string version{PacBio::Samoa::LibraryFormattedVersion()};
     std::print(stderr,
                "pbsamoa - SAM/BAM/BAI toolkit ({})\n"
                "\n"
@@ -72,7 +62,7 @@ void PrintUsage()
                "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
                "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
                "  pbsamoa bench      input.bam              Run benchmarks\n",
-               version);
+               PacBio::Samoa::LibraryFormattedVersion());
 }
 
 }  // namespace
@@ -89,7 +79,8 @@ int main(int argc, char* argv[])
 
         const std::string_view cmd{argv[1]};
 
-        if (const CommandSpec* const command = FindCommand(cmd); command != nullptr) {
+        if (const auto command{std::ranges::find(COMMANDS, cmd, &CommandSpec::Name)};
+            command != std::ranges::end(COMMANDS)) {
             return command->Run(argc - 2, argv + 2);
         }
 

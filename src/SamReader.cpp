@@ -1,6 +1,7 @@
 #include <pbsamoa/io/SamReader.hpp>
 
 #include "BinaryUtils.hpp"
+#include "ReaderUtils.hpp"
 
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/Tags.hpp>
@@ -23,15 +24,15 @@ namespace {
 std::vector<std::string_view> SplitOnTabs(std::string_view line)
 {
     std::vector<std::string_view> fields;
-    while (true) {
-        const std::size_t pos{line.find('\t')};
-        if (pos == std::string_view::npos) {
-            fields.push_back(line);
-            break;
-        }
+    fields.reserve(11);
+
+    std::size_t pos{line.find('\t')};
+    while (pos != std::string_view::npos) {
         fields.push_back(line.substr(0, pos));
         line.remove_prefix(pos + 1);
+        pos = line.find('\t');
     }
+    fields.push_back(line);
     return fields;
 }
 
@@ -68,6 +69,34 @@ std::int32_t ParseReferenceId(std::string_view refName, const SamHeader& header,
             std::format("SamReader: line {}: unknown {} '{}'", lineNumber, fieldName, refName)};
     }
     return refId;
+}
+
+std::vector<std::uint8_t> ParseQualityField(std::string_view sequenceField,
+                                            std::string_view qualityField, std::uint64_t lineNumber)
+{
+    if (qualityField == "*") {
+        return {};
+    }
+
+    if (sequenceField == "*") {
+        throw std::runtime_error{
+            std::format("SamReader: line {}: QUAL provided while SEQ is '*'", lineNumber)};
+    }
+
+    std::vector<std::uint8_t> qualities;
+    qualities.reserve(std::size(qualityField));
+    for (const char c : qualityField) {
+        if ((c < 33) || (c > 126)) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: invalid QUAL character", lineNumber)};
+        }
+        qualities.push_back(c - 33);
+    }
+    if (std::size(qualities) != std::size(sequenceField)) {
+        throw std::runtime_error{
+            std::format("SamReader: line {}: SEQ and QUAL lengths differ", lineNumber)};
+    }
+    return qualities;
 }
 
 }  // namespace
@@ -112,7 +141,6 @@ struct SamReader::Impl
         }
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 };
@@ -131,84 +159,55 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
                              std::uint64_t lineNumber)
 {
     const std::vector<std::string_view> fields{SplitOnTabs(line)};
-    if (std::size(fields) < 11) {
+    const std::size_t fieldCount{std::size(fields)};
+    if (fieldCount < 11) {
         throw std::runtime_error{
             std::format("SamReader: line {}: expected at least 11 tab-separated fields, got {}",
-                        lineNumber, std::size(fields))};
+                        lineNumber, fieldCount)};
     }
 
     BamRecord record;
 
-    // QNAME
     record.Name(std::string{fields[0]});
 
-    // FLAG
     record.Flag(ParseInteger<std::uint16_t>(fields[1], "FLAG"));
 
-    // RNAME → RefId
     record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME"));
 
-    // POS (1-based to 0-based)
     const std::int32_t pos{ParseInteger<std::int32_t>(fields[3], "POS")};
     record.Pos(ToZeroBasedSamPosition(pos));
 
-    // MAPQ
     record.MapQ(ParseUInt8(fields[4], "MAPQ"));
 
-    // CIGAR
     auto cigar{ParseCigar(fields[5])};
     if (!cigar) {
         throw std::runtime_error{std::format("SamReader: line {}: {}", lineNumber, cigar.error())};
     }
     record.Cigar(std::move(*cigar));
 
-    // RNEXT → NextRefId
     if (fields[6] == "=") {
         record.NextRefId(record.RefId());
     } else {
         record.NextRefId(ParseReferenceId(fields[6], header, lineNumber, "RNEXT"));
     }
 
-    // PNEXT (1-based to 0-based)
     const std::int32_t pnext{ParseInteger<std::int32_t>(fields[7], "PNEXT")};
     record.NextPos(ToZeroBasedSamPosition(pnext));
 
-    // TLEN
     record.Tlen(ParseInteger<std::int32_t>(fields[8], "TLEN"));
 
-    // SEQ
-    const bool seqMissing{fields[9] == "*"};
-    record.Sequence(seqMissing ? std::string{} : std::string{fields[9]});
-
-    // QUAL
-    const bool qualMissing{fields[10] == "*"};
-    if (qualMissing) {
-        record.Qualities(std::vector<std::uint8_t>{});
+    const std::string_view sequenceField{fields[9]};
+    if (sequenceField == "*") {
+        record.Sequence({});
     } else {
-        if (seqMissing) {
-            throw std::runtime_error{
-                std::format("SamReader: line {}: QUAL provided while SEQ is '*'", lineNumber)};
-        }
-
-        std::vector<std::uint8_t> quals;
-        quals.reserve(std::size(fields[10]));
-        for (const char c : fields[10]) {
-            if ((c < 33) || (c > 126)) {
-                throw std::runtime_error{
-                    std::format("SamReader: line {}: invalid QUAL character", lineNumber)};
-            }
-            quals.push_back(c - 33);
-        }
-        if (std::size(quals) != std::size(fields[9])) {
-            throw std::runtime_error{
-                std::format("SamReader: line {}: SEQ and QUAL lengths differ", lineNumber)};
-        }
-        record.Qualities(std::move(quals));
+        record.Sequence(std::string{sequenceField});
     }
 
-    // Optional tags (fields 11+)
+    const std::string_view qualityField{fields[10]};
+    record.Qualities(ParseQualityField(sequenceField, qualityField, lineNumber));
+
     TagMap tags;
-    for (std::size_t i{11}; i < std::size(fields); ++i) {
+    for (std::size_t i{11}; i < fieldCount; ++i) {
         const auto parsedTag{ParseTagFromSam(fields[i])};
         if (!parsedTag) {
             throw std::runtime_error{
@@ -227,13 +226,11 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
 std::optional<BamRecord> SamReader::ReadRecord()
 {
-    // Use buffered first alignment line if available
     if (impl_->hasBufferedLine) {
         impl_->hasBufferedLine = false;
         return ParseAlignmentLine(impl_->currentLine, impl_->header, impl_->lineNumber);
     }
 
-    // Read next lines, skipping empty ones
     std::string line;
     while (std::getline(impl_->file, line)) {
         ++impl_->lineNumber;
@@ -259,10 +256,7 @@ SamReader::RecordRange::Iterator::Iterator() = default;
 
 SamReader::RecordRange::Iterator::Iterator(SamReader* reader) : reader_{reader}
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
 }
 
 const BamRecord& SamReader::RecordRange::Iterator::operator*() const { return *current_; }
@@ -271,10 +265,7 @@ const BamRecord* SamReader::RecordRange::Iterator::operator->() const { return &
 
 SamReader::RecordRange::Iterator& SamReader::RecordRange::Iterator::operator++()
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
     return *this;
 }
 

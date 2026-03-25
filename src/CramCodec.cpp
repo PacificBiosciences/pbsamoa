@@ -22,6 +22,46 @@ std::size_t CheckedByteArrayLength(const std::int32_t length, const std::string_
     return static_cast<std::size_t>(length);
 }
 
+[[noreturn]] void ThrowUnsupported(const std::string_view codecName,
+                                   const std::string_view operation)
+{
+    throw std::runtime_error{std::format("{}: {} not supported", codecName, operation)};
+}
+
+template <typename Codec>
+std::byte DecodeByteViaInt(Codec& codec, CramBitReader& coreReader,
+                           CramExternalBlockStore& extBlocks)
+{
+    return static_cast<std::byte>(codec.DecodeInt(coreReader, extBlocks));
+}
+
+template <typename Codec>
+void EncodeByteViaInt(Codec& codec, const std::byte value, CramBitWriter& coreWriter,
+                      CramExternalBlockStore& extBlocks)
+{
+    codec.EncodeInt(static_cast<std::int32_t>(static_cast<std::uint8_t>(value)), coreWriter,
+                    extBlocks);
+}
+
+CramEncodingDescriptor ParseNestedEncodingDescriptor(std::span<const std::byte> parameters,
+                                                     std::size_t& pos)
+{
+    CramEncodingDescriptor desc;
+    std::size_t bytesRead = 0;
+    desc.CodecId = static_cast<CramCodecId>(
+        ReadItf8(std::span<const std::byte>{parameters}.subspan(pos), bytesRead));
+    pos += bytesRead;
+
+    const auto parameterLength =
+        ReadItf8(std::span<const std::byte>{parameters}.subspan(pos), bytesRead);
+    pos += bytesRead;
+
+    desc.Parameters.assign(std::begin(parameters) + pos,
+                           std::begin(parameters) + pos + parameterLength);
+    pos += parameterLength;
+    return desc;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -109,20 +149,34 @@ std::size_t CramExternalBlockStore::FastContentIndex(const std::int32_t contentI
 
 CramExternalBlockStore::BlockState* CramExternalBlockStore::FindBlock(std::int32_t contentId)
 {
+    if (BlockState* const state = FindExistingBlock(contentId)) {
+        return state;
+    }
+    throw std::runtime_error{std::format("CramExternalBlockStore: unknown block {}", contentId)};
+}
+
+const CramExternalBlockStore::BlockState* CramExternalBlockStore::FindExistingBlock(
+    std::int32_t contentId) const
+{
     if (IsFastContentId(contentId)) {
         const std::size_t idx = FastContentIndex(contentId);
         if (!fastBlockUsed_[idx]) {
-            throw std::runtime_error{
-                std::format("CramExternalBlockStore: unknown block {}", contentId)};
+            return nullptr;
         }
         return &fastBlocks_[idx];
     }
-    auto it = blocks_.find(contentId);
+
+    const auto it = blocks_.find(contentId);
     if (it == blocks_.end()) {
-        throw std::runtime_error{
-            std::format("CramExternalBlockStore: unknown block {}", contentId)};
+        return nullptr;
     }
     return &it->second;
+}
+
+CramExternalBlockStore::BlockState* CramExternalBlockStore::FindExistingBlock(
+    std::int32_t contentId)
+{
+    return const_cast<BlockState*>(std::as_const(*this).FindExistingBlock(contentId));
 }
 
 CramExternalBlockStore::BlockState* CramExternalBlockStore::FindOrCreateBlock(
@@ -228,36 +282,20 @@ void CramExternalBlockStore::ReserveBlock(std::int32_t contentId, std::size_t ca
 
 std::span<const std::byte> CramExternalBlockStore::GetBlockData(std::int32_t contentId) const
 {
-    if (IsFastContentId(contentId)) {
-        const std::size_t idx = FastContentIndex(contentId);
-        if (!fastBlockUsed_[idx]) {
-            return {};
-        }
-        return fastBlocks_[idx].data;
-    }
-
-    auto it = blocks_.find(contentId);
-    if (it == blocks_.end()) {
+    const BlockState* const state = FindExistingBlock(contentId);
+    if (!state) {
         return {};
     }
-    return std::span<const std::byte>{it->second.data};
+    return state->data;
 }
 
 std::vector<std::byte> CramExternalBlockStore::TakeBlockData(std::int32_t contentId)
 {
-    if (IsFastContentId(contentId)) {
-        const std::size_t idx = FastContentIndex(contentId);
-        if (!fastBlockUsed_[idx]) {
-            return {};
-        }
-        return std::move(fastBlocks_[idx].data);
-    }
-
-    auto it = blocks_.find(contentId);
-    if (it == blocks_.end()) {
+    BlockState* const state = FindExistingBlock(contentId);
+    if (!state) {
         return {};
     }
-    return std::move(it->second.data);
+    return std::move(state->data);
 }
 
 std::vector<std::int32_t> CramExternalBlockStore::ContentIds() const
@@ -409,12 +447,8 @@ CramCodecDecodeKind HuffmanCodec::DecodeKind() const { return CramCodecDecodeKin
 void HuffmanCodec::BuildCodes()
 {
     // Sort by bit length then by symbol
-    std::ranges::sort(entries_, [](const auto& a, const auto& b) {
-        if (a.bitLength != b.bitLength) {
-            return a.bitLength < b.bitLength;
-        }
-        return a.symbol < b.symbol;
-    });
+    std::ranges::sort(entries_, {}, &HuffmanEntry::symbol);
+    std::ranges::stable_sort(entries_, {}, &HuffmanEntry::bitLength);
 
     for (const auto& e : entries_) {
         if (e.bitLength < 0 || e.bitLength > 31) {
@@ -492,13 +526,13 @@ std::int32_t HuffmanCodec::DecodeInt(CramBitReader& coreReader,
 
 std::byte HuffmanCodec::DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks)
 {
-    return static_cast<std::byte>(DecodeInt(coreReader, extBlocks));
+    return DecodeByteViaInt(*this, coreReader, extBlocks);
 }
 
 std::vector<std::byte> HuffmanCodec::DecodeByteArray(CramBitReader& /*coreReader*/,
                                                      CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("HuffmanCodec: DecodeByteArray not supported");
+    ThrowUnsupported("HuffmanCodec", "DecodeByteArray");
 }
 
 void HuffmanCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
@@ -518,14 +552,14 @@ void HuffmanCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
 void HuffmanCodec::EncodeByte(std::byte value, CramBitWriter& coreWriter,
                               CramExternalBlockStore& extBlocks)
 {
-    EncodeInt(static_cast<std::int32_t>(static_cast<std::uint8_t>(value)), coreWriter, extBlocks);
+    EncodeByteViaInt(*this, value, coreWriter, extBlocks);
 }
 
 void HuffmanCodec::EncodeByteArray(std::span<const std::byte> /*data*/,
                                    CramBitWriter& /*coreWriter*/,
                                    CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("HuffmanCodec: EncodeByteArray not supported");
+    ThrowUnsupported("HuffmanCodec", "EncodeByteArray");
 }
 
 // ---------------------------------------------------------------------------
@@ -545,13 +579,13 @@ std::int32_t BetaCodec::DecodeInt(CramBitReader& coreReader, CramExternalBlockSt
 
 std::byte BetaCodec::DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks)
 {
-    return static_cast<std::byte>(DecodeInt(coreReader, extBlocks));
+    return DecodeByteViaInt(*this, coreReader, extBlocks);
 }
 
 std::vector<std::byte> BetaCodec::DecodeByteArray(CramBitReader& /*coreReader*/,
                                                   CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("BetaCodec: DecodeByteArray not supported");
+    ThrowUnsupported("BetaCodec", "DecodeByteArray");
 }
 
 void BetaCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
@@ -563,13 +597,13 @@ void BetaCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
 void BetaCodec::EncodeByte(std::byte value, CramBitWriter& coreWriter,
                            CramExternalBlockStore& extBlocks)
 {
-    EncodeInt(static_cast<std::int32_t>(static_cast<std::uint8_t>(value)), coreWriter, extBlocks);
+    EncodeByteViaInt(*this, value, coreWriter, extBlocks);
 }
 
 void BetaCodec::EncodeByteArray(std::span<const std::byte> /*data*/, CramBitWriter& /*coreWriter*/,
                                 CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("BetaCodec: EncodeByteArray not supported");
+    ThrowUnsupported("BetaCodec", "EncodeByteArray");
 }
 
 // ---------------------------------------------------------------------------
@@ -597,13 +631,13 @@ std::int32_t GammaCodec::DecodeInt(CramBitReader& coreReader, CramExternalBlockS
 
 std::byte GammaCodec::DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks)
 {
-    return static_cast<std::byte>(DecodeInt(coreReader, extBlocks));
+    return DecodeByteViaInt(*this, coreReader, extBlocks);
 }
 
 std::vector<std::byte> GammaCodec::DecodeByteArray(CramBitReader& /*coreReader*/,
                                                    CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("GammaCodec: DecodeByteArray not supported");
+    ThrowUnsupported("GammaCodec", "DecodeByteArray");
 }
 
 void GammaCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
@@ -633,13 +667,13 @@ void GammaCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
 void GammaCodec::EncodeByte(std::byte value, CramBitWriter& coreWriter,
                             CramExternalBlockStore& extBlocks)
 {
-    EncodeInt(static_cast<std::int32_t>(static_cast<std::uint8_t>(value)), coreWriter, extBlocks);
+    EncodeByteViaInt(*this, value, coreWriter, extBlocks);
 }
 
 void GammaCodec::EncodeByteArray(std::span<const std::byte> /*data*/, CramBitWriter& /*coreWriter*/,
                                  CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("GammaCodec: EncodeByteArray not supported");
+    ThrowUnsupported("GammaCodec", "EncodeByteArray");
 }
 
 // ---------------------------------------------------------------------------
@@ -676,13 +710,13 @@ std::int32_t SubexpCodec::DecodeInt(CramBitReader& coreReader,
 
 std::byte SubexpCodec::DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks)
 {
-    return static_cast<std::byte>(DecodeInt(coreReader, extBlocks));
+    return DecodeByteViaInt(*this, coreReader, extBlocks);
 }
 
 std::vector<std::byte> SubexpCodec::DecodeByteArray(CramBitReader& /*coreReader*/,
                                                     CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("SubexpCodec: DecodeByteArray not supported");
+    ThrowUnsupported("SubexpCodec", "DecodeByteArray");
 }
 
 void SubexpCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
@@ -716,14 +750,14 @@ void SubexpCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
 void SubexpCodec::EncodeByte(std::byte value, CramBitWriter& coreWriter,
                              CramExternalBlockStore& extBlocks)
 {
-    EncodeInt(static_cast<std::int32_t>(static_cast<std::uint8_t>(value)), coreWriter, extBlocks);
+    EncodeByteViaInt(*this, value, coreWriter, extBlocks);
 }
 
 void SubexpCodec::EncodeByteArray(std::span<const std::byte> /*data*/,
                                   CramBitWriter& /*coreWriter*/,
                                   CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("SubexpCodec: EncodeByteArray not supported");
+    ThrowUnsupported("SubexpCodec", "EncodeByteArray");
 }
 
 // ---------------------------------------------------------------------------
@@ -744,13 +778,13 @@ CramCodecDecodeKind ByteArrayLenCodec::DecodeKind() const
 std::int32_t ByteArrayLenCodec::DecodeInt(CramBitReader& /*coreReader*/,
                                           CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayLenCodec: DecodeInt not supported");
+    ThrowUnsupported("ByteArrayLenCodec", "DecodeInt");
 }
 
 std::byte ByteArrayLenCodec::DecodeByte(CramBitReader& /*coreReader*/,
                                         CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayLenCodec: DecodeByte not supported");
+    ThrowUnsupported("ByteArrayLenCodec", "DecodeByte");
 }
 
 std::vector<std::byte> ByteArrayLenCodec::DecodeByteArray(CramBitReader& coreReader,
@@ -759,7 +793,8 @@ std::vector<std::byte> ByteArrayLenCodec::DecodeByteArray(CramBitReader& coreRea
     const std::int32_t len{lenCodec_->DecodeInt(coreReader, extBlocks)};
     const std::size_t byteCount{CheckedByteArrayLength(len, "ByteArrayLenCodec")};
 
-    // Fast path: bulk read when data codec is External (avoids per-byte virtual dispatch)
+    // Fast path: bulk read when data codec is External (avoids per-byte virtual
+    // dispatch)
     if (const auto* ext = dynamic_cast<const ExternalCodec*>(dataCodec_.get())) {
         const auto view = extBlocks.ReadBytesView(ext->BlockContentId(), byteCount);
         return {view.begin(), view.end()};
@@ -794,13 +829,13 @@ std::span<const std::byte> ByteArrayLenCodec::DecodeByteArrayView(CramBitReader&
 void ByteArrayLenCodec::EncodeInt(std::int32_t /*value*/, CramBitWriter& /*coreWriter*/,
                                   CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayLenCodec: EncodeInt not supported");
+    ThrowUnsupported("ByteArrayLenCodec", "EncodeInt");
 }
 
 void ByteArrayLenCodec::EncodeByte(std::byte /*value*/, CramBitWriter& /*coreWriter*/,
                                    CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayLenCodec: EncodeByte not supported");
+    ThrowUnsupported("ByteArrayLenCodec", "EncodeByte");
 }
 
 void ByteArrayLenCodec::EncodeByteArray(std::span<const std::byte> data, CramBitWriter& coreWriter,
@@ -808,7 +843,8 @@ void ByteArrayLenCodec::EncodeByteArray(std::span<const std::byte> data, CramBit
 {
     lenCodec_->EncodeInt(static_cast<std::int32_t>(std::size(data)), coreWriter, extBlocks);
 
-    // Fast path: bulk write when data codec is External (avoids per-byte virtual dispatch)
+    // Fast path: bulk write when data codec is External (avoids per-byte virtual
+    // dispatch)
     if (const auto* ext = dynamic_cast<const ExternalCodec*>(dataCodec_.get())) {
         extBlocks.WriteBytes(ext->BlockContentId(), data);
         return;
@@ -836,13 +872,13 @@ CramCodecDecodeKind ByteArrayStopCodec::DecodeKind() const
 std::int32_t ByteArrayStopCodec::DecodeInt(CramBitReader& /*coreReader*/,
                                            CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayStopCodec: DecodeInt not supported");
+    ThrowUnsupported("ByteArrayStopCodec", "DecodeInt");
 }
 
 std::byte ByteArrayStopCodec::DecodeByte(CramBitReader& /*coreReader*/,
                                          CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayStopCodec: DecodeByte not supported");
+    ThrowUnsupported("ByteArrayStopCodec", "DecodeByte");
 }
 
 std::vector<std::byte> ByteArrayStopCodec::DecodeByteArray(CramBitReader& /*coreReader*/,
@@ -861,13 +897,13 @@ std::span<const std::byte> ByteArrayStopCodec::DecodeByteArrayView(
 void ByteArrayStopCodec::EncodeInt(std::int32_t /*value*/, CramBitWriter& /*coreWriter*/,
                                    CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayStopCodec: EncodeInt not supported");
+    ThrowUnsupported("ByteArrayStopCodec", "EncodeInt");
 }
 
 void ByteArrayStopCodec::EncodeByte(std::byte /*value*/, CramBitWriter& /*coreWriter*/,
                                     CramExternalBlockStore& /*extBlocks*/)
 {
-    throw std::runtime_error("ByteArrayStopCodec: EncodeByte not supported");
+    ThrowUnsupported("ByteArrayStopCodec", "EncodeByte");
 }
 
 void ByteArrayStopCodec::EncodeByteArray(std::span<const std::byte> data,
@@ -925,22 +961,8 @@ std::unique_ptr<CramCodec> CreateCodec(const CramEncodingDescriptor& desc)
 
         case CramCodecId::BYTE_ARRAY_LEN: {
             std::size_t pos = 0;
-            auto parseSubEncoding = [&]() {
-                CramEncodingDescriptor d;
-                std::size_t n = 0;
-                d.CodecId = static_cast<CramCodecId>(
-                    ReadItf8(std::span<const std::byte>{desc.Parameters}.subspan(pos), n));
-                pos += n;
-                const auto pLen =
-                    ReadItf8(std::span<const std::byte>{desc.Parameters}.subspan(pos), n);
-                pos += n;
-                d.Parameters.assign(desc.Parameters.begin() + pos,
-                                    desc.Parameters.begin() + pos + pLen);
-                pos += pLen;
-                return d;
-            };
-            auto lenDesc = parseSubEncoding();
-            auto dataDesc = parseSubEncoding();
+            auto lenDesc = ParseNestedEncodingDescriptor(desc.Parameters, pos);
+            auto dataDesc = ParseNestedEncodingDescriptor(desc.Parameters, pos);
 
             return std::make_unique<ByteArrayLenCodec>(CreateCodec(lenDesc), CreateCodec(dataDesc));
         }

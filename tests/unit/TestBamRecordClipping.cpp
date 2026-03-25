@@ -20,6 +20,15 @@ namespace PacBio {
 namespace Samoa {
 
 namespace {
+
+constexpr std::uint16_t StrandFlag(const bool isReverse)
+{
+    if (isReverse) {
+        return std::uint16_t{0x10};
+    }
+    return std::uint16_t{0};
+}
+
 BamRecord MakeSimpleRecord()
 {
     BamRecord rec;
@@ -255,7 +264,7 @@ BamRecord MakePipelineRecord(std::string_view cigarStr, bool isReverse, std::int
 
     BamRecord rec;
     rec.Name("read/42/0_10")
-        .Flag(isReverse ? std::uint16_t{0x10} : std::uint16_t{0})
+        .Flag(StrandFlag(isReverse))
         .RefId(0)
         .Pos(pos)
         .MapQ(80)

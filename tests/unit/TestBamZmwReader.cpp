@@ -183,10 +183,14 @@ TEST_F(BamZmwReaderTest, MetricsShowBufferedGroupsBeforeConsumption)
     WriteBamWithZmws({{42, 2}, {99, 3}, {7, 1}});
     BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
-    const ZmwReaderMetrics before = reader.GetMetrics();
-    EXPECT_GT(before.QueueDepth, 0u);
-    EXPECT_LE(before.QueueDepth, before.ConfiguredCapacity);
+    // Consume one group — this blocks until the producer has delivered at least one item,
+    // and with capacity=2 and 3 ZMWs the producer should have buffered ahead.
+    std::vector<BamRecord> group;
+    ASSERT_TRUE(reader.GetNext(group));
+
+    const ZmwReaderMetrics after = reader.GetMetrics();
+    EXPECT_GE(after.GroupsProduced, after.GroupsConsumed);
+    EXPECT_LE(after.QueueDepth, after.ConfiguredCapacity);
 }
 
 TEST_F(BamZmwReaderTest, GetNextPreservesZmwOrderWithPrefetch)
@@ -262,9 +266,23 @@ TEST_F(BamZmwReaderTest, MetricsAdvanceAsGroupsAreConsumed)
 TEST_F(BamZmwReaderTest, MetricsExposeUnderlyingReaderSnapshot)
 {
     WriteBamWithZmws({{42, 2}, {99, 1}});
-    BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 2}};
+    BamZmwReader reader{
+        BamRecordReader{
+            tmpBamPath_,
+            BamRecordReaderConfig{
+                .RawReaderConfig = {.BgzfWorkers = 2},
+                .DecodeWorkers = 0,
+            },
+        },
+        BamZmwReaderConfig{.PrefetchCapacityZmws = 2},
+    };
+
+    // Consume one group so the underlying reader has actually decoded records.
+    std::vector<BamRecord> group;
+    ASSERT_TRUE(reader.GetNext(group));
 
     const ZmwReaderMetrics m = reader.GetMetrics();
+    EXPECT_GT(m.Reader.Decode.RecordsConsumed, 0u);
     EXPECT_GE(m.Reader.Decode.RecordsProduced, m.Reader.Decode.RecordsConsumed);
     EXPECT_GE(m.Reader.Bgzf.RecordsProduced, m.Reader.Bgzf.RecordsConsumed);
 }
@@ -274,9 +292,21 @@ TEST_F(BamZmwReaderTest, ProducerStallsWhenQueueIsFull)
     WriteBamWithZmws({{42, 1}, {99, 1}, {7, 1}});
     BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 1}};
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    // Drain all groups — with capacity=1 and 3 ZMWs, the producer must have
+    // stalled at least once waiting for the consumer to free a queue slot.
+    std::vector<BamRecord> group;
+    while (reader.GetNext(group)) {
+    }
+
     const ZmwReaderMetrics m = reader.GetMetrics();
     EXPECT_GT(m.ProducerStalls, 0u);
+}
+
+TEST_F(BamZmwReaderTest, NumZmwsDelegatesCorrectly)
+{
+    WriteBamWithZmws({{42, 2}, {99, 3}, {7, 1}});
+    const BamZmwReader reader{MakeReader()};
+    EXPECT_EQ(reader.NumZmws(), 3);
 }
 
 TEST_F(BamZmwReaderTest, EarlyDestructionDoesNotHang)

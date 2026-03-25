@@ -5,6 +5,7 @@
 
 #include <pbsamoa/core/Bgzf.hpp>
 
+#include <algorithm>
 #include <array>
 
 #include <cstdint>
@@ -15,7 +16,6 @@ namespace Samoa {
 struct ZmiWriter::Impl
 {
     BgzfWriter bgzf;
-    std::uint64_t numRecords{0};
     bool closed{false};
 
     explicit Impl(const std::filesystem::path& path, const ZmiWriterConfig& config)
@@ -39,7 +39,6 @@ struct ZmiWriter::Impl
         bgzf.Write(header);
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 };
@@ -51,9 +50,10 @@ ZmiWriter::ZmiWriter(const std::filesystem::path& path, const ZmiWriterConfig& c
 
 ZmiWriter::~ZmiWriter()
 {
-    if ((impl_ != nullptr) && (!impl_->closed)) {
-        Close();
+    if (!impl_ || impl_->closed) {
+        return;
     }
+    Close();
 }
 
 ZmiWriter::ZmiWriter(ZmiWriter&&) noexcept = default;
@@ -67,7 +67,6 @@ void ZmiWriter::AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virt
     WriteLE(std::data(entry) + 8, virtualOffset);
 
     impl_->bgzf.Write(entry);
-    ++impl_->numRecords;
 }
 
 void ZmiWriter::Close()

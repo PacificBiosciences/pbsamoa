@@ -52,7 +52,14 @@ void WriteI32LEAt(std::byte* dst, std::int32_t v)
 std::int32_t IntTagOr(const TagMap& tags, TagKey key, std::int32_t fallback)
 {
     if (const auto* tagValue{tags.Get(key)}) {
-        return static_cast<std::int32_t>(std::get<std::int64_t>(*tagValue));
+        if (const auto* integral{std::get_if<std::int64_t>(tagValue)}) {
+            return static_cast<std::int32_t>(*integral);
+        }
+        if (const auto* character{std::get_if<char>(tagValue)}) {
+            return static_cast<std::int32_t>(*character);
+        }
+        throw std::runtime_error{
+            std::format("Tag '{}{}' has unexpected type", key.First(), key.Second())};
     }
     return fallback;
 }
@@ -67,7 +74,7 @@ std::uint16_t ComputeBamBin(std::int32_t pos, CigarView cigar)
     }
 
     const std::int32_t referenceEnd{static_cast<std::int32_t>(pos + ReferenceLength(cigar))};
-    return Reg2Bin(pos, (referenceEnd > pos) ? referenceEnd : (pos + 1));
+    return Reg2Bin(pos, NonEmptyAlignmentEnd(pos, referenceEnd));
 }
 
 }  // namespace
@@ -378,10 +385,10 @@ constexpr TagKey WE_TAG{'w', 'e'};
 
 std::int32_t TagToInt32(const TagValue& value)
 {
-    if (const auto* integral{std::get_if<std::int64_t>(&value)}; integral != nullptr) {
+    if (const auto* integral{std::get_if<std::int64_t>(&value)}; integral) {
         return static_cast<std::int32_t>(*integral);
     }
-    if (const auto* character{std::get_if<char>(&value)}; character != nullptr) {
+    if (const auto* character{std::get_if<char>(&value)}; character) {
         return static_cast<std::int32_t>(*character);
     }
     throw std::runtime_error{"Expected integral PacBio BAM tag"};
@@ -389,7 +396,7 @@ std::int32_t TagToInt32(const TagValue& value)
 
 float TagToFloat(const TagValue& value)
 {
-    if (const auto* floating{std::get_if<float>(&value)}; floating != nullptr) {
+    if (const auto* floating{std::get_if<float>(&value)}; floating) {
         return *floating;
     }
     throw std::runtime_error{"Expected floating-point PacBio BAM tag"};
@@ -398,7 +405,7 @@ float TagToFloat(const TagValue& value)
 const TagValue& RequiredTag(const TagMap& tags, TagKey key, std::string_view missingMessage)
 {
     const auto* tag{tags.Get(key)};
-    if (tag == nullptr) {
+    if (!tag) {
         throw std::runtime_error{std::string{missingMessage}};
     }
     return *tag;
@@ -407,7 +414,7 @@ const TagValue& RequiredTag(const TagMap& tags, TagKey key, std::string_view mis
 const TagArray& RequiredTagArray(const TagValue& value, std::string_view malformedMessage)
 {
     const auto* array{std::get_if<TagArray>(&value)};
-    if (array == nullptr) {
+    if (!array) {
         throw std::runtime_error{std::string{malformedMessage}};
     }
     return *array;
@@ -415,7 +422,7 @@ const TagArray& RequiredTagArray(const TagValue& value, std::string_view malform
 
 std::optional<std::int32_t> OptionalIntTag(const TagMap& tags, TagKey key)
 {
-    if (const auto* tag{tags.Get(key)}; tag != nullptr) {
+    if (const auto* tag{tags.Get(key)}; tag) {
         return TagToInt32(*tag);
     }
     return std::nullopt;
@@ -437,9 +444,11 @@ std::pair<std::int32_t, std::int32_t> ParseQueryInterval(std::string_view fullNa
     if (underscore == std::string_view::npos) {
         throw std::runtime_error{"Malformed PacBio BAM query interval: " + std::string{interval}};
     }
+    const std::string_view startText{interval.substr(0, underscore)};
+    const std::string_view endText{interval.substr(underscore + 1)};
     return {
-        std::stoi(std::string{interval.substr(0, underscore)}),
-        std::stoi(std::string{interval.substr(underscore + 1)}),
+        std::stoi(std::string{startText}),
+        std::stoi(std::string{endText}),
     };
 }
 
@@ -501,7 +510,7 @@ std::optional<Data::Frames> OptionalFramesTag(const TagMap& tags, TagKey key,
                                               std::string_view malformedMessage)
 {
     const auto* tag{tags.Get(key)};
-    if (tag == nullptr) {
+    if (!tag) {
         return std::nullopt;
     }
     return FramesFromTagArray(RequiredTagArray(*tag, malformedMessage));
@@ -511,23 +520,27 @@ std::optional<Data::Frames> OptionalFramesTag(const TagMap& tags, TagKey key,
 
 std::string BamRecord::FullName() const { return std::string{name_}; }
 
-std::string BamRecord::MovieName() const { return std::string{name_.substr(0, name_.find('/'))}; }
+std::string BamRecord::MovieName() const
+{
+    const std::size_t firstSlash{name_.find('/')};
+    return std::string{name_.substr(0, firstSlash)};
+}
 
 std::int32_t BamRecord::HoleNumber() const
 {
-    const std::size_t firstSlash{name_.find('/')};
+    const std::string_view name{name_};
+    const std::size_t firstSlash{name.find('/')};
     if (firstSlash == std::string::npos) {
         throw std::runtime_error{"Malformed PacBio BAM read name: " + name_};
     }
-    const std::size_t secondSlash{name_.find('/', firstSlash + 1)};
-    const std::string_view holeField{
-        std::string_view{name_}.substr(firstSlash + 1, secondSlash - (firstSlash + 1))};
+    const std::size_t secondSlash{name.find('/', firstSlash + 1)};
+    const std::string_view holeField{name.substr(firstSlash + 1, secondSlash - (firstSlash + 1))};
     return std::stoi(std::string{holeField});
 }
 
 std::int32_t BamRecord::QueryStart() const
 {
-    if (const auto* tag{tags_.Get(QS_TAG)}; tag != nullptr) {
+    if (const auto* tag{tags_.Get(QS_TAG)}; tag) {
         return TagToInt32(*tag);
     }
     return ParseQueryInterval(name_).first;
@@ -535,7 +548,7 @@ std::int32_t BamRecord::QueryStart() const
 
 std::int32_t BamRecord::QueryEnd() const
 {
-    if (const auto* tag{tags_.Get(QE_TAG)}; tag != nullptr) {
+    if (const auto* tag{tags_.Get(QE_TAG)}; tag) {
         return TagToInt32(*tag);
     }
     return ParseQueryInterval(name_).second;
@@ -544,7 +557,7 @@ std::int32_t BamRecord::QueryEnd() const
 std::string BamRecord::ReadGroupId() const
 {
     const TagValue& tag{RequiredTag(tags_, RG_TAG, "PacBio BAM record is missing RG tag")};
-    if (const auto* readGroupId{std::get_if<std::string>(&tag)}; readGroupId != nullptr) {
+    if (const auto* readGroupId{std::get_if<std::string>(&tag)}; readGroupId) {
         return *readGroupId;
     }
     throw std::runtime_error{"PacBio BAM RG tag is not a string"};
@@ -552,7 +565,7 @@ std::string BamRecord::ReadGroupId() const
 
 std::optional<Data::LocalContextFlags> BamRecord::LocalContextFlags() const
 {
-    if (const auto value{OptionalIntTag(tags_, CX_TAG)}; value.has_value()) {
+    if (const auto value{OptionalIntTag(tags_, CX_TAG)}; value) {
         return static_cast<Data::LocalContextFlags>(*value);
     }
     return std::nullopt;

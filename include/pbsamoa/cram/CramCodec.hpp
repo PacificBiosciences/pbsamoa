@@ -139,6 +139,10 @@ private:
     /// \brief Resolve a content ID to an existing block (throws if not found).
     BlockState* FindBlock(std::int32_t contentId);
 
+    /// \brief Resolve a content ID to an existing block, or nullptr if absent.
+    const BlockState* FindExistingBlock(std::int32_t contentId) const;
+    BlockState* FindExistingBlock(std::int32_t contentId);
+
     /// \brief Resolve a content ID to a block, creating it if necessary.
     BlockState* FindOrCreateBlock(std::int32_t contentId);
 

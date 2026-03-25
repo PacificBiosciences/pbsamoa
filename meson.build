@@ -51,7 +51,11 @@ libdeflate_dep = dependency(
     include_type: 'system',
 )
 
-pbcopper_dep = dependency('pbcopper', include_type: 'system')
+pbcopper_dep = dependency(
+    'pbcopper',
+    fallback: ['pbcopper', 'pbcopper_dep'],
+    include_type: 'system',
+)
 
 deps = [pbcopper_dep, libdeflate_dep, dependency('threads')]
 

@@ -1,4 +1,7 @@
 #include "Bench.hpp"
+#include "../../PathUtils.hpp"
+#include "../CliUtils.hpp"
+#include "../MetricUtils.hpp"
 #include "../ParseUtils.hpp"
 
 #include <pbsamoa/core/Metrics.hpp>
@@ -11,7 +14,6 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <string>
 #include <string_view>
 
 #include <cstdint>
@@ -22,30 +24,42 @@ namespace Samoa {
 namespace Bench {
 namespace {
 
+struct ReadCounts
+{
+    std::size_t records;
+    std::size_t bytes;
+};
+
 double ElapsedSecs(std::chrono::steady_clock::time_point start)
 {
     const auto elapsed{std::chrono::steady_clock::now() - start};
     return std::chrono::duration<double>(elapsed).count();
 }
 
+ReadCounts CountRecordsAndBytes(BamRawReader& reader)
+{
+    ReadCounts counts{};
+    for (const auto& view : reader.Records()) {
+        ++counts.records;
+        counts.bytes += std::size(view.RawData());
+    }
+    return counts;
+}
+
 void BenchSequentialRead(const std::filesystem::path& path)
 {
     const auto start{std::chrono::steady_clock::now()};
     BamRawReader reader{path};
-    std::size_t records{0};
-    std::size_t bytes{0};
-
-    for (const auto& view : reader.Records()) {
-        ++records;
-        bytes += std::size(view.RawData());
-    }
+    const ReadCounts counts{CountRecordsAndBytes(reader)};
 
     const double secs{ElapsedSecs(start)};
-    const double mbPerSec{bytes / (1024.0 * 1024.0) / secs};
+    const double inputMiB{Tools::ToMiB(counts.bytes)};
+    const double mbPerSec{inputMiB / secs};
 
     std::println(
-        "sequential_read: {} records, {:.1f} MB, {:.3f} sec, {:.1f} MB/s, {:.0f} records/s",
-        records, bytes / (1024.0 * 1024.0), secs, mbPerSec, 1.0 * records / secs);
+        "sequential_read: {} records, {:.1f} MB, {:.3f} sec, {:.1f} "
+        "MB/s, {:.0f} records/s",
+        counts.records, inputMiB, secs, mbPerSec, Tools::ToRate(counts.records, secs));
 }
 
 void BenchBatchRead(const std::filesystem::path& path, ByteLimit limit)
@@ -62,8 +76,10 @@ void BenchBatchRead(const std::filesystem::path& path, ByteLimit limit)
 
     const double secs{ElapsedSecs(start)};
 
-    std::println("batch_read({} KiB): {} records, {} batches, {:.3f} sec, {:.0f} records/s",
-                 limit.Value() / 1024, records, batches, secs, 1.0 * records / secs);
+    std::println(
+        "batch_read({} KiB): {} records, {} batches, {:.3f} sec, {:.0f} "
+        "records/s",
+        limit.Value() / 1024, records, batches, secs, Tools::ToRate(records, secs));
 }
 
 void BenchWrite(const std::filesystem::path& srcPath)
@@ -73,7 +89,7 @@ void BenchWrite(const std::filesystem::path& srcPath)
     BamRawReader srcReader{srcPath};
 
     const auto batch{srcReader.ReadBatch(ByteLimit{256U * 1024U * 1024U})};
-    if (!batch.has_value()) {
+    if (!batch) {
         std::println("write: no records to benchmark");
         return;
     }
@@ -90,20 +106,23 @@ void BenchWrite(const std::filesystem::path& srcPath)
 
     const auto fileSize{std::filesystem::file_size(tmpPath)};
 
-    std::println("write: {} records, {:.1f} MB output, {:.3f} sec, {:.1f} MB/s, {:.0f} records/s",
-                 numRecords, fileSize / (1024.0 * 1024.0), secs,
-                 fileSize / (1024.0 * 1024.0) / secs, 1.0 * numRecords / secs);
+    const double outputMiB{Tools::ToMiB(fileSize)};
+
+    std::println(
+        "write: {} records, {:.1f} MB output, {:.3f} sec, {:.1f} MB/s, "
+        "{:.0f} records/s",
+        numRecords, outputMiB, secs, outputMiB / secs, Tools::ToRate(numRecords, secs));
 
     std::filesystem::remove(tmpPath);
 }
 
 void PrintBgzfMetrics(const BgzfMetrics& m)
 {
-    const double mbRead = m.BytesRead / (1024.0 * 1024.0);
-    const double mbDecomp = m.BytesDecompressed / (1024.0 * 1024.0);
-    const double ioMs = 1.0 * m.IoReadNs / 1e6;
-    const double decompMs = 1.0 * m.DecompressNs / 1e6;
-    const double parseMs = 1.0 * m.RecordParseNs / 1e6;
+    const double mbRead{Tools::ToMiB(m.BytesRead)};
+    const double mbDecomp{Tools::ToMiB(m.BytesDecompressed)};
+    const double ioMs{Tools::ToMs(m.IoReadNs)};
+    const double decompMs{Tools::ToMs(m.DecompressNs)};
+    const double parseMs{Tools::ToMs(m.RecordParseNs)};
 
     std::println("    bgzf: {:.1f} MB compressed, {:.1f} MB decompressed, {} blocks", mbRead,
                  mbDecomp, m.BlocksRead);
@@ -117,8 +136,8 @@ void PrintBgzfMetrics(const BgzfMetrics& m)
 
 void PrintDecodeMetrics(const DecodeMetrics& m)
 {
-    const double decodeMs = 1.0 * m.DecodeNs / 1e6;
-    const double batchReadMs = 1.0 * m.BatchReadNs / 1e6;
+    const double decodeMs{Tools::ToMs(m.DecodeNs)};
+    const double batchReadMs{Tools::ToMs(m.BatchReadNs)};
 
     std::println("    decode: {} batches, {} records", m.BatchesDecoded, m.RecordsDecoded);
     std::println("    timing: decode {:.1f}ms, batch_read {:.1f}ms", decodeMs, batchReadMs);
@@ -131,21 +150,17 @@ void BenchPipelineRead(const std::filesystem::path& path, std::size_t bgzfThread
 {
     const auto start{std::chrono::steady_clock::now()};
     BamRawReader reader{path, BamRawReaderConfig{.BgzfWorkers = bgzfThreads}};
-    std::size_t records{0};
-    std::size_t bytes{0};
-
-    for (const auto& view : reader.Records()) {
-        ++records;
-        bytes += std::size(view.RawData());
-    }
+    const ReadCounts counts{CountRecordsAndBytes(reader)};
 
     const double secs{ElapsedSecs(start)};
-    const double mbPerSec{bytes / (1024.0 * 1024.0) / secs};
+    const double inputMiB{Tools::ToMiB(counts.bytes)};
+    const double mbPerSec{inputMiB / secs};
 
     std::println(
-        "pipeline_raw_read(bgzf={}): {} records, {:.1f} MB, {:.3f} sec, {:.1f} MB/s, {:.0f} "
+        "pipeline_raw_read(bgzf={}): {} records, {:.1f} MB, {:.3f} sec, "
+        "{:.1f} MB/s, {:.0f} "
         "records/s",
-        bgzfThreads, records, bytes / (1024.0 * 1024.0), secs, mbPerSec, 1.0 * records / secs);
+        bgzfThreads, counts.records, inputMiB, secs, mbPerSec, Tools::ToRate(counts.records, secs));
 
     PrintBgzfMetrics(reader.GetMetrics());
 }
@@ -167,8 +182,10 @@ void BenchRecordReader(const std::filesystem::path& path, std::size_t bgzfThread
 
     const double secs{ElapsedSecs(start)};
 
-    std::println("record_reader(bgzf={}, decode={}): {} records, {:.3f} sec, {:.0f} records/s",
-                 bgzfThreads, decodeThreads, records, secs, 1.0 * records / secs);
+    std::println(
+        "record_reader(bgzf={}, decode={}): {} records, {:.3f} sec, "
+        "{:.0f} records/s",
+        bgzfThreads, decodeThreads, records, secs, Tools::ToRate(records, secs));
 
     const ReaderMetrics m{reader.GetMetrics()};
     if (m.ParallelBgzf) {
@@ -181,7 +198,7 @@ void BenchRecordReader(const std::filesystem::path& path, std::size_t bgzfThread
 
 void BenchRegionQuery(const std::filesystem::path& bamPath)
 {
-    const std::filesystem::path baiPath{bamPath.string() + ".bai"};
+    const std::filesystem::path baiPath{SidecarPath(bamPath, ".bai")};
     if (!std::filesystem::exists(baiPath)) {
         std::println("region_query: skipped (no .bai)");
         return;
@@ -213,13 +230,10 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
 
     const double secs{ElapsedSecs(start)};
 
-    std::println("region_query: {} records from sliding window, {:.3f} sec, {:.0f} records/s",
-                 records, secs, 1.0 * records / secs);
-}
-
-std::size_t ResolveNumWorkers(std::int32_t requested)
-{
-    return Tools::ResolveNumWorkers(requested, /*explicitCap=*/10);
+    std::println(
+        "region_query: {} records from sliding window, {:.3f} sec, "
+        "{:.0f} records/s",
+        records, secs, Tools::ToRate(records, secs));
 }
 
 }  // namespace
@@ -229,32 +243,29 @@ int Runner(int argc, char** argv)
     std::int32_t bgzfOpt{-1};
     std::int32_t decodeOpt{4};
     const char* inputFile{nullptr};
-    const auto parseThreadArg = [&](int argIndex, std::string_view name) -> std::int32_t {
-        return Tools::ParseIntegerOrThrow<std::int32_t>(argv[argIndex], name);
-    };
 
     for (int i{0}; i < argc; ++i) {
         const std::string_view arg{argv[i]};
-        if ((arg == "--bgzf-threads") && (i + 1 < argc)) {
-            bgzfOpt = parseThreadArg(++i, "bgzf-threads");
-        } else if ((arg == "--decode-threads") && (i + 1 < argc)) {
-            decodeOpt = parseThreadArg(++i, "decode-threads");
-        } else if ((arg == "-j") && (i + 1 < argc)) {
-            bgzfOpt = parseThreadArg(++i, "bgzf-threads");
+        if ((arg == "--bgzf-threads") && Tools::HasFollowingArgument(i, argc)) {
+            bgzfOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "bgzf-threads");
+        } else if ((arg == "--decode-threads") && Tools::HasFollowingArgument(i, argc)) {
+            decodeOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "decode-threads");
+        } else if ((arg == "-j") && Tools::HasFollowingArgument(i, argc)) {
+            bgzfOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "bgzf-threads");
         } else if (!std::empty(arg) && arg[0] != '-') {
             inputFile = argv[i];
         }
     }
 
-    if (inputFile == nullptr) {
+    if (!inputFile) {
         std::println(stderr, "Usage: pbsamoa bench [--bgzf-threads N] [--decode-threads N] INPUT");
         return EXIT_FAILURE;
     }
 
     const std::filesystem::path path{inputFile};
 
-    const std::size_t bgzfWorkers{ResolveNumWorkers(bgzfOpt)};
-    std::size_t decodeWorkers{4};
+    const std::size_t bgzfWorkers{Tools::ResolveNumWorkers(bgzfOpt, /*explicitCap=*/10)};
+    std::size_t decodeWorkers{4U};
     if (decodeOpt >= 0) {
         decodeWorkers = static_cast<std::size_t>(decodeOpt);
     }

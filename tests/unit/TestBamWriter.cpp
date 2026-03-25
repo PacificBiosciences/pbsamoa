@@ -4,7 +4,6 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
-#include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
 
@@ -12,6 +11,8 @@
 
 #include <filesystem>
 #include <format>
+#include <ranges>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,29 @@
 
 namespace PacBio {
 namespace Samoa {
+namespace {
+
+struct OffsetCaptureCallback
+{
+    std::vector<std::int64_t>* offsets;
+
+    void operator()(std::int64_t offset, std::span<const std::byte>) const
+    {
+        offsets->push_back(offset);
+    }
+};
+
+struct RawDataCaptureCallback
+{
+    std::vector<std::byte>* rawData;
+
+    void operator()(std::int64_t, std::span<const std::byte> data) const
+    {
+        rawData->assign(std::ranges::begin(data), std::ranges::end(data));
+    }
+};
+
+}  // namespace
 
 class BamWriterTest : public ::testing::Test
 {
@@ -79,7 +103,7 @@ TEST_F(BamWriterTest, WriteHeaderOnly)
     BamRawReader reader{tmpPath};
     EXPECT_EQ(reader.Header().Version(), "1.6");
     EXPECT_EQ(std::size(reader.Header().ReferenceSequences()), 1u);
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST_F(BamWriterTest, WriteAndReadBackRecord)
@@ -92,14 +116,14 @@ TEST_F(BamWriterTest, WriteAndReadBackRecord)
 
     BamRawReader reader{tmpPath};
     const auto view = reader.ReadRecord();
-    ASSERT_TRUE(view.has_value());
+    ASSERT_TRUE(view);
     EXPECT_EQ(view->Name(), "read1");
     EXPECT_EQ(view->Flag(), 0u);
     EXPECT_EQ(view->RefId(), 0);
     EXPECT_EQ(view->Pos(), 100);
     EXPECT_EQ(view->MapQ(), 30u);
     EXPECT_EQ(view->Seq().ToString(), "ACGTACGTAC");
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST_F(BamWriterTest, WriteMultipleRecords)
@@ -175,7 +199,7 @@ TEST_F(BamWriterTest, MixOwnedAndViewWrites)
         // Write one view from spec_example.bam
         BamRawReader reader{tests::DataDir / "spec_example.bam"};
         const auto view = reader.ReadRecord();
-        ASSERT_TRUE(view.has_value());
+        ASSERT_TRUE(view);
         writer.Write(*view);
     }
 
@@ -257,15 +281,10 @@ TEST_F(BamWriterTest, IndexCallbackInvokedPerRecord)
     std::vector<std::int64_t> capturedOffsets;
 
     {
-        auto callback = [&capturedOffsets](std::int64_t offset,
-                                           std::span<const std::byte> /*rawData*/) {
-            capturedOffsets.push_back(offset);
-        };
-
         const BamWriterConfig config{
             .BgzfConfig = {.BgzfWorkers = 4},
         };
-        BamWriter writer{tmpPath, header, config, std::move(callback)};
+        BamWriter writer{tmpPath, header, config, OffsetCaptureCallback{&capturedOffsets}};
         for (int i{0}; i < 5; ++i) {
             BamRecord rec = MakeTestRecord();
             rec.Name(std::format("read{}", i));
@@ -280,6 +299,25 @@ TEST_F(BamWriterTest, IndexCallbackInvokedPerRecord)
     }
 }
 
+TEST_F(BamWriterTest, IndexCallbackReceivesSerializedRecordBytes)
+{
+    const SamHeader header = MakeMinimalHeader();
+    BamRecord record = MakeTestRecord();
+    record.Name("callback-read");
+    const std::vector<std::byte> expected{record.SerializeToBam()};
+    std::vector<std::byte> capturedRawData;
+
+    {
+        const BamWriterConfig config{
+            .BgzfConfig = {.BgzfWorkers = 4},
+        };
+        BamWriter writer{tmpPath, header, config, RawDataCaptureCallback{&capturedRawData}};
+        writer.Write(record);
+    }
+
+    EXPECT_EQ(capturedRawData, expected);
+}
+
 TEST_F(BamWriterTest, NoCallbackStillWorks)
 {
     const SamHeader header = MakeMinimalHeader();
@@ -290,7 +328,7 @@ TEST_F(BamWriterTest, NoCallbackStillWorks)
 
     BamRawReader reader{tmpPath};
     const auto view = reader.ReadRecord();
-    ASSERT_TRUE(view.has_value());
+    ASSERT_TRUE(view);
     EXPECT_EQ(view->Name(), "read1");
 }
 
@@ -342,7 +380,7 @@ TEST_F(BamWriterTest, UseTempFileAtomicWrite)
 
     BamRawReader reader{tmpPath};
     const auto view = reader.ReadRecord();
-    ASSERT_TRUE(view.has_value());
+    ASSERT_TRUE(view);
     EXPECT_EQ(view->Name(), "read1");
 }
 

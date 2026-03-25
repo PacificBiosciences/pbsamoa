@@ -1,5 +1,7 @@
 #include "../../src/ZmwUtils.hpp"
 
+#include <pbsamoa/core/Tags.hpp>
+
 #include <gtest/gtest.h>
 
 #include <string_view>
@@ -37,6 +39,16 @@ TEST(ZmwUtils, MovieZmwPrefixNoSlash) { EXPECT_EQ(MovieZmwPrefix("noslash"), "no
 
 TEST(ZmwUtils, MovieZmwPrefixOneSlash) { EXPECT_EQ(MovieZmwPrefix("movie/42"), "movie/42"); }
 
+TEST(ZmwUtils, MovieZmwPrefixTrailingSecondFieldSlash)
+{
+    EXPECT_EQ(MovieZmwPrefix("movie/42/"), "movie/42");
+}
+
+TEST(ZmwUtils, MovieZmwPrefixEmptySecondField)
+{
+    EXPECT_EQ(MovieZmwPrefix("movie//rest"), "movie/");
+}
+
 TEST(ZmwUtils, MovieZmwPrefixDifferentMoviesSameZmw)
 {
     EXPECT_NE(MovieZmwPrefix("movieA/42/ccs"), MovieZmwPrefix("movieB/42/ccs"));
@@ -69,6 +81,28 @@ TEST(ZmwUtils, ParseReadGroupIdInvalidReturnsZero)
 {
     EXPECT_EQ(ParseReadGroupId("rg1"), 0);
     EXPECT_EQ(ParseReadGroupId(""), 0);
+}
+
+// --- ParseZmwIdentity ---
+
+TEST(ZmwUtils, ParseZmwIdentityNormal)
+{
+    TagMap tags;
+    tags.Set(RG_TAG, std::string{"0000002a/0--0"});
+    EXPECT_EQ(ParseZmwIdentity("movie/42/0_100", tags), (ZmwIdentity{42, 42}));
+}
+
+TEST(ZmwUtils, ParseZmwIdentityMissingRgFallsBackToZero)
+{
+    const TagMap tags;
+    EXPECT_EQ(ParseZmwIdentity("movie/42/0_100", tags), (ZmwIdentity{0, 42}));
+}
+
+TEST(ZmwUtils, ParseZmwIdentityInvalidRgTextFallsBackToZero)
+{
+    TagMap tags;
+    tags.Set(RG_TAG, std::string{"not-hex"});
+    EXPECT_EQ(ParseZmwIdentity("movie/42/0_100", tags), (ZmwIdentity{0, 42}));
 }
 
 }  // namespace Samoa

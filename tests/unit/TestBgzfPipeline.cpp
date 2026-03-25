@@ -46,7 +46,7 @@ TEST(BgzfReaderBam, SyncModeMatchesBgzfReader)
         const auto rResult{blockReader.ReadBlock(rBuf)};
 
         ASSERT_EQ(pResult.has_value(), rResult.has_value());
-        if (!pResult.has_value()) {
+        if (!pResult) {
             break;
         }
         ASSERT_EQ(*pResult, *rResult);
@@ -74,7 +74,7 @@ TEST(BgzfReaderBam, PipelineModeMatchesSyncMode)
         const auto pResult{parallel.ReadBlock(pBuf)};
 
         ASSERT_EQ(sResult.has_value(), pResult.has_value()) << "Mismatch at block " << blockIdx;
-        if (!sResult.has_value()) {
+        if (!sResult) {
             break;
         }
         ASSERT_EQ(*sResult, *pResult) << "Size mismatch at block " << blockIdx;
@@ -105,7 +105,7 @@ TEST(BgzfReaderBam, ManyRecordsBamCorrectness)
         const auto pResult{parallel.ReadBlock(pBuf)};
 
         ASSERT_EQ(sResult.has_value(), pResult.has_value());
-        if (!sResult.has_value() || *sResult == 0) {
+        if (!sResult || *sResult == 0) {
             break;
         }
         ASSERT_EQ(*sResult, *pResult);
@@ -124,7 +124,7 @@ TEST(BgzfReaderBam, EofOnSmallFile)
 
     std::vector<std::byte> buf(65536);
     const auto first{pipeline.ReadBlock(buf)};
-    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first);
     EXPECT_EQ(*first, 0U);
 }
 
@@ -136,12 +136,12 @@ TEST(BgzfReaderBam, SeekBackToStart)
 
     std::vector<std::byte> expectedBuf(65536);
     const auto expectedResult{blockReader.ReadBlock(expectedBuf)};
-    ASSERT_TRUE(expectedResult.has_value());
+    ASSERT_TRUE(expectedResult);
     ASSERT_GT(*expectedResult, 0U);
 
     std::vector<std::byte> firstBuf(65536);
     const auto firstResult{pipeline.ReadBlock(firstBuf)};
-    ASSERT_TRUE(firstResult.has_value());
+    ASSERT_TRUE(firstResult);
     ASSERT_GT(*firstResult, 0U);
 
     // Seek back to start
@@ -149,7 +149,7 @@ TEST(BgzfReaderBam, SeekBackToStart)
 
     std::vector<std::byte> secondBuf(65536);
     const auto secondResult{pipeline.ReadBlock(secondBuf)};
-    ASSERT_TRUE(secondResult.has_value());
+    ASSERT_TRUE(secondResult);
     ASSERT_EQ(*expectedResult, *secondResult);
     EXPECT_TRUE(std::ranges::equal(std::span<const std::byte>{expectedBuf}.first(*expectedResult),
                                    std::span<const std::byte>{secondBuf}.first(*secondResult)));
@@ -165,7 +165,7 @@ TEST(BgzfReaderBam, TellTracksPosition)
 
     std::vector<std::byte> buf(65536);
     const auto result{pipeline.ReadBlock(buf)};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     ASSERT_GT(*result, 0U);
 
     // After reading first block, tell should be at block 0 offset
@@ -193,7 +193,7 @@ TEST(BgzfReaderBam, SingleWorkerCorrectness)
         const auto manyR{many.ReadBlock(manyBuf)};
 
         ASSERT_EQ(oneR.has_value(), manyR.has_value());
-        if (!oneR.has_value() || *oneR == 0) {
+        if (!oneR || *oneR == 0) {
             break;
         }
         ASSERT_EQ(*oneR, *manyR);
@@ -283,7 +283,7 @@ TEST(BgzfReaderBam, ReadRecordEofOnHeaderOnly)
 
     // Should immediately return nullopt — no records in header-only file
     const auto rec{pipeline.ReadRecord()};
-    EXPECT_FALSE(rec.has_value());
+    EXPECT_FALSE(rec);
 }
 
 TEST(BgzfReaderBam, ParseHeaderMatchesBamRawReader)

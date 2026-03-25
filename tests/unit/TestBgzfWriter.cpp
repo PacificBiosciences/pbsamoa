@@ -7,15 +7,31 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
-#include <format>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <span>
-#include <thread>
 #include <vector>
 
 namespace PacBio {
 namespace Samoa {
+namespace {
+
+struct CallbackCapture
+{
+    std::mutex* mutex;
+    std::vector<std::int64_t>* offsets;
+    std::vector<std::vector<std::byte>>* payloads;
+
+    void operator()(std::int64_t offset, std::span<const std::byte> rawData) const
+    {
+        const std::lock_guard lock{*mutex};
+        offsets->push_back(offset);
+        payloads->emplace_back(std::ranges::begin(rawData), std::ranges::end(rawData));
+    }
+};
+
+}  // namespace
 
 class BgzfWriterTest : public ::testing::Test
 {
@@ -68,7 +84,7 @@ TEST_F(BgzfWriterTest, WriteAndReadBack)
     std::vector<std::byte> buffer{};
     buffer.resize(65536U);
     const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-    ASSERT_TRUE(bytesRead.has_value());
+    ASSERT_TRUE(bytesRead);
     ASSERT_EQ(*bytesRead, std::size(original));
 
     const std::string result{reinterpret_cast<const char*>(std::data(buffer)), *bytesRead};
@@ -94,7 +110,7 @@ TEST_F(BgzfWriterTest, LargeDataSpansMultipleBlocks)
     buffer.resize(65536U);
     while (true) {
         const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-        if ((!bytesRead.has_value()) || (*bytesRead == 0U)) {
+        if (!bytesRead || (*bytesRead == 0U)) {
             break;
         }
         output.insert(std::ranges::end(output), std::ranges::begin(buffer),
@@ -117,7 +133,7 @@ TEST_F(BgzfWriterTest, EmptyFileHasEofMarker)
     std::vector<std::byte> buffer{};
     buffer.resize(65536U);
     const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-    EXPECT_TRUE((!bytesRead.has_value()) || (*bytesRead == 0U));
+    EXPECT_TRUE(!bytesRead || (*bytesRead == 0U));
 }
 
 TEST_F(BgzfWriterTest, MultipleSmallWrites)
@@ -135,7 +151,7 @@ TEST_F(BgzfWriterTest, MultipleSmallWrites)
     std::vector<std::byte> buffer{};
     buffer.resize(65536U);
     const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-    ASSERT_TRUE(bytesRead.has_value());
+    ASSERT_TRUE(bytesRead);
 
     const std::string result{reinterpret_cast<const char*>(std::data(buffer)), *bytesRead};
     EXPECT_EQ(result, "Hello, world!");
@@ -171,16 +187,12 @@ TEST_F(BgzfWriterTest, UseTempFileAtomicWrite)
 
 TEST_F(BgzfWriterTest, WriteWithCallback)
 {
-    std::vector<std::pair<std::int64_t, std::vector<std::byte>>> received;
+    std::vector<std::int64_t> callbackOffsets;
+    std::vector<std::vector<std::byte>> callbackData;
     std::mutex mu;
 
-    auto callback = [&](std::int64_t offset, std::span<const std::byte> data) {
-        const std::lock_guard lock{mu};
-        received.emplace_back(offset, std::vector<std::byte>{std::begin(data), std::end(data)});
-    };
-
     BgzfWriter writer{tmpPath_, BgzfWriterConfig{.BgzfWorkers = 2}};
-    writer.SetCallback(std::move(callback));
+    writer.SetCallback(CallbackCapture{&mu, &callbackOffsets, &callbackData});
 
     for (int i{0}; i < 3; ++i) {
         std::vector<std::byte> record(100);
@@ -194,9 +206,10 @@ TEST_F(BgzfWriterTest, WriteWithCallback)
     writer.Close();
 
     const std::lock_guard lock{mu};
-    ASSERT_EQ(std::size(received), 3U);
-    for (std::size_t i{1}; i < std::size(received); ++i) {
-        EXPECT_GE(received[i].first, received[i - 1].first);
+    ASSERT_EQ(std::size(callbackOffsets), 3U);
+    ASSERT_EQ(std::size(callbackData), 3U);
+    for (std::size_t i{1}; i < std::size(callbackOffsets); ++i) {
+        EXPECT_GE(callbackOffsets[i], callbackOffsets[i - 1]);
     }
 }
 
@@ -231,11 +244,7 @@ TEST_F(BgzfWriterTest, OversizedRecordIsSplitAcrossBlocksAndCallbackFiresOnce)
                                     .BgzfWorkers = 2,
                                     .BlocksPerBatch = 1,
                                 }};
-    writer.SetCallback([&](std::int64_t offset, std::span<const std::byte> rawData) {
-        const std::lock_guard lock{mu};
-        callbackOffsets.push_back(offset);
-        callbackData.emplace_back(std::ranges::begin(rawData), std::ranges::end(rawData));
-    });
+    writer.SetCallback(CallbackCapture{&mu, &callbackOffsets, &callbackData});
 
     const PendingCallback cb{
         .rawData = input,
@@ -256,7 +265,7 @@ TEST_F(BgzfWriterTest, OversizedRecordIsSplitAcrossBlocksAndCallbackFiresOnce)
     std::vector<std::byte> buffer(65536U);
     while (true) {
         const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-        ASSERT_TRUE(bytesRead.has_value());
+        ASSERT_TRUE(bytesRead);
         if (*bytesRead == 0U) {
             break;
         }

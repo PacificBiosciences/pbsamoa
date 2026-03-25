@@ -211,8 +211,103 @@ struct PipelineCounters
     std::atomic<std::uint64_t> readerStalls{0};
 };
 
+void NotifyReader(std::mutex& readyMutex, std::condition_variable& readyCv)
+{
+    std::unique_lock lock{readyMutex};
+    lock.unlock();
+    readyCv.notify_one();
+}
+
+void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
+                          rigtorp::SPSCQueue<RawRecord>& outputQueue,
+                          const std::stop_token& stopToken, PipelineCounters& counters,
+                          std::mutex& readyMutex, std::condition_variable& readyCv)
+{
+    const auto parseStart{std::chrono::steady_clock::now()};
+    bool pushed{false};
+
+    while (pos + RECORD_BLOCK_SIZE_FIELD <= std::size(accumulator)) {
+        const std::uint32_t blockSize{ReadU32LE(std::data(accumulator) + pos)};
+        if (blockSize == 0) {
+            pos += RECORD_BLOCK_SIZE_FIELD;
+            continue;
+        }
+
+        const std::size_t totalRecordBytes{RECORD_BLOCK_SIZE_FIELD + blockSize};
+        if (pos + totalRecordBytes > std::size(accumulator)) {
+            break;  // Need more data
+        }
+
+        // Create owning view from record bytes (after block_size field)
+        RawRecord view{std::span<const std::byte>{
+            std::data(accumulator) + pos + RECORD_BLOCK_SIZE_FIELD, blockSize}};
+
+        // Push to SPSC — spin while queue is full (reader drains on another core).
+        while (!outputQueue.try_push(std::move(view))) {
+            if (stopToken.stop_requested()) {
+                counters.recordParseNs.fetch_add(
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - parseStart)
+                                                   .count()),
+                    std::memory_order_relaxed);
+                return;
+            }
+            counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        counters.recordsProduced.fetch_add(1, std::memory_order_relaxed);
+        pushed = true;
+        pos += totalRecordBytes;
+    }
+
+    // Compact accumulator: remove consumed bytes
+    if (pos > 0) {
+        accumulator.erase(std::begin(accumulator),
+                          std::begin(accumulator) + static_cast<std::ptrdiff_t>(pos));
+        pos = 0;
+    }
+
+    counters.recordParseNs.fetch_add(
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - parseStart)
+                                       .count()),
+        std::memory_order_relaxed);
+
+    if (pushed) {
+        NotifyReader(readyMutex, readyCv);
+    }
+}
+
+struct DecompressedBatchConsumer
+{
+    std::vector<std::byte>& accumulator;
+    std::size_t& pos;
+    rigtorp::SPSCQueue<RawRecord>& outputQueue;
+    std::stop_token stopToken;
+    PipelineCounters& counters;
+    std::mutex& readyMutex;
+    std::condition_variable& readyCv;
+
+    void operator()(detail::DecompressedBatch batch) const
+    {
+        accumulator.insert(accumulator.end(), batch.data.begin(), batch.data.end());
+        ParseBufferedRecords(accumulator, pos, outputQueue, stopToken, counters, readyMutex,
+                             readyCv);
+    }
+};
+
 struct BgzfPipelineState
 {
+    struct DecompressBatchTask
+    {
+        std::vector<detail::CompressedEntry> entries;
+        std::vector<std::byte> compressedData;
+        std::vector<detail::DecompressorPtr>* decompressors;
+        PipelineCounters* counters;
+
+        detail::DecompressedBatch operator()(Parallel::ThreadIndex threadIdx) const;
+    };
+
     std::filesystem::path filePath;
     std::size_t numWorkers;
     bool hasEofMarker{false};
@@ -256,10 +351,14 @@ struct BgzfPipelineState
     void ParseHeader();
     void StartPipeline();
     void StopPipeline();
+    static void RunIoLoop(std::stop_token stopToken, BgzfPipelineState* self);
+    static void RunConsumerLoop(std::stop_token stopToken, BgzfPipelineState* self);
     void IoLoop(std::stop_token stopToken);
     void ConsumerLoop(std::stop_token stopToken);
     std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
     const SamHeader& Header() const;
+    std::optional<RawRecord> TryPopOutputRecord();
+    bool OutputQueueReady() const;
     std::optional<RawRecord> ReadRecord();
     void Seek(VirtualOffset offset);
     VirtualOffset Tell() const;
@@ -303,7 +402,6 @@ struct BgzfReader::Impl
 
     explicit Impl(const std::filesystem::path& path);
     Impl(const std::filesystem::path& path, std::size_t numWorkers);
-    ~Impl();
 
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
@@ -414,6 +512,22 @@ struct WritePipelineCounters
 
 struct BgzfWriter::Impl
 {
+    struct CompressedBatchWriter
+    {
+        Impl* self;
+
+        void operator()(detail::CompressedBatch batch) const;
+    };
+
+    struct CompressBatchTask
+    {
+        std::vector<detail::UncompressedBlock> blocks;
+        std::vector<detail::CompressorPtr>* compressors;
+        detail::WritePipelineCounters* counters;
+
+        detail::CompressedBatch operator()(Parallel::ThreadIndex threadIdx);
+    };
+
     BgzfWriterConfig config;
     std::filesystem::path finalPath;
     std::filesystem::path writePath;
@@ -473,17 +587,19 @@ struct BgzfWriter::Impl
 
         try {
             // Consumer must run before Submit() starts in producer-consumer mode.
-            ioWriterThread = std::jthread{[this](std::stop_token st) { IoWriterLoop(st); }};
-            packerThread = std::jthread{[this](std::stop_token st) { PackerLoop(st); }};
+            ioWriterThread = std::jthread{&Impl::RunIoWriterLoop, this};
+            packerThread = std::jthread{&Impl::RunPackerLoop, this};
         } catch (...) {
             ShutdownPipelineNoThrow();
             throw;
         }
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
+
+    static void RunIoWriterLoop(std::stop_token stopToken, Impl* self);
+    static void RunPackerLoop(std::stop_token stopToken, Impl* self);
 
     void FinalizePoolNoThrow() noexcept
     {
@@ -552,6 +668,43 @@ struct BgzfWriter::Impl
         throw std::runtime_error{"BgzfWriter: background pipeline failed"};
     }
 
+    void ResetCurrentBlock(detail::UncompressedBlock& currentBlock) const
+    {
+        currentBlock = detail::UncompressedBlock{};
+        currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
+    }
+
+    void SubmitBatch(std::vector<detail::UncompressedBlock>& batch, std::size_t batchLimit)
+    {
+        if (std::empty(batch)) {
+            return;
+        }
+        std::vector<detail::UncompressedBlock> blocks{};
+        blocks.swap(batch);
+        batch.reserve(batchLimit);
+
+        pool->Submit(CompressBatchTask{std::move(blocks), &compressors, &counters});
+    }
+
+    void FlushBatchIfFull(std::vector<detail::UncompressedBlock>& batch, std::size_t batchLimit)
+    {
+        if (std::size(batch) >= batchLimit) {
+            SubmitBatch(batch, batchLimit);
+        }
+    }
+
+    void SealCurrentBlock(std::vector<detail::UncompressedBlock>& batch,
+                          detail::UncompressedBlock& currentBlock, std::size_t batchLimit)
+    {
+        if (std::empty(currentBlock.data)) {
+            return;
+        }
+
+        batch.push_back(std::move(currentBlock));
+        ResetCurrentBlock(currentBlock);
+        FlushBatchIfFull(batch, batchLimit);
+    }
+
     void PackerLoop(std::stop_token stopToken)
     {
         try {
@@ -561,70 +714,7 @@ struct BgzfWriter::Impl
             std::size_t emptyPollCount{0};
 
             detail::UncompressedBlock currentBlock{};
-            currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
-
-            const auto submitBatch = [&]() {
-                if (std::empty(batch)) {
-                    return;
-                }
-                std::vector<detail::UncompressedBlock> blocks{};
-                blocks.swap(batch);
-                batch.reserve(batchLimit);
-
-                pool->Submit(
-                    [blocks = std::move(blocks), &comps = this->compressors, &ctr = this->counters](
-                        Parallel::ThreadIndex threadIdx) -> detail::CompressedBatch {
-                        detail::CompressedBatch result{};
-                        result.blocks.reserve(std::size(blocks));
-
-                        auto* comp{comps[threadIdx.Value()].get()};
-                        std::vector<std::uint8_t> cbuf(BGZF_MAX_BLOCK_SIZE);
-
-                        for (auto& block : blocks) {
-                            const auto t0{std::chrono::steady_clock::now()};
-                            const std::size_t compSize{libdeflate_deflate_compress(
-                                comp, std::data(block.data), std::size(block.data), std::data(cbuf),
-                                std::size(cbuf))};
-                            if (compSize == 0U) {
-                                throw std::runtime_error{"libdeflate_deflate_compress failed"};
-                            }
-                            const auto t1{std::chrono::steady_clock::now()};
-                            ctr.compressNs.fetch_add(
-                                static_cast<std::uint64_t>(
-                                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0)
-                                        .count()),
-                                std::memory_order_relaxed);
-
-                            const std::uint32_t crc{
-                                libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
-                            const std::uint32_t isize = std::size(block.data);
-                            result.blocks.push_back(detail::CompressedBatch::Block{
-                                .cdata = {std::begin(cbuf), std::begin(cbuf) + compSize},
-                                .crc32 = crc,
-                                .isize = isize,
-                                .callbacks = std::move(block.callbacks),
-                            });
-                            ctr.bytesCompressed.fetch_add(compSize, std::memory_order_relaxed);
-                        }
-
-                        return result;
-                    });
-            };
-
-            const auto flushIfBatchFull = [&]() {
-                if (std::size(batch) >= batchLimit) {
-                    submitBatch();
-                }
-            };
-
-            const auto sealBlock = [&]() {
-                if (!std::empty(currentBlock.data)) {
-                    batch.push_back(std::move(currentBlock));
-                    currentBlock = detail::UncompressedBlock{};
-                    currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
-                    flushIfBatchFull();
-                }
-            };
+            ResetCurrentBlock(currentBlock);
 
             while (!stopToken.stop_requested()) {
                 detail::WriteItem* front{inputQueue->front()};
@@ -644,8 +734,8 @@ struct BgzfWriter::Impl
                 inputQueue->pop();
 
                 if (item.kind == detail::WriteItemKind::CLOSE) {
-                    sealBlock();
-                    submitBatch();
+                    SealCurrentBlock(batch, currentBlock, batchLimit);
+                    SubmitBatch(batch, batchLimit);
                     break;
                 }
                 if (item.kind != detail::WriteItemKind::DATA || std::empty(item.data)) {
@@ -655,14 +745,14 @@ struct BgzfWriter::Impl
                 const bool fitsInSingleBlock{std::size(item.data) <= MAX_UNCOMPRESSED_SIZE};
                 if (fitsInSingleBlock && !std::empty(currentBlock.data) &&
                     (std::size(currentBlock.data) + std::size(item.data) > MAX_UNCOMPRESSED_SIZE)) {
-                    sealBlock();
+                    SealCurrentBlock(batch, currentBlock, batchLimit);
                 }
 
                 std::size_t dataPos{0};
                 bool callbackAssigned{false};
                 while (dataPos < std::size(item.data)) {
                     if (std::size(currentBlock.data) >= MAX_UNCOMPRESSED_SIZE) {
-                        sealBlock();
+                        SealCurrentBlock(batch, currentBlock, batchLimit);
                     }
 
                     const std::size_t space{MAX_UNCOMPRESSED_SIZE - std::size(currentBlock.data)};
@@ -781,21 +871,25 @@ struct BgzfWriter::Impl
             std::memory_order_relaxed);
     }
 
+    void WriteCompressedBatch(detail::CompressedBatch batch)
+    {
+        for (const auto& block : batch.blocks) {
+            const std::uint64_t blockFileOffset{compressedOffset};
+            WriteFrame(block);
+            FireCallbacks(block, blockFileOffset);
+            counters.blocksWritten.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     void IoWriterLoop(std::stop_token /*stopToken*/)
     {
         try {
+            const CompressedBatchWriter writeBatch{this};
             while (true) {
                 if (pool->GetMetrics().CurrentResultQueueDepth == 0U) {
                     counters.writerStalls.fetch_add(1, std::memory_order_relaxed);
                 }
-                const bool keepConsuming = pool->ConsumeWith([this](detail::CompressedBatch batch) {
-                    for (const auto& block : batch.blocks) {
-                        const std::uint64_t blockFileOffset{compressedOffset};
-                        WriteFrame(block);
-                        FireCallbacks(block, blockFileOffset);
-                        counters.blocksWritten.fetch_add(1, std::memory_order_relaxed);
-                    }
-                });
+                const bool keepConsuming = pool->ConsumeWith(writeBatch);
                 if (!keepConsuming) {
                     break;
                 }
@@ -806,6 +900,60 @@ struct BgzfWriter::Impl
     }
 };
 
+void BgzfWriter::Impl::CompressedBatchWriter::operator()(detail::CompressedBatch batch) const
+{
+    self->WriteCompressedBatch(std::move(batch));
+}
+
+detail::CompressedBatch BgzfWriter::Impl::CompressBatchTask::operator()(
+    Parallel::ThreadIndex threadIdx)
+{
+    detail::CompressedBatch result{};
+    result.blocks.reserve(std::size(blocks));
+
+    auto* compressor{(*compressors)[threadIdx.Value()].get()};
+    std::vector<std::uint8_t> compressedBuffer(BGZF_MAX_BLOCK_SIZE);
+
+    for (auto& block : blocks) {
+        const auto compressStart{std::chrono::steady_clock::now()};
+        const std::size_t compressedSize{
+            libdeflate_deflate_compress(compressor, std::data(block.data), std::size(block.data),
+                                        std::data(compressedBuffer), std::size(compressedBuffer))};
+        if (compressedSize == 0U) {
+            throw std::runtime_error{"libdeflate_deflate_compress failed"};
+        }
+
+        counters->compressNs.fetch_add(
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - compressStart)
+                                           .count()),
+            std::memory_order_relaxed);
+
+        const std::uint32_t crc32{
+            libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
+        const std::uint32_t isize{static_cast<std::uint32_t>(std::size(block.data))};
+        result.blocks.push_back(detail::CompressedBatch::Block{
+            .cdata = {std::begin(compressedBuffer), std::begin(compressedBuffer) + compressedSize},
+            .crc32 = crc32,
+            .isize = isize,
+            .callbacks = std::move(block.callbacks),
+        });
+        counters->bytesCompressed.fetch_add(compressedSize, std::memory_order_relaxed);
+    }
+
+    return result;
+}
+
+void BgzfWriter::Impl::RunIoWriterLoop(std::stop_token stopToken, Impl* self)
+{
+    self->IoWriterLoop(stopToken);
+}
+
+void BgzfWriter::Impl::RunPackerLoop(std::stop_token stopToken, Impl* self)
+{
+    self->PackerLoop(stopToken);
+}
+
 BgzfWriter::BgzfWriter(const std::filesystem::path& path, const BgzfWriterConfig& config)
     : impl_{std::make_unique<Impl>(path, config)}
 {
@@ -813,7 +961,7 @@ BgzfWriter::BgzfWriter(const std::filesystem::path& path, const BgzfWriterConfig
 
 BgzfWriter::~BgzfWriter()
 {
-    if ((impl_ != nullptr) && (!impl_->closed)) {
+    if (impl_ && !impl_->closed) {
         try {
             Close();
         } catch (...) {
@@ -1023,7 +1171,7 @@ void BgzfPipelineState::ParseHeader()
 
         const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
             std::span<const std::byte>{syncCompressed}.first(BGZF_HEADER_SIZE))};
-        if (!info.has_value()) {
+        if (!info) {
             throw std::runtime_error{"Invalid BGZF header while parsing BAM header"};
         }
 
@@ -1061,7 +1209,7 @@ void BgzfPipelineState::ParseHeader()
         if (hdrSize > 0) {
             auto headerResult{SamHeader::FromBamHeaderBlock(
                 std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-            if (!headerResult.has_value()) {
+            if (!headerResult) {
                 throw std::runtime_error{std::move(headerResult.error())};
             }
             header = std::move(*headerResult);
@@ -1093,7 +1241,7 @@ void BgzfPipelineState::ParseHeader()
     if (hdrSize > 0) {
         auto headerResult{SamHeader::FromBamHeaderBlock(
             std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-        if (!headerResult.has_value()) {
+        if (!headerResult) {
             throw std::runtime_error{std::move(headerResult.error())};
         }
         header = std::move(*headerResult);
@@ -1132,10 +1280,20 @@ void BgzfPipelineState::StartPipeline()
 
     // Start consumer thread first — must enter ConsumeWith() before IO thread
     // calls Submit()
-    consumerThread = std::jthread{[this](std::stop_token st) { ConsumerLoop(st); }};
+    consumerThread = std::jthread{&BgzfPipelineState::RunConsumerLoop, this};
 
     // Start IO thread
-    ioThread = std::jthread{[this](std::stop_token st) { IoLoop(st); }};
+    ioThread = std::jthread{&BgzfPipelineState::RunIoLoop, this};
+}
+
+void BgzfPipelineState::RunIoLoop(std::stop_token stopToken, BgzfPipelineState* self)
+{
+    self->IoLoop(stopToken);
+}
+
+void BgzfPipelineState::RunConsumerLoop(std::stop_token stopToken, BgzfPipelineState* self)
+{
+    self->ConsumerLoop(stopToken);
 }
 
 void BgzfPipelineState::StopPipeline()
@@ -1229,7 +1387,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 
                 const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
                     std::span<const std::byte>{compressed}.first(BGZF_HEADER_SIZE))};
-                if (!info.has_value()) {
+                if (!info) {
                     counters.ioReadNs.fetch_add(
                         static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1292,44 +1450,8 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
             }
 
             // Submit one task for the entire batch
-            pool->Submit([entries = batchEntries, cdata = std::move(batchBuffer),
-                          &decomps = this->decompressors, &ctr = this->counters](
-                             Parallel::ThreadIndex threadIdx) -> detail::DecompressedBatch {
-                const auto decompStart{std::chrono::steady_clock::now()};
-
-                // Compute total expected output size
-                std::uint64_t totalIsize{0};
-                for (const auto& entry : entries) {
-                    totalIsize += entry.isize;
-                }
-
-                detail::DecompressedBatch batch;
-                batch.data.resize(totalIsize);
-
-                std::size_t outOffset{0};
-                for (const auto& entry : entries) {
-                    std::size_t actualOut{0};
-                    const libdeflate_result result{libdeflate_deflate_decompress(
-                        decomps[threadIdx.Value()].get(), std::data(cdata) + entry.offset,
-                        entry.size, std::data(batch.data) + outOffset, entry.isize, &actualOut)};
-
-                    if (result != LIBDEFLATE_SUCCESS) {
-                        throw std::runtime_error{"BGZF decompression failed"};
-                    }
-                    outOffset += actualOut;
-                }
-                batch.data.resize(outOffset);
-
-                // Update decompression counters
-                ctr.decompressNs.fetch_add(
-                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                   std::chrono::steady_clock::now() - decompStart)
-                                                   .count()),
-                    std::memory_order_relaxed);
-                ctr.bytesDecompressed.fetch_add(outOffset, std::memory_order_relaxed);
-
-                return batch;
-            });
+            pool->Submit(DecompressBatchTask{std::move(batchEntries), std::move(batchBuffer),
+                                             &decompressors, &counters});
         }
     } catch (...) {
         // Exceptions from Submit() are expected during shutdown (pool finalized).
@@ -1348,88 +1470,18 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 
 void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
 {
-    // Signal the reader via condition variable.  Lock/unlock the mutex to
-    // establish happens-before with the reader's cv.wait() predicate.
-    const auto notifyReader = [this]() {
-        {
-            const std::lock_guard lock{readyMutex};
-        }
-        readyCv.notify_one();
-    };
-
     try {
         std::vector<std::byte> accumulator{std::move(initialBytes)};
         std::size_t pos{0};
 
-        // Parse complete records from accumulator and push to SPSC queue.
-        // Also compacts consumed bytes from the front.  Notifies once per
-        // call (batch-level) rather than per record.
-        const auto parseRecords = [&]() {
-            const auto parseStart{std::chrono::steady_clock::now()};
-            bool pushed{false};
-            while (pos + RECORD_BLOCK_SIZE_FIELD <= std::size(accumulator)) {
-                const std::uint32_t blockSize{ReadU32LE(std::data(accumulator) + pos)};
-                if (blockSize == 0) {
-                    pos += RECORD_BLOCK_SIZE_FIELD;
-                    continue;
-                }
-
-                const std::size_t totalRecordBytes{RECORD_BLOCK_SIZE_FIELD + blockSize};
-                if (pos + totalRecordBytes > std::size(accumulator)) {
-                    break;  // Need more data
-                }
-
-                // Create owning view from record bytes (after block_size field)
-                RawRecord view{std::span<const std::byte>{
-                    std::data(accumulator) + pos + RECORD_BLOCK_SIZE_FIELD, blockSize}};
-
-                // Push to SPSC — spin while queue is full (reader drains on another
-                // core).
-                while (!outputQueue->try_push(std::move(view))) {
-                    if (stopToken.stop_requested()) {
-                        counters.recordParseNs.fetch_add(
-                            static_cast<std::uint64_t>(
-                                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    std::chrono::steady_clock::now() - parseStart)
-                                    .count()),
-                            std::memory_order_relaxed);
-                        return;
-                    }
-                    counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
-                }
-                counters.recordsProduced.fetch_add(1, std::memory_order_relaxed);
-                pushed = true;
-                pos += totalRecordBytes;
-            }
-
-            // Compact accumulator: remove consumed bytes
-            if (pos > 0) {
-                accumulator.erase(std::begin(accumulator),
-                                  std::begin(accumulator) + static_cast<std::ptrdiff_t>(pos));
-                pos = 0;
-            }
-
-            counters.recordParseNs.fetch_add(
-                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                               std::chrono::steady_clock::now() - parseStart)
-                                               .count()),
-                std::memory_order_relaxed);
-
-            if (pushed) {
-                notifyReader();
-            }
-        };
-
         // Process any records already present from initialBytes (header block
         // may contain record data when header + records fit in one BGZF block).
-        parseRecords();
+        ParseBufferedRecords(accumulator, pos, *outputQueue, stopToken, counters, readyMutex,
+                             readyCv);
 
-        while (pool->ConsumeWith([&](detail::DecompressedBatch batch) {
-            // Append decompressed data to accumulator
-            accumulator.insert(std::end(accumulator), std::data(batch.data),
-                               std::data(batch.data) + std::size(batch.data));
-            parseRecords();
-        })) {
+        const DecompressedBatchConsumer consumeBatch{
+            accumulator, pos, *outputQueue, stopToken, counters, readyMutex, readyCv};
+        while (pool->ConsumeWith(consumeBatch)) {
             if (stopToken.stop_requested()) {
                 break;
             }
@@ -1443,7 +1495,7 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
     }
 
     done.store(true, std::memory_order_release);
-    notifyReader();
+    NotifyReader(readyMutex, readyCv);
 }
 
 std::optional<std::size_t> BgzfPipelineState::ReadBlockSync(std::span<std::byte> buffer)
@@ -1460,7 +1512,7 @@ std::optional<std::size_t> BgzfPipelineState::ReadBlockSync(std::span<std::byte>
 
     const std::optional<BgzfBlockInfo> info{
         ParseBgzfBlockHeader(std::span<const std::byte>{syncCompressed}.first(BGZF_HEADER_SIZE))};
-    if (!info.has_value()) {
+    if (!info) {
         return std::nullopt;
     }
 
@@ -1499,6 +1551,19 @@ const SamHeader& BgzfPipelineState::Header() const
     return header;
 }
 
+std::optional<RawRecord> BgzfPipelineState::TryPopOutputRecord()
+{
+    RawRecord* front{outputQueue->front()};
+    if (!front) {
+        return std::nullopt;
+    }
+
+    RawRecord result{std::move(*front)};
+    outputQueue->pop();
+    counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
+    return result;
+}
+
 std::optional<RawRecord> BgzfPipelineState::ReadRecord()
 {
     if (!headerParsed) {
@@ -1510,22 +1575,14 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
 
     // Fast path: check SPSC queue without locking.
     while (true) {
-        RawRecord* front{outputQueue->front()};
-        if (front != nullptr) {
-            RawRecord result{std::move(*front)};
-            outputQueue->pop();
-            counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
-            return result;
+        if (auto record{TryPopOutputRecord()}) {
+            return std::move(*record);
         }
 
         // Queue empty — check termination before sleeping.
         if (pipelineError.load(std::memory_order_acquire)) {
-            front = outputQueue->front();
-            if (front != nullptr) {
-                RawRecord result{std::move(*front)};
-                outputQueue->pop();
-                counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
-                return result;
+            if (auto record{TryPopOutputRecord()}) {
+                return std::move(*record);
             }
             {
                 const std::lock_guard lock{errorMutex};
@@ -1534,12 +1591,8 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
         }
 
         if (done.load(std::memory_order_acquire)) {
-            front = outputQueue->front();
-            if (front != nullptr) {
-                RawRecord result{std::move(*front)};
-                outputQueue->pop();
-                counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
-                return result;
+            if (auto record{TryPopOutputRecord()}) {
+                return std::move(*record);
             }
             return std::nullopt;
         }
@@ -1549,11 +1602,52 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
         // lock/unlock in notifyReader(), preventing lost wakeups.
         counters.readerStalls.fetch_add(1, std::memory_order_relaxed);
         std::unique_lock lock{readyMutex};
-        readyCv.wait(lock, [this]() {
-            return outputQueue->front() != nullptr || done.load(std::memory_order_acquire) ||
-                   pipelineError.load(std::memory_order_acquire);
-        });
+        while (!OutputQueueReady()) {
+            readyCv.wait(lock);
+        }
     }
+}
+
+detail::DecompressedBatch BgzfPipelineState::DecompressBatchTask::operator()(
+    Parallel::ThreadIndex threadIdx) const
+{
+    const auto decompressStart{std::chrono::steady_clock::now()};
+
+    std::uint64_t totalIsize{0};
+    for (const auto& entry : entries) {
+        totalIsize += entry.isize;
+    }
+
+    detail::DecompressedBatch batch{};
+    batch.data.resize(totalIsize);
+
+    std::size_t outOffset{0};
+    for (const auto& entry : entries) {
+        std::size_t actualOut{0};
+        const libdeflate_result result{libdeflate_deflate_decompress(
+            (*decompressors)[threadIdx.Value()].get(), std::data(compressedData) + entry.offset,
+            entry.size, std::data(batch.data) + outOffset, entry.isize, &actualOut)};
+        if (result != LIBDEFLATE_SUCCESS) {
+            throw std::runtime_error{"BGZF decompression failed"};
+        }
+        outOffset += actualOut;
+    }
+    batch.data.resize(outOffset);
+
+    counters->decompressNs.fetch_add(
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - decompressStart)
+                                       .count()),
+        std::memory_order_relaxed);
+    counters->bytesDecompressed.fetch_add(outOffset, std::memory_order_relaxed);
+
+    return batch;
+}
+
+bool BgzfPipelineState::OutputQueueReady() const
+{
+    return outputQueue->front() || done.load(std::memory_order_acquire) ||
+           pipelineError.load(std::memory_order_acquire);
 }
 
 void BgzfPipelineState::Seek(VirtualOffset offset)
@@ -1641,8 +1735,6 @@ BgzfReader::Impl::Impl(const std::filesystem::path& path, std::size_t numWorkers
     pipeline->ParseHeader();
 }
 
-BgzfReader::Impl::~Impl() = default;
-
 void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
 {
     syncFile.open(path, std::ios::binary);
@@ -1684,18 +1776,17 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> 
     const std::optional<BgzfBlockInfo> info{
         ParseBgzfBlockHeader(std::span<const std::byte>{compressedBuf}.first(
             static_cast<std::size_t>(BGZF_HEADER_SIZE)))};
-    if (!info.has_value()) {
+    if (!info) {
         return std::nullopt;
     }
 
     const std::size_t blockSize{info->blockSize};
-    const std::size_t headerSize = BGZF_HEADER_SIZE;
-    const std::size_t remaining{blockSize - headerSize};
+    const std::size_t remaining{blockSize - BGZF_HEADER_SIZE};
     if (std::size(compressedBuf) < blockSize) {
         compressedBuf.resize(blockSize);
     }
 
-    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf) + headerSize),
+    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf) + BGZF_HEADER_SIZE),
                   static_cast<std::streamsize>(remaining));
     if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
         return std::nullopt;
@@ -1730,7 +1821,7 @@ void BgzfReader::Impl::ParseHeaderSync()
     while (true) {
         const std::optional<std::size_t> bytesRead{ReadBlockSync(std::span<std::byte>{blockBuf})};
 
-        if (!bytesRead.has_value()) {
+        if (!bytesRead) {
             throw std::runtime_error{"Failed to read BGZF block while parsing BAM header"};
         }
         if (*bytesRead == 0) {
@@ -1749,7 +1840,7 @@ void BgzfReader::Impl::ParseHeaderSync()
         if (hdrSize > 0) {
             auto headerResult{SamHeader::FromBamHeaderBlock(
                 std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-            if (!headerResult.has_value()) {
+            if (!headerResult) {
                 throw std::runtime_error{std::move(headerResult.error())};
             }
             syncHeader = std::move(*headerResult);
@@ -1776,7 +1867,7 @@ void BgzfReader::Impl::ParseHeaderSync()
     if (hdrSize > 0) {
         auto headerResult{SamHeader::FromBamHeaderBlock(
             std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-        if (!headerResult.has_value()) {
+        if (!headerResult) {
             throw std::runtime_error{std::move(headerResult.error())};
         }
         syncHeader = std::move(*headerResult);
@@ -1813,7 +1904,7 @@ bool BgzfReader::Impl::RefillRecordBuffer()
     const std::optional<std::size_t> bytesRead{ReadBlockSync(
         std::span<std::byte>{recordBuf}.subspan(recordBufSize, MAX_DECOMPRESSED_BLOCK_SIZE))};
 
-    if (!bytesRead.has_value()) {
+    if (!bytesRead) {
         syncEof = true;
         return remaining > 0;
     }
@@ -1893,7 +1984,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
 
     const std::optional<std::size_t> bytesRead{
         ReadBlockSync(std::span<std::byte>{recordBuf}.first(MAX_DECOMPRESSED_BLOCK_SIZE))};
-    if (!bytesRead.has_value() || (*bytesRead == 0)) {
+    if (!bytesRead || (*bytesRead == 0)) {
         syncEof = true;
         return;
     }
@@ -1942,7 +2033,7 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
     }
 
     auto rec{ReadRecordSync()};
-    if (rec.has_value()) {
+    if (rec) {
         ++recordsConsumed;
     }
     return rec;

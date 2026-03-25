@@ -1,8 +1,9 @@
-#include <pbsamoa/cram/CramCompression.hpp>
 #include <pbsamoa/cram/CramStructs.hpp>
 
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
+
+#include <pbsamoa/cram/CramCompression.hpp>
 
 #include <libdeflate.h>
 
@@ -51,7 +52,7 @@ std::size_t SerializedBlockSize(const CramBlock& block)
            Itf8EncodedSize(block.RawSize) + dataSize + 4;
 }
 
-void ValidateAndAdvance(std::int64_t& accumulator, const std::int64_t delta, const char* context)
+void ValidateAndAdvance(std::int64_t& accumulator, std::int64_t delta, const char* context)
 {
     const auto next = accumulator + delta;
     if (next < 0 || next > std::numeric_limits<std::int32_t>::max()) {
@@ -60,12 +61,58 @@ void ValidateAndAdvance(std::int64_t& accumulator, const std::int64_t delta, con
     accumulator = next;
 }
 
-std::byte BoolByte(const bool value)
+void AppendPreservationEntry(std::vector<std::byte>& out, char key1, char key2, std::byte value)
 {
-    if (value) {
-        return std::byte{1};
+    out.push_back(static_cast<std::byte>(key1));
+    out.push_back(static_cast<std::byte>(key2));
+    out.push_back(value);
+}
+
+void AppendPreservationEntry(std::vector<std::byte>& out, char key1, char key2,
+                             std::span<const std::byte> value)
+{
+    out.push_back(static_cast<std::byte>(key1));
+    out.push_back(static_cast<std::byte>(key2));
+    out.insert(std::end(out), std::begin(value), std::end(value));
+}
+
+void AppendLengthPrefixedPreservationEntry(std::vector<std::byte>& out, char key1, char key2,
+                                           std::span<const std::byte> value)
+{
+    out.push_back(static_cast<std::byte>(key1));
+    out.push_back(static_cast<std::byte>(key2));
+    WriteItf8(out, static_cast<std::int32_t>(std::size(value)));
+    out.insert(std::end(out), std::begin(value), std::end(value));
+}
+
+std::int32_t ReadItf8AndAdvance(std::span<const std::byte> data, std::size_t& pos)
+{
+    std::size_t bytesRead{0};
+    const std::int32_t value{ReadItf8(data.subspan(pos), bytesRead)};
+    pos += bytesRead;
+    return value;
+}
+
+std::int64_t ReadLtf8AndAdvance(std::span<const std::byte> data, std::size_t& pos)
+{
+    std::size_t bytesRead{0};
+    const std::int64_t value{ReadLtf8(data.subspan(pos), bytesRead)};
+    pos += bytesRead;
+    return value;
+}
+
+std::byte ReadByteAndAdvance(std::span<const std::byte> data, std::size_t& pos)
+{
+    return data[pos++];
+}
+
+bool ReadPreservationBoolValue(std::span<const std::byte> data, std::size_t& pos,
+                               std::size_t pmapEnd, const char* context)
+{
+    if (pos >= pmapEnd) {
+        throw std::runtime_error(context);
     }
-    return std::byte{0};
+    return static_cast<std::uint8_t>(data[pos++]) != 0;
 }
 
 }  // namespace
@@ -385,37 +432,25 @@ CramContainerHeader ParseContainerHeader(std::span<const std::byte> data, std::s
     hdr.Length = ReadI32LE(data.data() + pos);
     pos += 4;
 
-    std::size_t n = 0;
-    const auto readItf8 = [&]() {
-        const std::int32_t value = ReadItf8(data.subspan(pos), n);
-        pos += n;
-        return value;
-    };
-    const auto readLtf8 = [&]() {
-        const std::int64_t value = ReadLtf8(data.subspan(pos), n);
-        pos += n;
-        return value;
-    };
-
-    hdr.RefSeqId = readItf8();
-    hdr.StartPos = readItf8();
-    hdr.AlignmentSpan = readItf8();
-    hdr.NumRecords = readItf8();
-    hdr.RecordCounter = readLtf8();
-    hdr.Bases = readLtf8();
-    hdr.NumBlocks = readItf8();
+    hdr.RefSeqId = ReadItf8AndAdvance(data, pos);
+    hdr.StartPos = ReadItf8AndAdvance(data, pos);
+    hdr.AlignmentSpan = ReadItf8AndAdvance(data, pos);
+    hdr.NumRecords = ReadItf8AndAdvance(data, pos);
+    hdr.RecordCounter = ReadLtf8AndAdvance(data, pos);
+    hdr.Bases = ReadLtf8AndAdvance(data, pos);
+    hdr.NumBlocks = ReadItf8AndAdvance(data, pos);
     if (hdr.NumBlocks < 0) {
         throw std::runtime_error("container header: negative num_blocks");
     }
 
     // landmarks array
-    const std::int32_t landmarkCount = readItf8();
+    const std::int32_t landmarkCount = ReadItf8AndAdvance(data, pos);
     if (landmarkCount < 0) {
         throw std::runtime_error("container header: negative landmark count");
     }
     hdr.Landmarks.resize(landmarkCount);
     for (std::int32_t i = 0; i < landmarkCount; ++i) {
-        hdr.Landmarks[i] = readItf8();
+        hdr.Landmarks[i] = ReadItf8AndAdvance(data, pos);
     }
 
     // CRC32
@@ -480,15 +515,9 @@ CramBlock ParseBlock(std::span<const std::byte> data, std::size_t& bytesRead)
     ++pos;
     block.ContentType = static_cast<CramBlockContentType>(contentTypeByte);
 
-    std::size_t n = 0;
-    const auto readItf8 = [&]() {
-        const std::int32_t value = ReadItf8(data.subspan(pos), n);
-        pos += n;
-        return value;
-    };
-    block.ContentId = readItf8();
-    block.CompressedSize = readItf8();
-    block.RawSize = readItf8();
+    block.ContentId = ReadItf8AndAdvance(data, pos);
+    block.CompressedSize = ReadItf8AndAdvance(data, pos);
+    block.RawSize = ReadItf8AndAdvance(data, pos);
     if (block.CompressedSize < 0 || block.RawSize < 0) {
         throw std::runtime_error("block: negative compressed/raw size");
     }
@@ -551,32 +580,20 @@ CramSliceHeader ParseSliceHeader(std::span<const std::byte> data)
 {
     CramSliceHeader hdr;
     std::size_t pos = 0;
-    std::size_t n = 0;
-    const auto readItf8 = [&]() {
-        const std::int32_t value = ReadItf8(data.subspan(pos), n);
-        pos += n;
-        return value;
-    };
-    const auto readLtf8 = [&]() {
-        const std::int64_t value = ReadLtf8(data.subspan(pos), n);
-        pos += n;
-        return value;
-    };
+    hdr.RefSeqId = ReadItf8AndAdvance(data, pos);
+    hdr.AlignmentStart = ReadItf8AndAdvance(data, pos);
+    hdr.AlignmentSpan = ReadItf8AndAdvance(data, pos);
+    hdr.NumRecords = ReadItf8AndAdvance(data, pos);
+    hdr.RecordCounter = ReadLtf8AndAdvance(data, pos);
+    hdr.NumBlocks = ReadItf8AndAdvance(data, pos);
 
-    hdr.RefSeqId = readItf8();
-    hdr.AlignmentStart = readItf8();
-    hdr.AlignmentSpan = readItf8();
-    hdr.NumRecords = readItf8();
-    hdr.RecordCounter = readLtf8();
-    hdr.NumBlocks = readItf8();
-
-    const std::int32_t numContentIds = readItf8();
+    const std::int32_t numContentIds = ReadItf8AndAdvance(data, pos);
     hdr.BlockContentIds.resize(numContentIds);
     for (std::int32_t i = 0; i < numContentIds; ++i) {
-        hdr.BlockContentIds[i] = readItf8();
+        hdr.BlockContentIds[i] = ReadItf8AndAdvance(data, pos);
     }
 
-    hdr.EmbeddedRefBlockId = readItf8();
+    hdr.EmbeddedRefBlockId = ReadItf8AndAdvance(data, pos);
 
     // MD5 (16 bytes)
     if (pos + 16 > std::size(data)) {
@@ -673,11 +690,6 @@ CramCompressionHeader ParseCompressionHeader(std::span<const std::byte> data)
     CramCompressionHeader header;
     std::size_t pos = 0;
     std::size_t n = 0;
-    const auto nextByte = [&data, &pos]() {
-        const std::byte value{data[pos]};
-        ++pos;
-        return value;
-    };
 
     // --- Preservation map ---
     if (std::empty(data)) {
@@ -703,24 +715,18 @@ CramCompressionHeader ParseCompressionHeader(std::span<const std::byte> data)
         if (pos + 2 > pmapEnd) {
             throw std::runtime_error("compression header: truncated preservation map");
         }
-        const char k0 = static_cast<char>(nextByte());
-        const char k1 = static_cast<char>(nextByte());
+        const char k0 = static_cast<char>(ReadByteAndAdvance(data, pos));
+        const char k1 = static_cast<char>(ReadByteAndAdvance(data, pos));
 
         if (k0 == 'R' && k1 == 'N') {
-            if (pos >= pmapEnd) {
-                throw std::runtime_error("compression header: truncated RN value");
-            }
-            header.PreservationMap.ReadNamesIncluded = (static_cast<std::uint8_t>(nextByte()) != 0);
+            header.PreservationMap.ReadNamesIncluded = ReadPreservationBoolValue(
+                data, pos, pmapEnd, "compression header: truncated RN value");
         } else if (k0 == 'A' && k1 == 'P') {
-            if (pos >= pmapEnd) {
-                throw std::runtime_error("compression header: truncated AP value");
-            }
-            header.PreservationMap.ApDelta = (static_cast<std::uint8_t>(nextByte()) != 0);
+            header.PreservationMap.ApDelta = ReadPreservationBoolValue(
+                data, pos, pmapEnd, "compression header: truncated AP value");
         } else if (k0 == 'R' && k1 == 'R') {
-            if (pos >= pmapEnd) {
-                throw std::runtime_error("compression header: truncated RR value");
-            }
-            header.PreservationMap.ReferenceRequired = (static_cast<std::uint8_t>(nextByte()) != 0);
+            header.PreservationMap.ReferenceRequired = ReadPreservationBoolValue(
+                data, pos, pmapEnd, "compression header: truncated RR value");
         } else if (k0 == 'S' && k1 == 'M') {
             if (pmapEnd - pos < 5) {
                 throw std::runtime_error("compression header: truncated SM value");
@@ -770,8 +776,8 @@ CramCompressionHeader ParseCompressionHeader(std::span<const std::byte> data)
         if (pos + 2 > dsMapEnd) {
             throw std::runtime_error("compression header: truncated data series map");
         }
-        const auto c0 = static_cast<std::uint8_t>(nextByte());
-        const auto c1 = static_cast<std::uint8_t>(nextByte());
+        const auto c0 = static_cast<std::uint8_t>(ReadByteAndAdvance(data, pos));
+        const auto c1 = static_cast<std::uint8_t>(ReadByteAndAdvance(data, pos));
         const auto key = static_cast<CramDataSeries>((c0 << 8) | c1);
 
         auto desc = ParseEncodingDescriptor(data, pos, dsMapEnd);
@@ -828,38 +834,23 @@ std::vector<std::byte> SerializeCompressionHeader(const CramCompressionHeader& h
     std::vector<std::byte> pmapBody;
     std::int32_t pmapCount = 0;
 
-    // RN
-    pmapBody.push_back(static_cast<std::byte>('R'));
-    pmapBody.push_back(static_cast<std::byte>('N'));
-    pmapBody.push_back(BoolByte(header.PreservationMap.ReadNamesIncluded));
+    AppendPreservationEntry(pmapBody, 'R', 'N',
+                            static_cast<std::byte>(header.PreservationMap.ReadNamesIncluded));
     ++pmapCount;
 
-    // AP
-    pmapBody.push_back(static_cast<std::byte>('A'));
-    pmapBody.push_back(static_cast<std::byte>('P'));
-    pmapBody.push_back(BoolByte(header.PreservationMap.ApDelta));
+    AppendPreservationEntry(pmapBody, 'A', 'P',
+                            static_cast<std::byte>(header.PreservationMap.ApDelta));
     ++pmapCount;
 
-    // RR
-    pmapBody.push_back(static_cast<std::byte>('R'));
-    pmapBody.push_back(static_cast<std::byte>('R'));
-    pmapBody.push_back(BoolByte(header.PreservationMap.ReferenceRequired));
+    AppendPreservationEntry(pmapBody, 'R', 'R',
+                            static_cast<std::byte>(header.PreservationMap.ReferenceRequired));
     ++pmapCount;
 
-    // SM
-    pmapBody.push_back(static_cast<std::byte>('S'));
-    pmapBody.push_back(static_cast<std::byte>('M'));
-    pmapBody.insert(std::end(pmapBody), std::begin(header.PreservationMap.SubstitutionMatrix),
-                    std::end(header.PreservationMap.SubstitutionMatrix));
+    AppendPreservationEntry(pmapBody, 'S', 'M', header.PreservationMap.SubstitutionMatrix);
     ++pmapCount;
 
-    // TD
-    pmapBody.push_back(static_cast<std::byte>('T'));
-    pmapBody.push_back(static_cast<std::byte>('D'));
-    WriteItf8(pmapBody,
-              static_cast<std::int32_t>(std::size(header.PreservationMap.TagIdsDictionary)));
-    pmapBody.insert(std::end(pmapBody), std::begin(header.PreservationMap.TagIdsDictionary),
-                    std::end(header.PreservationMap.TagIdsDictionary));
+    AppendLengthPrefixedPreservationEntry(pmapBody, 'T', 'D',
+                                          header.PreservationMap.TagIdsDictionary);
     ++pmapCount;
 
     // Write pmap: size + count + body

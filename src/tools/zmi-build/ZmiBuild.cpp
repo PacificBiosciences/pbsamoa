@@ -1,4 +1,5 @@
 #include "ZmiBuild.hpp"
+#include "../../PathUtils.hpp"
 
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/ZmiBamWriter.hpp>
@@ -28,7 +29,8 @@ int Runner(int argc, char** argv)
         writer.Write(view);
     }
 
-    std::println(stderr, "ZMI index written to {}.zmi", outputPath.string());
+    const std::filesystem::path zmiPath{SidecarPath(outputPath, ".zmi")};
+    std::println(stderr, "ZMI index written to {}", zmiPath.string());
     return EXIT_SUCCESS;
 }
 

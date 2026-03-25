@@ -11,6 +11,7 @@
 #include <fstream>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -30,9 +31,9 @@ inline void WriteLE(std::byte* dst, T value)
 template <std::integral T>
 inline void AppendLE(std::vector<std::byte>& out, T value)
 {
-    const std::size_t pos{std::size(out)};
-    out.resize(pos + sizeof(value));
-    WriteLE(std::data(out) + pos, value);
+    const std::size_t appendOffset{std::size(out)};
+    out.resize(appendOffset + sizeof(value));
+    WriteLE(std::data(out) + appendOffset, value);
 }
 
 /// \brief Write a little-endian int32 to a byte vector.
@@ -42,6 +43,11 @@ inline void WriteI32LE(std::vector<std::byte>& out, std::int32_t value) { Append
 inline void WriteU32LE(std::vector<std::byte>& out, std::uint32_t value) { AppendLE(out, value); }
 
 inline constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
+
+[[noreturn]] inline void ThrowReadFileError(const std::string& pathText)
+{
+    throw std::runtime_error{"failed to read file: " + pathText};
+}
 
 /// \brief Compute total BAM header size from binary data.
 ///
@@ -55,30 +61,32 @@ inline std::size_t ComputeHeaderSize(std::span<const std::byte> data)
     constexpr std::size_t REF_NAME_LENGTH_SIZE{4};
     constexpr std::size_t REF_LENGTH_SIZE{4};
     constexpr std::size_t PREFIX_SIZE{MAGIC_SIZE + LTEXT_SIZE};
+    const std::byte* const dataBegin{std::data(data)};
+    const std::size_t dataSize{std::size(data)};
 
     // Need at least: magic(4) + l_text(4)
-    if (std::size(data) < PREFIX_SIZE) {
+    if (dataSize < PREFIX_SIZE) {
         return 0;
     }
 
-    const std::uint32_t lText{ReadU32LE(std::data(data) + MAGIC_SIZE)};
+    const std::uint32_t lText{ReadU32LE(dataBegin + MAGIC_SIZE)};
     // Need: magic(4) + l_text(4) + text(lText) + n_ref(4)
     const std::size_t minSize{PREFIX_SIZE + lText + NREF_SIZE};
-    if (std::size(data) < minSize) {
+    if (dataSize < minSize) {
         return 0;
     }
 
-    const std::uint32_t nRef{ReadU32LE(std::data(data) + PREFIX_SIZE + lText)};
+    const std::uint32_t nRef{ReadU32LE(dataBegin + PREFIX_SIZE + lText)};
     std::size_t offset{PREFIX_SIZE + lText + NREF_SIZE};
 
     for (std::uint32_t i{0}; i < nRef; ++i) {
-        if (offset + REF_NAME_LENGTH_SIZE > std::size(data)) {
+        if (offset + REF_NAME_LENGTH_SIZE > dataSize) {
             return 0;
         }
-        const std::uint32_t lName{ReadU32LE(std::data(data) + offset)};
+        const std::uint32_t lName{ReadU32LE(dataBegin + offset)};
         offset += REF_NAME_LENGTH_SIZE;
         // name(lName) + l_ref(4)
-        if (offset + lName + REF_LENGTH_SIZE > std::size(data)) {
+        if (offset + lName + REF_LENGTH_SIZE > dataSize) {
             return 0;
         }
         offset += lName + REF_LENGTH_SIZE;
@@ -90,33 +98,31 @@ inline std::size_t ComputeHeaderSize(std::span<const std::byte> data)
 /// \brief Read entire file contents as a byte vector.
 inline std::vector<std::byte> ReadAllBytes(const std::filesystem::path& path)
 {
-    const auto throwReadError = [&path]() {
-        throw std::runtime_error{"failed to read file: " + path.string()};
-    };
-
+    const std::string pathText{path.string()};
     std::ifstream in{path, std::ios::binary};
     if (!in.is_open()) {
-        throw std::runtime_error{"cannot open file: " + path.string()};
+        throw std::runtime_error{"cannot open file: " + pathText};
     }
 
     in.seekg(0, std::ios::end);
     if (in.fail()) {
-        throwReadError();
+        ThrowReadFileError(pathText);
     }
     const std::streamoff fileSize{in.tellg()};
     if (fileSize < 0) {
-        throwReadError();
+        ThrowReadFileError(pathText);
     }
     in.seekg(0, std::ios::beg);
     if (in.fail()) {
-        throwReadError();
+        ThrowReadFileError(pathText);
     }
 
-    std::vector<std::byte> data(static_cast<std::size_t>(fileSize));
+    const std::streamsize readSize{fileSize};
+    std::vector<std::byte> data(static_cast<std::size_t>(readSize));
     if (fileSize > 0) {
-        in.read(reinterpret_cast<char*>(data.data()), fileSize);
-        if (in.gcount() != fileSize) {
-            throw std::runtime_error{"failed to read file: " + path.string()};
+        in.read(reinterpret_cast<char*>(data.data()), readSize);
+        if (in.gcount() != readSize) {
+            ThrowReadFileError(pathText);
         }
     }
     return data;
@@ -138,6 +144,24 @@ Integer ParseInteger(std::string_view value, std::string_view context)
         throw std::runtime_error{std::format("{}: not numeric: '{}'", context, value)};
     }
     return parsed;
+}
+
+template <std::signed_integral Integer>
+inline constexpr Integer OneBasedPositionOrZero(Integer zeroBasedPos)
+{
+    if (zeroBasedPos < 0) {
+        return 0;
+    }
+    return zeroBasedPos + 1;
+}
+
+template <std::signed_integral Integer>
+inline constexpr Integer NonEmptyAlignmentEnd(Integer pos, Integer end)
+{
+    if (end > pos) {
+        return end;
+    }
+    return pos + 1;
 }
 
 }  // namespace Samoa

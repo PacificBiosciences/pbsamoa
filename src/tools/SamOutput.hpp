@@ -1,6 +1,9 @@
 #ifndef PBSAMOA_TOOLS_SAMOUTPUT_HPP
 #define PBSAMOA_TOOLS_SAMOUTPUT_HPP
 
+#include "../BinaryUtils.hpp"
+#include "../WriterUtils.hpp"
+
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
@@ -16,14 +19,6 @@
 
 namespace PacBio {
 namespace Samoa {
-
-inline std::int32_t OneBasedPosOrZero(std::int32_t pos)
-{
-    if (pos < 0) {
-        return 0;
-    }
-    return pos + 1;
-}
 
 inline void WriteReferenceName(const SamHeader& header, std::int32_t refId)
 {
@@ -46,12 +41,6 @@ inline void WriteNextReferenceName(const SamHeader& header, std::int32_t refId,
         return;
     }
     std::print("{}", header.ReferenceName(nextRefId));
-}
-
-inline bool IsQualityUnavailable(std::span<const std::uint8_t> qualities)
-{
-    return std::empty(qualities) ||
-           std::ranges::all_of(qualities, [](std::uint8_t quality) { return quality == 0xFF; });
 }
 
 inline void WriteQualities(std::span<const std::uint8_t> qualities)
@@ -78,7 +67,7 @@ inline void WriteViewAsSam(const SamHeader& header, const RawRecord& view)
     std::print("\t");
 
     const std::int32_t pos{view.Pos()};
-    std::print("{}\t", OneBasedPosOrZero(pos));
+    std::print("{}\t", OneBasedPositionOrZero(pos));
 
     std::print("{}\t", view.MapQ());
 
@@ -95,7 +84,7 @@ inline void WriteViewAsSam(const SamHeader& header, const RawRecord& view)
     std::print("\t");
 
     const std::int32_t nextPos{view.NextPos()};
-    std::print("{}\t", OneBasedPosOrZero(nextPos));
+    std::print("{}\t", OneBasedPositionOrZero(nextPos));
 
     std::print("{}\t", view.Tlen());
 

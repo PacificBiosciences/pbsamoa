@@ -18,7 +18,7 @@ struct ZmiWriterConfig
 /// \brief Streaming writer for ZMW index (.zmi) files.
 ///
 /// Appends (rgId, zmw, virtualOffset) entries in BAM write order.
-/// BGZF-compressed. Header is finalized with numRecords on close.
+/// BGZF-compressed with a fixed header followed by entry records.
 class ZmiWriter
 {
 public:

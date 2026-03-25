@@ -13,7 +13,7 @@ namespace PacBio {
 namespace Samoa {
 namespace tests {
 
-inline const auto& DataDir = ::tests::DataDir;
+inline const std::filesystem::path& DataDir = ::tests::DataDir;
 
 }  // namespace tests
 }  // namespace Samoa

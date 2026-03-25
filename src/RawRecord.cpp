@@ -5,8 +5,6 @@
 namespace PacBio {
 namespace Samoa {
 
-// RawRecord: all implementations are inline in the header.
-
 // --- RawRecordBatch ---
 
 RawRecordBatch::RawRecordBatch(std::vector<std::byte> buffer, std::vector<RecordExtent> extents)

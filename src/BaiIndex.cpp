@@ -45,31 +45,6 @@ struct BlockSegment
     std::size_t byteCount;
 };
 
-struct ReferenceMetadata
-{
-    VirtualOffset Begin{};
-    VirtualOffset End{};
-    std::uint64_t MappedCount{0};
-    std::uint64_t UnmappedCount{0};
-    bool HasData{false};
-
-    void Observe(VirtualOffset begin, VirtualOffset end, bool isMapped)
-    {
-        if (!HasData || (begin < Begin)) {
-            Begin = begin;
-        }
-        if (!HasData || (end > End)) {
-            End = end;
-        }
-        if (isMapped) {
-            ++MappedCount;
-        } else {
-            ++UnmappedCount;
-        }
-        HasData = true;
-    }
-};
-
 void ReadExact(std::ifstream& in, std::span<std::byte> bytes, std::string_view fieldName)
 {
     in.read(reinterpret_cast<char*>(std::data(bytes)),
@@ -87,24 +62,6 @@ T ReadLEFromFile(std::ifstream& in, std::string_view fieldName)
     ReadExact(in, bytes, fieldName);
     T value{};
     std::memcpy(&value, std::data(bytes), sizeof(T));
-    return value;
-}
-
-std::optional<std::uint64_t> ReadOptionalU64LEFromFile(std::ifstream& in,
-                                                       std::string_view fieldName)
-{
-    std::array<std::byte, sizeof(std::uint64_t)> bytes{};
-    in.read(reinterpret_cast<char*>(std::data(bytes)),
-            static_cast<std::streamsize>(std::size(bytes)));
-    const std::streamsize bytesRead{in.gcount()};
-    if (bytesRead == 0) {
-        return std::nullopt;
-    }
-    if (bytesRead != static_cast<std::streamsize>(std::size(bytes))) {
-        throw std::runtime_error{std::format("Truncated BAI file reading {}", fieldName)};
-    }
-    std::uint64_t value{};
-    std::memcpy(&value, std::data(bytes), sizeof(value));
     return value;
 }
 
@@ -142,7 +99,7 @@ std::int32_t CheckedInt32(T value, std::string_view fieldName)
     return static_cast<std::int32_t>(value);
 }
 
-/// \brief Merge overlapping/adjacent chunks. Input must be sorted by Begin.
+/// \brief Merge overlapping/adjacent chunks sorted by Begin.
 std::vector<Chunk> MergeChunks(std::vector<Chunk>& chunks)
 {
     if (std::empty(chunks)) {
@@ -152,9 +109,11 @@ std::vector<Chunk> MergeChunks(std::vector<Chunk>& chunks)
     std::ranges::sort(chunks, {}, &Chunk::Begin);
 
     std::vector<Chunk> merged;
+    merged.reserve(std::size(chunks));
     merged.push_back(chunks[0]);
 
-    for (const Chunk& chunk : std::span<const Chunk>{chunks}.subspan(1)) {
+    for (std::size_t i{1}; i < std::size(chunks); ++i) {
+        const Chunk& chunk{chunks[i]};
         Chunk& last{merged.back()};
         if (chunk.Begin <= last.End) {
             if (chunk.End > last.End) {
@@ -221,6 +180,31 @@ void CompactAccumulator(std::vector<std::byte>& recordAccum, std::vector<BlockSe
     recordAccum.erase(std::ranges::begin(recordAccum),
                       std::ranges::begin(recordAccum) + static_cast<std::ptrdiff_t>(accumPos));
     accumPos = 0;
+}
+
+bool EnsureAccumulatedBytes(BgzfReader& bgzf, std::vector<std::byte>& blockBuf,
+                            std::vector<std::byte>& recordAccum,
+                            std::vector<BlockSegment>& segments, std::uint64_t& currentBlockOffset,
+                            std::size_t accumPos, std::size_t requiredBytes, bool& eof)
+{
+    while ((std::size(recordAccum) - accumPos) < requiredBytes) {
+        if (eof) {
+            return false;
+        }
+        const std::optional<std::size_t> bytesRead{bgzf.ReadBlock(std::span<std::byte>{blockBuf})};
+        currentBlockOffset = bgzf.Tell().BlockOffset();
+        if (!bytesRead || (*bytesRead == 0)) {
+            eof = true;
+            return false;
+        }
+
+        const std::span<const std::byte> blockBytes{
+            std::span<const std::byte>{blockBuf}.first(*bytesRead)};
+        recordAccum.insert(std::ranges::end(recordAccum), std::ranges::begin(blockBytes),
+                           std::ranges::end(blockBytes));
+        segments.push_back(BlockSegment{currentBlockOffset, 0, *bytesRead});
+    }
+    return true;
 }
 
 }  // namespace
@@ -312,9 +296,19 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
     }
 
     // Optional: read n_no_coor (unmapped count) at end of file
-    const std::optional<std::uint64_t> nNoCoor{ReadOptionalU64LEFromFile(file, "n_no_coor")};
-    if (nNoCoor) {
-        index.unmappedCount_ += *nNoCoor;
+    {
+        std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+        file.read(reinterpret_cast<char*>(std::data(bytes)),
+                  static_cast<std::streamsize>(std::size(bytes)));
+        const std::streamsize bytesRead{file.gcount()};
+        if (bytesRead != 0) {
+            if (bytesRead != static_cast<std::streamsize>(std::size(bytes))) {
+                throw std::runtime_error{"Truncated BAI file reading n_no_coor"};
+            }
+            std::uint64_t value{};
+            std::memcpy(&value, std::data(bytes), sizeof(value));
+            index.unmappedCount_ += value;
+        }
     }
 
     return index;
@@ -393,7 +387,7 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
     std::vector<Chunk> candidates;
     for (const std::uint16_t binNum : overlappingBins) {
         const auto it = ref.bins.find(binNum);
-        if (it != std::ranges::end(ref.bins)) {
+        if (it != ref.bins.end()) {
             candidates.insert(std::ranges::end(candidates), std::ranges::begin(it->second),
                               std::ranges::end(it->second));
         }
@@ -405,13 +399,12 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
 
     // 3. Linear index pruning: find minimum offset for the query start window
     const std::size_t linearIdx = normalizedBeg / BAI_LINEAR_INDEX_WINDOW;
-    VirtualOffset minOffset;
-    if (linearIdx < std::size(ref.linearIndex)) {
-        minOffset = ref.linearIndex[linearIdx];
-    }
-
     // Discard chunks that end before the minimum offset
-    std::erase_if(candidates, [&minOffset](const Chunk& c) { return c.End < minOffset; });
+    if (linearIdx < std::size(ref.linearIndex)) {
+        const VirtualOffset threshold{ref.linearIndex[linearIdx]};
+        std::erase_if(candidates,
+                      [threshold](const Chunk& chunk) { return chunk.End < threshold; });
+    }
 
     if (std::empty(candidates)) {
         return {};
@@ -436,11 +429,10 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     // Track BGZF block offsets during header parsing
     std::uint64_t firstRecordBlockOffset{0};
     std::size_t firstRecordWithinBlock{0};
-    bool headerParsed{false};
     std::size_t parsedHeaderSize{0};
     std::int32_t nRef{0};
 
-    while (!headerParsed) {
+    for (;;) {
         const std::optional<std::size_t> bytesRead{bgzf.ReadBlock(std::span<std::byte>{blockBuf})};
 
         if (!bytesRead || (*bytesRead == 0)) {
@@ -462,8 +454,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             parsedHeaderSize = hdrSize;
 
             // Validate sort order — BAI indexing requires coordinate-sorted input
-            auto headerResult{SamHeader::FromBamHeaderBlock(
-                std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+            const std::span<const std::byte> headerBytes{std::data(headerBuf), hdrSize};
+            const auto headerResult{SamHeader::FromBamHeaderBlock(headerBytes)};
             if (headerResult && (headerResult->SortOrder() != "coordinate")) {
                 throw std::runtime_error{
                     std::format("BaiIndex::Build requires coordinate-sorted BAM, got SO:{}",
@@ -489,7 +481,7 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
                 firstRecordBlockOffset = bgzf.Tell().BlockOffset();
                 firstRecordWithinBlock = 0;
             }
-            headerParsed = true;
+            break;
         }
     }
 
@@ -532,36 +524,12 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     std::optional<std::pair<std::int32_t, std::int32_t>> lastMappedCoordinate;
     bool sawUnmappedTailRecord{false};
 
-    auto readMoreData = [&]() -> bool {
-        if (eof) {
-            return false;
-        }
-        const std::optional<std::size_t> bytesRead{bgzf.ReadBlock(std::span<std::byte>{blockBuf})};
-        currentBlockOffset = bgzf.Tell().BlockOffset();
-        if (!bytesRead || (*bytesRead == 0)) {
-            eof = true;
-            return false;
-        }
-        recordAccum.insert(std::ranges::end(recordAccum), std::data(blockBuf),
-                           std::data(blockBuf) + *bytesRead);
-        segments.push_back(BlockSegment{currentBlockOffset, 0, *bytesRead});
-        return true;
-    };
-
     std::size_t accumPos{0};
-
-    const auto ensureBytes = [&](std::size_t n) -> bool {
-        while ((std::size(recordAccum) - accumPos) < n) {
-            if (!readMoreData()) {
-                return false;
-            }
-        }
-        return true;
-    };
 
     while (true) {
         // Ensure we have at least 4 bytes for block_size
-        if (!ensureBytes(4)) {
+        if (!EnsureAccumulatedBytes(bgzf, blockBuf, recordAccum, segments, currentBlockOffset,
+                                    accumPos, 4, eof)) {
             break;
         }
 
@@ -573,7 +541,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         const std::size_t totalRecordBytes{4 + blockSize};
 
         // Ensure we have the complete record
-        if (!ensureBytes(totalRecordBytes)) {
+        if (!EnsureAccumulatedBytes(bgzf, blockBuf, recordAccum, segments, currentBlockOffset,
+                                    accumPos, totalRecordBytes, eof)) {
             break;
         }
 
@@ -583,7 +552,7 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         const VirtualOffset recordEndVo{VirtualOffsetAt(segments, accumPos + totalRecordBytes)};
 
         // Parse minimal record fields from the BAM binary data (after block_size)
-        const std::byte* rec{std::data(recordAccum) + accumPos + 4};
+        const std::byte* const rec{std::data(recordAccum) + accumPos + 4};
         const std::int32_t refId{ReadI32LE(rec)};
         const std::int32_t pos{ReadI32LE(rec + 4)};
 
@@ -616,18 +585,20 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             ++unmappedCount;
         } else if ((refId >= 0) && (refId < nRef)) {
             if (sawUnmappedTailRecord) {
-                throw std::runtime_error{std::format(
-                    "BaiIndex::Build requires coordinate-sorted BAM payload; saw mapped "
-                    "refId={} pos={} after unmapped tail in {}",
-                    refId, pos, bamPath.string())};
+                throw std::runtime_error{
+                    std::format("BaiIndex::Build requires coordinate-sorted BAM "
+                                "payload; saw mapped "
+                                "refId={} pos={} after unmapped tail in {}",
+                                refId, pos, bamPath.string())};
             }
-            const std::pair currentCoordinate{refId, pos};
+            const std::pair<std::int32_t, std::int32_t> currentCoordinate{refId, pos};
             if (lastMappedCoordinate && currentCoordinate < *lastMappedCoordinate) {
-                throw std::runtime_error{std::format(
-                    "BaiIndex::Build requires coordinate-sorted BAM payload; saw refId={} pos={} "
-                    "after refId={} pos={} in {}",
-                    refId, pos, lastMappedCoordinate->first, lastMappedCoordinate->second,
-                    bamPath.string())};
+                throw std::runtime_error{
+                    std::format("BaiIndex::Build requires coordinate-sorted BAM "
+                                "payload; saw refId={} pos={} "
+                                "after refId={} pos={} in {}",
+                                refId, pos, lastMappedCoordinate->first,
+                                lastMappedCoordinate->second, bamPath.string())};
             }
             lastMappedCoordinate = currentCoordinate;
 
@@ -637,15 +608,16 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             // Compute bin
             const std::int32_t endPos{
                 CheckedInt32(static_cast<std::int64_t>(pos) + refLen, "alignment end")};
-            const std::uint16_t bin{Reg2Bin(pos, endPos > pos ? endPos : pos + 1)};
+            const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(pos, endPos)};
+            const std::uint16_t bin{Reg2Bin(pos, nonEmptyEnd)};
 
             // Add chunk to bin
             refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
 
             // Update linear index
             const std::int32_t begWindow = pos / BAI_LINEAR_INDEX_WINDOW;
-            const std::int32_t endWindow =
-                ((endPos > pos) ? (endPos - 1) : pos) / BAI_LINEAR_INDEX_WINDOW;
+            const std::int32_t endWindow{
+                static_cast<std::int32_t>((nonEmptyEnd - 1) / BAI_LINEAR_INDEX_WINDOW)};
             const std::size_t maxWindow = endWindow + 1;
             if (maxWindow > std::size(refIdx.linearIndex)) {
                 refIdx.linearIndex.resize(maxWindow);

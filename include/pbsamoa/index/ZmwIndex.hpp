@@ -79,9 +79,11 @@ public:
 private:
     /// \brief Lazily build hash indexes on first lookup.
     void BuildIndex() const;
+    void BuildIndexImpl() const;
 
     /// \brief Combine (rgId, zmw) into a single 64-bit key for hashing.
     static std::uint64_t IdentityKey(std::int32_t rgId, std::int32_t zmw);
+    static std::uint64_t IdentityKey(ZmwIdentity id);
 
     std::vector<std::int32_t> rgIds_;
     std::vector<std::int32_t> zmws_;

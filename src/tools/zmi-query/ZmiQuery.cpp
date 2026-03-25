@@ -38,8 +38,7 @@ int Runner(int argc, char** argv)
 
     for (const std::int64_t offset : offsets) {
         reader.Seek(VirtualOffset(offset));
-        const auto view{reader.ReadRecord()};
-        if (view.has_value()) {
+        if (const auto view{reader.ReadRecord()}; view) {
             WriteViewAsSam(header, *view);
         }
     }

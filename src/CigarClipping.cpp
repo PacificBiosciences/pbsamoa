@@ -55,6 +55,116 @@ void TrimBack(std::vector<PacBio::Samoa::CigarOp>& ops, std::int32_t count)
     }
 }
 
+void TrimFrontReference(std::vector<PacBio::Samoa::CigarOp>& ops, std::int32_t count,
+                        std::size_t& queryRemoved)
+{
+    std::size_t firstRemaining{0};
+
+    while ((firstRemaining < std::size(ops)) && (count > 0)) {
+        const PacBio::Samoa::CigarOp op{ops[firstRemaining]};
+        const PacBio::Samoa::CigarOpType type{op.Type()};
+        const std::uint32_t len{op.Length()};
+
+        if (!ConsumesReference(type)) {
+            if (ConsumesQuery(type)) {
+                queryRemoved += len;
+            }
+            ++firstRemaining;
+            continue;
+        }
+
+        if (len <= static_cast<std::uint32_t>(count)) {
+            count -= static_cast<std::int32_t>(len);
+            if (ConsumesQuery(type)) {
+                queryRemoved += len;
+            }
+            ++firstRemaining;
+            continue;
+        }
+
+        ops[firstRemaining] = PacBio::Samoa::CigarOp{
+            type,
+            len - static_cast<std::uint32_t>(count),
+        };
+        if (ConsumesQuery(type)) {
+            queryRemoved += static_cast<std::uint32_t>(count);
+        }
+        count = 0;
+    }
+
+    ops.erase(std::begin(ops), std::begin(ops) + static_cast<std::ptrdiff_t>(firstRemaining));
+}
+
+void TrimBackReference(std::vector<PacBio::Samoa::CigarOp>& ops, std::int32_t count,
+                       std::size_t& queryRemoved)
+{
+    while (!std::empty(ops) && (count > 0)) {
+        const PacBio::Samoa::CigarOp op{ops.back()};
+        const PacBio::Samoa::CigarOpType type{op.Type()};
+        const std::uint32_t len{op.Length()};
+
+        if (!ConsumesReference(type)) {
+            if (ConsumesQuery(type)) {
+                queryRemoved += len;
+            }
+            ops.pop_back();
+            continue;
+        }
+
+        if (len <= static_cast<std::uint32_t>(count)) {
+            count -= static_cast<std::int32_t>(len);
+            if (ConsumesQuery(type)) {
+                queryRemoved += len;
+            }
+            ops.pop_back();
+            continue;
+        }
+
+        ops.back() = PacBio::Samoa::CigarOp{
+            type,
+            len - static_cast<std::uint32_t>(count),
+        };
+        if (ConsumesQuery(type)) {
+            queryRemoved += static_cast<std::uint32_t>(count);
+        }
+        count = 0;
+    }
+}
+
+void ExciseFlankingInsert(std::vector<PacBio::Samoa::CigarOp>& ops, bool fromFront,
+                          std::size_t& queryRemoved)
+{
+    if (std::empty(ops)) {
+        return;
+    }
+
+    if (fromFront) {
+        if (ops.front().Type() != PacBio::Samoa::CigarOpType::I) {
+            return;
+        }
+        queryRemoved += ops.front().Length();
+        ops.erase(std::begin(ops));
+        return;
+    }
+
+    if (ops.back().Type() != PacBio::Samoa::CigarOpType::I) {
+        return;
+    }
+    queryRemoved += ops.back().Length();
+    ops.pop_back();
+}
+
+std::size_t RemainingQueryLength(std::int64_t totalQueryLen, std::size_t queryRemovedFront,
+                                 std::size_t queryRemovedBack)
+{
+    const std::size_t totalQuery{static_cast<std::size_t>(totalQueryLen)};
+    const std::size_t totalRemoved{queryRemovedFront + queryRemovedBack};
+    if (totalRemoved > totalQuery) {
+        return 0;
+    }
+    return totalQuery - totalRemoved;
+}
+
 }  // namespace
 
 namespace PacBio {
@@ -149,99 +259,24 @@ ClipResult ClipCigarToReference(std::span<const CigarOp> cigar, std::int32_t ref
     // Build a mutable working copy of the CIGAR
     std::vector<CigarOp> ops{std::begin(cigar), std::end(cigar)};
 
-    // --- Front trim: consume frontRefRemove reference bases ---
     std::size_t queryRemovedFront{0};
-    std::size_t idx{0};
+    TrimFrontReference(ops, frontRefRemove, queryRemovedFront);
 
-    while ((idx < std::size(ops)) && (frontRefRemove > 0)) {
-        const CigarOp op{ops[idx]};
-        const CigarOpType type{op.Type()};
-        const std::uint32_t len{op.Length()};
-
-        if (!ConsumesReference(type)) {
-            // Non-ref ops (S, I, H, P) are popped entirely during the walk
-            if (ConsumesQuery(type)) {
-                queryRemovedFront += len;
-            }
-            ++idx;
-            continue;
-        }
-
-        // Ref-consuming op
-        if (len <= static_cast<std::uint32_t>(frontRefRemove)) {
-            // Consume entire op
-            frontRefRemove -= static_cast<std::int32_t>(len);
-            if (ConsumesQuery(type)) {
-                queryRemovedFront += len;
-            }
-            ++idx;
-        } else {
-            // Partial: shrink this op
-            ops[idx] = CigarOp{type, len - static_cast<std::uint32_t>(frontRefRemove)};
-            if (ConsumesQuery(type)) {
-                queryRemovedFront += static_cast<std::uint32_t>(frontRefRemove);
-            }
-            frontRefRemove = 0;
-        }
-    }
-
-    // Remove consumed front ops
-    ops.erase(std::begin(ops), std::begin(ops) + static_cast<std::ptrdiff_t>(idx));
-
-    // --- Back trim: consume backRefRemove reference bases from end ---
     std::size_t queryRemovedBack{0};
+    TrimBackReference(ops, backRefRemove, queryRemovedBack);
 
-    while (!std::empty(ops) && (backRefRemove > 0)) {
-        const CigarOp op{ops.back()};
-        const CigarOpType type{op.Type()};
-        const std::uint32_t len{op.Length()};
-
-        if (!ConsumesReference(type)) {
-            // Non-ref ops popped entirely
-            if (ConsumesQuery(type)) {
-                queryRemovedBack += len;
-            }
-            ops.pop_back();
-            continue;
-        }
-
-        // Ref-consuming op
-        if (len <= static_cast<std::uint32_t>(backRefRemove)) {
-            backRefRemove -= static_cast<std::int32_t>(len);
-            if (ConsumesQuery(type)) {
-                queryRemovedBack += len;
-            }
-            ops.pop_back();
-        } else {
-            ops.back() = CigarOp{type, len - static_cast<std::uint32_t>(backRefRemove)};
-            if (ConsumesQuery(type)) {
-                queryRemovedBack += static_cast<std::uint32_t>(backRefRemove);
-            }
-            backRefRemove = 0;
-        }
-    }
-
-    // --- Excise flanking inserts ---
     if (exciseFlankingInserts) {
-        if (!std::empty(ops) && (ops.front().Type() == CigarOpType::I)) {
-            queryRemovedFront += ops.front().Length();
-            ops.erase(std::begin(ops));
-        }
-        if (!std::empty(ops) && (ops.back().Type() == CigarOpType::I)) {
-            queryRemovedBack += ops.back().Length();
-            ops.pop_back();
-        }
+        ExciseFlankingInsert(ops, true, queryRemovedFront);
+        ExciseFlankingInsert(ops, false, queryRemovedBack);
     }
 
-    // --- Reverse strand: swap front/back query removal ---
     if (isReverse) {
         std::swap(queryRemovedFront, queryRemovedBack);
     }
 
     const std::size_t clipOffset{queryRemovedFront};
-    const std::size_t totalQuery{static_cast<std::size_t>(totalQueryLen)};
-    const std::size_t totalRemoved{queryRemovedFront + queryRemovedBack};
-    const std::size_t clipLength{(totalRemoved <= totalQuery) ? (totalQuery - totalRemoved) : 0U};
+    const std::size_t clipLength{
+        RemainingQueryLength(totalQueryLen, queryRemovedFront, queryRemovedBack)};
     const std::int32_t newPos{std::max(origRefPos, refStart)};
 
     return ClipResult{

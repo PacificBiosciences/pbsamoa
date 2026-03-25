@@ -31,8 +31,8 @@ int Runner(int argc, char** argv)
     const auto& header{reader.Header()};
     std::print("{}", header.ToText());
 
-    while (const auto view = reader.ReadRecord()) {
-        WriteViewAsSam(header, *view);
+    for (const auto& view : reader.Records()) {
+        WriteViewAsSam(header, view);
     }
 
     return EXIT_SUCCESS;

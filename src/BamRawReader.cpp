@@ -1,5 +1,7 @@
 #include <pbsamoa/io/BamRawReader.hpp>
 
+#include "ReaderUtils.hpp"
+
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/index/ZmwIndex.hpp>
@@ -32,34 +34,42 @@ void AppendRecordToBatch(const RawRecord& record, std::vector<std::byte>& batchB
     batchSize += std::size(raw);
 }
 
-template <typename ReadNext>
-std::pair<std::optional<RawRecordBatch>, std::size_t> ReadRawBatch(ReadNext readNext,
-                                                                   ByteLimit limit,
-                                                                   std::size_t remaining)
+template <typename Reader>
+std::optional<RawRecordBatch> ReadBatchFromReader(Reader& reader, ByteLimit limit,
+                                                  std::size_t remaining,
+                                                  std::size_t* recordCount = nullptr)
 {
     const std::size_t byteLimit{limit.Value()};
     std::vector<std::byte> batchBuffer;
     batchBuffer.reserve(byteLimit);
     std::vector<RawRecordBatch::RecordExtent> extents;
-    std::size_t batchSize{0};
+    std::size_t batchBytes{0};
+
+    if (recordCount) {
+        *recordCount = 0;
+    }
 
     while (std::size(extents) < remaining) {
-        if ((!std::empty(extents)) && (batchSize >= byteLimit)) {
+        if ((!std::empty(extents)) && (batchBytes >= byteLimit)) {
             break;
         }
 
-        const auto record{readNext()};
+        const auto record{reader.ReadRecord()};
         if (!record) {
             break;
         }
-        AppendRecordToBatch(*record, batchBuffer, extents, batchSize);
+        AppendRecordToBatch(*record, batchBuffer, extents, batchBytes);
     }
 
     if (std::empty(extents)) {
-        return {std::nullopt, 0};
+        return std::nullopt;
     }
 
-    return {RawRecordBatch{std::move(batchBuffer), std::move(extents)}, std::size(extents)};
+    if (recordCount) {
+        *recordCount = std::size(extents);
+    }
+
+    return RawRecordBatch{std::move(batchBuffer), std::move(extents)};
 }
 
 std::optional<std::size_t> ToRecordLimit(std::size_t recordLimit)
@@ -109,6 +119,17 @@ bool RecordIsPastQuery(const RawRecord& view, std::int32_t refId, std::int32_t e
     return (view.RefId() > refId) || ((view.RefId() == refId) && (view.Pos() >= end));
 }
 
+bool AdvanceQueryChunk(BamRawReader& reader, const std::vector<Chunk>& chunks,
+                       std::size_t& chunkIdx)
+{
+    ++chunkIdx;
+    if (chunkIdx >= std::size(chunks)) {
+        return false;
+    }
+    reader.Seek(chunks[chunkIdx].Begin);
+    return true;
+}
+
 }  // namespace
 
 struct BamRawReader::Impl
@@ -126,8 +147,7 @@ struct BamRawReader::Impl
         explicit CollectionState(BamCollection c, BamRawReaderConfig cfg)
             : collection{std::move(c)}, config{cfg}, recordLimit{ToRecordLimit(cfg.RecordLimit)}
         {
-            const bool hasChunking{(cfg.ChunkNum > 0) && (cfg.TotalChunks > 0)};
-            if (hasChunking || cfg.Whitelist) {
+            if (((cfg.ChunkNum > 0) && (cfg.TotalChunks > 0)) || cfg.Whitelist) {
                 throw std::invalid_argument{
                     "BamRawReaderConfig: chunking and whitelist are single-file only"};
             }
@@ -186,8 +206,6 @@ struct BamRawReader::Impl
     std::int32_t numZmws_{-1};
     std::unique_ptr<CollectionState> collection;
 
-    bool IsCollection() const { return static_cast<bool>(collection); }
-
     bool AtRecordLimit() const
     {
         if (collection) {
@@ -212,8 +230,7 @@ struct BamRawReader::Impl
         , bgzf{std::make_unique<BgzfReader>(p, config.BgzfWorkers)}
         , recordLimit{ToRecordLimit(config.RecordLimit)}
     {
-        const bool hasChunking{(config.ChunkNum > 0) && (config.TotalChunks > 0)};
-        if (hasChunking && config.Whitelist) {
+        if ((config.ChunkNum > 0) && (config.TotalChunks > 0) && config.Whitelist) {
             throw std::invalid_argument{
                 "BamRawReaderConfig: Whitelist and ChunkNum/TotalChunks are mutually "
                 "exclusive"};
@@ -272,13 +289,12 @@ struct BamRawReader::Impl
         bgzf->Seek(startOffset);
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 };
 
 BamRawReader::BamRawReader(const std::filesystem::path& path, BamRawReaderConfig config)
-    : impl_{std::make_unique<Impl>(path, config)}
+    : impl_{std::make_unique<Impl>(path, std::move(config))}
 {
 }
 
@@ -292,21 +308,13 @@ BamRawReader::BamRawReader(BamCollection collection, BamRawReaderConfig config)
 }
 
 BamRawReader::BamRawReader(std::vector<std::filesystem::path> paths, BamRawReaderConfig config)
+    : BamRawReader{BamCollection{std::move(paths)}, std::move(config)}
 {
-    if (std::size(paths) == 1) {
-        impl_ = std::make_unique<Impl>(paths.front(), std::move(config));
-        return;
-    }
-    impl_ = std::make_unique<Impl>(BamCollection{std::move(paths)}, std::move(config));
 }
 
 BamRawReader::BamRawReader(std::vector<BamFile> files, BamRawReaderConfig config)
+    : BamRawReader{BamCollection{std::move(files)}, std::move(config)}
 {
-    if (std::size(files) == 1) {
-        impl_ = std::make_unique<Impl>(files.front().Filename(), std::move(config));
-        return;
-    }
-    impl_ = std::make_unique<Impl>(BamCollection{std::move(files)}, std::move(config));
 }
 
 BamRawReader::~BamRawReader() = default;
@@ -361,13 +369,14 @@ std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 
     const std::size_t remaining{impl_->RemainingRecordBudget()};
     if (!impl_->collection) {
-        auto [batch, recordCount] =
-            ReadRawBatch([this]() { return impl_->bgzf->ReadRecord(); }, limit, remaining);
+        std::size_t recordCount{0};
+        const std::optional<RawRecordBatch> batch{
+            ReadBatchFromReader(*impl_->bgzf, limit, remaining, &recordCount)};
         impl_->recordsRead += recordCount;
         return batch;
     }
 
-    return ReadRawBatch([this]() { return ReadRecord(); }, limit, remaining).first;
+    return ReadBatchFromReader(*this, limit, remaining);
 }
 
 void BamRawReader::Seek(VirtualOffset offset)
@@ -400,10 +409,7 @@ BamRawReader::RecordRange::Iterator::Iterator() = default;
 
 BamRawReader::RecordRange::Iterator::Iterator(BamRawReader* reader) : reader_{reader}
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
 }
 
 const RawRecord& BamRawReader::RecordRange::Iterator::operator*() const { return *current_; }
@@ -412,10 +418,7 @@ const RawRecord* BamRawReader::RecordRange::Iterator::operator->() const { retur
 
 BamRawReader::RecordRange::Iterator& BamRawReader::RecordRange::Iterator::operator++()
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
     return *this;
 }
 
@@ -478,19 +481,10 @@ bool BamRawReader::QueryRange::Iterator::operator==(const Iterator& other) const
 
 void BamRawReader::QueryRange::Iterator::Advance()
 {
-    const auto advanceChunk = [this]() -> bool {
-        ++chunkIdx_;
-        if (chunkIdx_ >= std::size(chunks_)) {
-            return false;
-        }
-        reader_->Seek(chunks_[chunkIdx_].Begin);
-        return true;
-    };
-
     while (chunkIdx_ < std::size(chunks_)) {
         auto view{reader_->ReadRecord()};
         if (!view) {
-            if (!advanceChunk()) {
+            if (!AdvanceQueryChunk(*reader_, chunks_, chunkIdx_)) {
                 break;
             }
             continue;
@@ -498,7 +492,7 @@ void BamRawReader::QueryRange::Iterator::Advance()
 
         const VirtualOffset currentPos{reader_->Tell()};
         if (currentPos > chunks_[chunkIdx_].End) {
-            if (!advanceChunk()) {
+            if (!AdvanceQueryChunk(*reader_, chunks_, chunkIdx_)) {
                 break;
             }
             continue;

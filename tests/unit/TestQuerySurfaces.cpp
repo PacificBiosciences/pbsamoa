@@ -1,4 +1,5 @@
 #include "TestData.hpp"
+#include "TestTempDir.hpp"
 
 #include <pbsamoa/core/GenomicInterval.hpp>
 #include <pbsamoa/index/BaiIndex.hpp>
@@ -10,8 +11,6 @@
 
 #include <filesystem>
 #include <format>
-#include <system_error>
-#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -20,27 +19,7 @@ namespace PacBio {
 namespace Samoa {
 namespace {
 
-class TempFileGuard
-{
-public:
-    explicit TempFileGuard(std::filesystem::path path) : path_{std::move(path)} {}
-
-    TempFileGuard(const TempFileGuard&) = delete;
-    TempFileGuard& operator=(const TempFileGuard&) = delete;
-    TempFileGuard(TempFileGuard&&) = delete;
-    TempFileGuard& operator=(TempFileGuard&&) = delete;
-
-    const std::filesystem::path& Path() const { return path_; }
-
-    ~TempFileGuard()
-    {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-private:
-    std::filesystem::path path_;
-};
+using tests::TempFileGuard;
 
 std::size_t CountRawQuery(const std::filesystem::path& bamPath, const GenomicInterval& interval)
 {
@@ -51,7 +30,7 @@ std::size_t CountRawQuery(const std::filesystem::path& bamPath, const GenomicInt
     std::size_t count{0};
     for (const auto& record : reader.Query(index, file.ReferenceId(interval.Name()),
                                            interval.Start(), interval.Stop())) {
-        std::ignore = record;
+        (void)record;
         ++count;
     }
     return count;
@@ -62,7 +41,7 @@ std::size_t CountRecords(Query& query)
 {
     std::size_t count{0};
     for (const auto& record : query) {
-        std::ignore = record;
+        (void)record;
         ++count;
     }
     return count;

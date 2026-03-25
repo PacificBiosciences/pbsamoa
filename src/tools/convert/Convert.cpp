@@ -1,5 +1,6 @@
 #include "Convert.hpp"
 
+#include "../CliUtils.hpp"
 #include "../ParseUtils.hpp"
 
 #include <pbsamoa/io/BamRawReader.hpp>
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <optional>
@@ -25,11 +27,19 @@ namespace Samoa {
 namespace Convert {
 namespace {
 
-struct CompressionMethodName
+void PrintBlockCompressionHelp()
 {
-    std::string_view Name;
-    CramBlockMethod Method;
-};
+    std::println(stderr,
+                 "Valid values: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,"
+                 "fqzcomp,tok or numeric 0-8");
+}
+
+void PrintSeriesCompressionHelp()
+{
+    std::println(stderr,
+                 "Valid series include: BF,CF,RI,RL,AP,RG,RN,MF,NS,NP,TS,NF,TL,"
+                 "FN,FC,FP,MQ,BA,QS,BS,IN,DL,SC,RS,PD,HC,BB,QQ");
+}
 
 void PrintUsage()
 {
@@ -43,34 +53,37 @@ void PrintUsage()
                  "INPUT.(bam|sam) OUTPUT.cram");
 }
 
-std::optional<CramBlockMethod> ParseCompressionMethod(const std::string_view arg)
+std::optional<CramBlockMethod> ParseCompressionMethod(std::string_view arg)
 {
     static constexpr std::array METHODS{
-        CompressionMethodName{"raw", CramBlockMethod::RAW},
-        CompressionMethodName{"gzip", CramBlockMethod::GZIP},
-        CompressionMethodName{"bzip2", CramBlockMethod::BZIP2},
-        CompressionMethodName{"lzma", CramBlockMethod::LZMA},
-        CompressionMethodName{"rans4x8", CramBlockMethod::RANS4X8},
-        CompressionMethodName{"rans4x16", CramBlockMethod::RANS4X16},
-        CompressionMethodName{"arith", CramBlockMethod::ADAPTIVE_ARITH},
-        CompressionMethodName{"fqzcomp", CramBlockMethod::FQZCOMP},
-        CompressionMethodName{"tok", CramBlockMethod::NAME_TOKENISER},
+        std::pair{"raw", CramBlockMethod::RAW},
+        std::pair{"gzip", CramBlockMethod::GZIP},
+        std::pair{"bzip2", CramBlockMethod::BZIP2},
+        std::pair{"lzma", CramBlockMethod::LZMA},
+        std::pair{"rans4x8", CramBlockMethod::RANS4X8},
+        std::pair{"rans4x16", CramBlockMethod::RANS4X16},
+        std::pair{"arith", CramBlockMethod::ADAPTIVE_ARITH},
+        std::pair{"fqzcomp", CramBlockMethod::FQZCOMP},
+        std::pair{"tok", CramBlockMethod::NAME_TOKENISER},
     };
 
-    for (const CompressionMethodName& entry : METHODS) {
-        if (entry.Name == arg) {
-            return entry.Method;
+    for (const auto& [name, method] : METHODS) {
+        if (name == arg) {
+            return method;
         }
     }
 
     const auto parsedId{Tools::ParseInteger<std::int32_t>(arg, "block-compression")};
-    if (parsedId && *parsedId >= 0 && *parsedId <= 8) {
-        return static_cast<CramBlockMethod>(*parsedId);
+    if (!parsedId) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    if ((*parsedId < 0) || (*parsedId > 8)) {
+        return std::nullopt;
+    }
+    return static_cast<CramBlockMethod>(*parsedId);
 }
 
-std::optional<CramDataSeries> ParseDataSeries(const std::string_view arg)
+std::optional<CramDataSeries> ParseDataSeries(std::string_view arg)
 {
     if (std::size(arg) != 2) {
         return std::nullopt;
@@ -99,34 +112,49 @@ std::optional<CramDataSeries> ParseDataSeries(const std::string_view arg)
     return std::nullopt;
 }
 
-std::optional<std::pair<CramDataSeries, CramBlockMethod>> ParseSeriesCompression(
-    const std::string_view arg, std::string& error)
+std::expected<std::pair<CramDataSeries, CramBlockMethod>, std::string> ParseSeriesCompression(
+    std::string_view arg)
 {
-    const auto eqPos = arg.find('=');
+    const std::size_t eqPos{arg.find('=')};
     if (eqPos == std::string_view::npos) {
-        error = "series-compression must have form SERIES=METHOD";
-        return std::nullopt;
+        return std::unexpected{"series-compression must have form SERIES=METHOD"};
     }
-    if (eqPos == 0 || eqPos + 1 >= std::size(arg)) {
-        error = "series-compression must have non-empty SERIES and METHOD";
-        return std::nullopt;
+    if ((eqPos == 0) || (eqPos + 1 >= std::size(arg))) {
+        return std::unexpected{"series-compression must have non-empty SERIES and METHOD"};
     }
 
-    const auto seriesArg = arg.substr(0, eqPos);
-    const auto methodArg = arg.substr(eqPos + 1);
-    const auto series = ParseDataSeries(seriesArg);
-    if (!series) {
-        error = std::format("invalid CRAM data series '{}'", seriesArg);
-        return std::nullopt;
+    const std::string_view seriesArg{arg.substr(0, eqPos)};
+    const std::string_view methodArg{arg.substr(eqPos + 1)};
+
+    const auto parsedSeries{ParseDataSeries(seriesArg)};
+    if (!parsedSeries) {
+        return std::unexpected{std::format("invalid CRAM data series '{}'", seriesArg)};
     }
 
-    const auto method = ParseCompressionMethod(methodArg);
-    if (!method) {
-        error = std::format("invalid block compression method '{}'", methodArg);
-        return std::nullopt;
+    const auto parsedMethod{ParseCompressionMethod(methodArg)};
+    if (!parsedMethod) {
+        return std::unexpected{std::format("invalid block compression method '{}'", methodArg)};
     }
 
-    return std::pair{*series, *method};
+    return std::pair{*parsedSeries, *parsedMethod};
+}
+
+bool AssignBoundedOption(char* const* argv, int& argIndex, std::string_view name,
+                         std::int32_t minValue, std::string_view constraint, std::int32_t& target)
+{
+    const std::string_view valueArg{Tools::NextArgumentView(argv, argIndex)};
+    const auto parsed{Tools::ParseInteger<std::int32_t>(valueArg, name)};
+    if (!parsed) {
+        std::println(stderr, "Error: {}", parsed.error());
+        return false;
+    }
+    if (*parsed < minValue) {
+        std::println(stderr, "Error: {} must be {}", name, constraint);
+        return false;
+    }
+
+    target = *parsed;
+    return true;
 }
 
 void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
@@ -182,15 +210,6 @@ int Runner(int argc, char** argv)
     bool convertToBamRecord{false};
     const char* inputFile{nullptr};
     const char* outputFile{nullptr};
-    const auto parseIntOption = [&](int argIndex,
-                                    std::string_view name) -> std::optional<std::int32_t> {
-        const auto parsed{Tools::ParseInteger<std::int32_t>(argv[argIndex], name)};
-        if (!parsed) {
-            std::println(stderr, "Error: {}", parsed.error());
-            return std::nullopt;
-        }
-        return *parsed;
-    };
 
     for (int i{0}; i < argc; ++i) {
         const std::string_view arg{argv[i]};
@@ -200,42 +219,25 @@ int Runner(int argc, char** argv)
             return EXIT_SUCCESS;
         }
 
-        if ((arg == "--records-per-slice") && (i + 1 < argc)) {
-            const auto parsed{parseIntOption(++i, "records-per-slice")};
-            if (!parsed) {
+        if ((arg == "--records-per-slice") && Tools::HasFollowingArgument(i, argc)) {
+            if (!AssignBoundedOption(argv, i, "records-per-slice", 1, "> 0",
+                                     config.RecordsPerSlice)) {
                 return EXIT_FAILURE;
             }
-            if (*parsed <= 0) {
-                std::println(stderr, "Error: records-per-slice must be > 0");
-                return EXIT_FAILURE;
-            }
-            config.RecordsPerSlice = *parsed;
             continue;
         }
 
-        if ((arg == "--bgzf-threads") && (i + 1 < argc)) {
-            const auto parsed{parseIntOption(++i, "bgzf-threads")};
-            if (!parsed) {
+        if ((arg == "--bgzf-threads") && Tools::HasFollowingArgument(i, argc)) {
+            if (!AssignBoundedOption(argv, i, "bgzf-threads", 0, ">= 0", bgzfThreadsOpt)) {
                 return EXIT_FAILURE;
             }
-            if (*parsed < 0) {
-                std::println(stderr, "Error: bgzf-threads must be >= 0");
-                return EXIT_FAILURE;
-            }
-            bgzfThreadsOpt = *parsed;
             continue;
         }
 
-        if ((arg == "--decode-threads") && (i + 1 < argc)) {
-            const auto parsed{parseIntOption(++i, "decode-threads")};
-            if (!parsed) {
+        if ((arg == "--decode-threads") && Tools::HasFollowingArgument(i, argc)) {
+            if (!AssignBoundedOption(argv, i, "decode-threads", 0, ">= 0", decodeThreadsOpt)) {
                 return EXIT_FAILURE;
             }
-            if (*parsed < 0) {
-                std::println(stderr, "Error: decode-threads must be >= 0");
-                return EXIT_FAILURE;
-            }
-            decodeThreadsOpt = *parsed;
             continue;
         }
 
@@ -244,48 +246,37 @@ int Runner(int argc, char** argv)
             continue;
         }
 
-        if ((arg == "--compression-threads") && (i + 1 < argc)) {
-            const auto parsed{parseIntOption(++i, "compression-threads")};
-            if (!parsed) {
+        if ((arg == "--compression-threads") && Tools::HasFollowingArgument(i, argc)) {
+            if (!AssignBoundedOption(argv, i, "compression-threads", 0, ">= 0",
+                                     compressionThreadsOpt)) {
                 return EXIT_FAILURE;
             }
-            if (*parsed < 0) {
-                std::println(stderr, "Error: compression-threads must be >= 0");
-                return EXIT_FAILURE;
-            }
-            compressionThreadsOpt = *parsed;
             continue;
         }
 
-        if ((arg == "--block-compression") && (i + 1 < argc)) {
-            const std::string_view methodArg{argv[++i]};
+        if ((arg == "--block-compression") && Tools::HasFollowingArgument(i, argc)) {
+            const std::string_view methodArg{Tools::NextArgumentView(argv, i)};
             const auto method = ParseCompressionMethod(methodArg);
             if (!method) {
                 std::println(stderr, "Error: invalid block compression method '{}'", methodArg);
-                std::println(stderr,
-                             "Valid values: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,"
-                             "fqzcomp,tok or numeric 0-8");
+                PrintBlockCompressionHelp();
                 return EXIT_FAILURE;
             }
             config.BlockCompressionMethod = *method;
             continue;
         }
 
-        if ((arg == "--series-compression") && (i + 1 < argc)) {
-            const std::string_view specArg{argv[++i]};
-            std::string error;
-            const auto parsed{ParseSeriesCompression(specArg, error)};
+        if ((arg == "--series-compression") && Tools::HasFollowingArgument(i, argc)) {
+            const std::string_view specArg{Tools::NextArgumentView(argv, i)};
+            const auto parsed{ParseSeriesCompression(specArg)};
             if (!parsed) {
-                std::println(stderr, "Error: {}", error);
-                std::println(stderr,
-                             "Valid series include: BF,CF,RI,RL,AP,RG,RN,MF,NS,NP,TS,NF,TL,"
-                             "FN,FC,FP,MQ,BA,QS,BS,IN,DL,SC,RS,PD,HC,BB,QQ");
-                std::println(stderr,
-                             "Valid methods: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,"
-                             "fqzcomp,tok or numeric 0-8");
+                std::println(stderr, "Error: {}", parsed.error());
+                PrintSeriesCompressionHelp();
+                PrintBlockCompressionHelp();
                 return EXIT_FAILURE;
             }
-            config.DataSeriesCompressionMethods[parsed->first] = parsed->second;
+            const auto [series, method]{*parsed};
+            config.DataSeriesCompressionMethods[series] = method;
             continue;
         }
 
@@ -300,9 +291,9 @@ int Runner(int argc, char** argv)
             return EXIT_FAILURE;
         }
 
-        if (inputFile == nullptr) {
+        if (!inputFile) {
             inputFile = argv[i];
-        } else if (outputFile == nullptr) {
+        } else if (!outputFile) {
             outputFile = argv[i];
         } else {
             std::println(stderr, "Error: too many positional arguments");
@@ -311,7 +302,7 @@ int Runner(int argc, char** argv)
         }
     }
 
-    if ((inputFile == nullptr) || (outputFile == nullptr)) {
+    if (!inputFile || !outputFile) {
         PrintUsage();
         return EXIT_FAILURE;
     }

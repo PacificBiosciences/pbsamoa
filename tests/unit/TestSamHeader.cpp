@@ -9,7 +9,6 @@
 
 #include <array>
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,22 +33,22 @@ TEST(ReferenceSequence, WithOptionalFields)
 
     EXPECT_EQ(ref.Name(), "chrM");
     EXPECT_EQ(ref.Length(), 16569);
-    const std::string* tp = ref.GetTag("TP");
-    ASSERT_NE(tp, nullptr);
+    const auto* tp{ref.GetTag("TP")};
+    ASSERT_TRUE(tp);
     EXPECT_EQ(*tp, "circular");
-    const std::string* sp = ref.GetTag("SP");
-    ASSERT_NE(sp, nullptr);
+    const auto* sp{ref.GetTag("SP")};
+    ASSERT_TRUE(sp);
     EXPECT_EQ(*sp, "Homo sapiens");
 
-    EXPECT_EQ(ref.GetTag("XX"), nullptr);
+    EXPECT_FALSE(ref.GetTag("XX"));
 }
 
 TEST(ReferenceSequence, AlternativeNames)
 {
     ReferenceSequence ref{"MT", 16569};
     ref.SetTag("AN", "chrMT,M,chrM");
-    const std::string* an = ref.GetTag("AN");
-    ASSERT_NE(an, nullptr);
+    const auto* an{ref.GetTag("AN")};
+    ASSERT_TRUE(an);
     EXPECT_EQ(*an, "chrMT,M,chrM");
 }
 
@@ -66,11 +65,11 @@ TEST(ReadGroup, WithOptionalFields)
     rg.SetTag("SM", "sample1");
     rg.SetTag("PL", "ILLUMINA");
     rg.SetTag("LB", "lib1");
-    const std::string* sm = rg.GetTag("SM");
-    ASSERT_NE(sm, nullptr);
+    const auto* sm{rg.GetTag("SM")};
+    ASSERT_TRUE(sm);
     EXPECT_EQ(*sm, "sample1");
-    const std::string* pl = rg.GetTag("PL");
-    ASSERT_NE(pl, nullptr);
+    const auto* pl{rg.GetTag("PL")};
+    ASSERT_TRUE(pl);
     EXPECT_EQ(*pl, "ILLUMINA");
 }
 
@@ -88,11 +87,11 @@ TEST(ProgramRecord, WithChaining)
     pg.SetTag("VN", "1.17");
     pg.SetTag("PP", "bwa");
     pg.SetTag("CL", "samtools sort -o sorted.bam input.bam");
-    const std::string* pp = pg.GetTag("PP");
-    ASSERT_NE(pp, nullptr);
+    const auto* pp{pg.GetTag("PP")};
+    ASSERT_TRUE(pp);
     EXPECT_EQ(*pp, "bwa");
-    const std::string* cl = pg.GetTag("CL");
-    ASSERT_NE(cl, nullptr);
+    const auto* cl{pg.GetTag("CL")};
+    ASSERT_TRUE(cl);
     EXPECT_EQ(*cl, "samtools sort -o sorted.bam input.bam");
 }
 
@@ -140,8 +139,8 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
     EXPECT_EQ(header.ReferenceSequences()[1].Length(), 242193529);
     EXPECT_EQ(header.ReferenceSequences()[2].Name(), "chrM");
     EXPECT_EQ(header.ReferenceSequences()[2].Length(), 16569);
-    const std::string* tp = header.ReferenceSequences()[2].GetTag("TP");
-    ASSERT_NE(tp, nullptr);
+    const auto* tp{header.ReferenceSequences()[2].GetTag("TP")};
+    ASSERT_TRUE(tp);
     EXPECT_EQ(*tp, "circular");
 }
 
@@ -155,13 +154,13 @@ TEST(SamHeader, ParseReadGroups)
 
     ASSERT_EQ(std::size(header.ReadGroups()), 2U);
     EXPECT_EQ(header.ReadGroups()[0].Id(), "rg1");
-    const std::string* pl = header.ReadGroups()[0].GetTag("PL");
-    ASSERT_NE(pl, nullptr);
+    const auto* pl{header.ReadGroups()[0].GetTag("PL")};
+    ASSERT_TRUE(pl);
     EXPECT_EQ(*pl, "ILLUMINA");
 
     EXPECT_EQ(header.ReadGroups()[1].Id(), "rg2");
-    const std::string* lb = header.ReadGroups()[1].GetTag("LB");
-    ASSERT_NE(lb, nullptr);
+    const auto* lb{header.ReadGroups()[1].GetTag("LB")};
+    ASSERT_TRUE(lb);
     EXPECT_EQ(*lb, "lib2");
 }
 
@@ -175,13 +174,13 @@ TEST(SamHeader, ParseProgramRecords)
 
     ASSERT_EQ(std::size(header.ProgramRecords()), 2U);
     EXPECT_EQ(header.ProgramRecords()[0].Id(), "bwa");
-    const std::string* cl = header.ProgramRecords()[0].GetTag("CL");
-    ASSERT_NE(cl, nullptr);
+    const auto* cl{header.ProgramRecords()[0].GetTag("CL")};
+    ASSERT_TRUE(cl);
     EXPECT_EQ(*cl, "bwa mem ref.fa reads.fq");
 
     EXPECT_EQ(header.ProgramRecords()[1].Id(), "samtools");
-    const std::string* pp = header.ProgramRecords()[1].GetTag("PP");
-    ASSERT_NE(pp, nullptr);
+    const auto* pp{header.ProgramRecords()[1].GetTag("PP")};
+    ASSERT_TRUE(pp);
     EXPECT_EQ(*pp, "bwa");
 }
 
@@ -258,33 +257,33 @@ TEST(SamHeader, ParseSqWithAlternativeNames)
     const SamHeader header = *SamHeader::FromText(text);
 
     ASSERT_EQ(std::size(header.ReferenceSequences()), 1U);
-    const std::string* an = header.ReferenceSequences()[0].GetTag("AN");
-    ASSERT_NE(an, nullptr);
+    const auto* an{header.ReferenceSequences()[0].GetTag("AN")};
+    ASSERT_TRUE(an);
     EXPECT_EQ(*an, "chrMT,M,chrM");
 }
 
 TEST(SamHeader, RejectsInvalidSqMissingLn)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tSN:ref\n";
-    EXPECT_FALSE(SamHeader::FromText(text).has_value());
+    EXPECT_FALSE(SamHeader::FromText(text));
 }
 
 TEST(SamHeader, RejectsInvalidSqMissingSn)
 {
     const std::string text = "@HD\tVN:1.6\n@SQ\tLN:100\n";
-    EXPECT_FALSE(SamHeader::FromText(text).has_value());
+    EXPECT_FALSE(SamHeader::FromText(text));
 }
 
 TEST(SamHeader, RejectsInvalidRgMissingId)
 {
     const std::string text = "@HD\tVN:1.6\n@RG\tSM:sample\n";
-    EXPECT_FALSE(SamHeader::FromText(text).has_value());
+    EXPECT_FALSE(SamHeader::FromText(text));
 }
 
 TEST(SamHeader, RejectsInvalidPgMissingId)
 {
     const std::string text = "@HD\tVN:1.6\n@PG\tPN:tool\n";
-    EXPECT_FALSE(SamHeader::FromText(text).has_value());
+    EXPECT_FALSE(SamHeader::FromText(text));
 }
 
 // --- SamHeader serialization tests ---
@@ -620,7 +619,7 @@ TEST(SamHeader, ParseBamHeaderBlockBadMagic)
     // Pad enough to read l_text
     data.resize(12, std::byte{0});
 
-    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}).has_value());
+    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}));
 }
 
 TEST(SamHeader, ParseBamHeaderBlockTruncated)
@@ -629,7 +628,7 @@ TEST(SamHeader, ParseBamHeaderBlockTruncated)
     const std::vector<std::byte> data = {std::byte{'B'}, std::byte{'A'}, std::byte{'M'},
                                          std::byte{1}};
 
-    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}).has_value());
+    EXPECT_FALSE(SamHeader::FromBamHeaderBlock(std::span<const std::byte>{data}));
 }
 
 TEST(SamHeader, ParseBamHeaderBlockEmptyHeaderText)
@@ -668,8 +667,8 @@ TEST(SamHeader, ParseFromRealBamFile)
     // Read enough decompressed data to cover the header
     BgzfReader reader{bamPath};
     std::array<std::byte, 65536> buffer;
-    const std::optional<std::size_t> bytesRead = reader.ReadBlock(buffer);
-    ASSERT_TRUE(bytesRead.has_value());
+    const auto bytesRead{reader.ReadBlock(buffer)};
+    ASSERT_TRUE(bytesRead);
     ASSERT_GT(*bytesRead, 0U);
 
     // Parse the BAM header from decompressed bytes
@@ -692,8 +691,8 @@ TEST(SamHeader, ParseHeaderOnlyBam)
 
     BgzfReader reader{bamPath};
     std::array<std::byte, 65536> buffer;
-    const std::optional<std::size_t> bytesRead = reader.ReadBlock(buffer);
-    ASSERT_TRUE(bytesRead.has_value());
+    const auto bytesRead{reader.ReadBlock(buffer)};
+    ASSERT_TRUE(bytesRead);
     ASSERT_GT(*bytesRead, 0U);
     const SamHeader header =
         *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
@@ -785,8 +784,8 @@ TEST(SamHeader, BamBinaryFromRealFileRoundTrip)
 
     BgzfReader reader{bamPath};
     std::array<std::byte, 65536> buffer;
-    const std::optional<std::size_t> bytesRead = reader.ReadBlock(buffer);
-    ASSERT_TRUE(bytesRead.has_value());
+    const auto bytesRead{reader.ReadBlock(buffer)};
+    ASSERT_TRUE(bytesRead);
     const SamHeader original =
         *SamHeader::FromBamHeaderBlock(std::span<const std::byte>{buffer}.first(*bytesRead));
 

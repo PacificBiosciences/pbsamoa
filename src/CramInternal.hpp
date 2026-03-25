@@ -1,6 +1,8 @@
 #ifndef PBSAMOA_CRAM_INTERNAL_HPP
 #define PBSAMOA_CRAM_INTERNAL_HPP
 
+#include "PathUtils.hpp"
+
 #include <pbsamoa/core/Tags.hpp>
 
 #include "LibdeflateUtils.hpp"
@@ -69,9 +71,7 @@ inline constexpr std::int32_t CRAM_FLAG_SEQUENCE_OMITTED = 0x8;
 
 inline std::filesystem::path DefaultCraiPath(const std::filesystem::path& cramPath)
 {
-    std::filesystem::path craiPath{cramPath};
-    craiPath += ".crai";
-    return craiPath;
+    return SidecarPath(cramPath, ".crai");
 }
 
 }  // namespace Samoa

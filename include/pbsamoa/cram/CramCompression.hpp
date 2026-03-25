@@ -72,6 +72,8 @@ private:
         CramDecompressFn Decompress;
     };
 
+    const MethodEntry& LookupMethod(std::uint8_t methodId) const;
+
     std::unordered_map<std::uint8_t, MethodEntry> methods_;
 };
 

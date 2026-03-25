@@ -107,14 +107,14 @@ TEST(PacBioBamRecord, LocalContextFlagsPresent)
 {
     const auto record{MakeFullRecord()};
     const auto flags{record.LocalContextFlags()};
-    ASSERT_TRUE(flags.has_value());
+    ASSERT_TRUE(flags);
     EXPECT_EQ(static_cast<int>(*flags), 3);
 }
 
 TEST(PacBioBamRecord, LocalContextFlagsAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_FALSE(record.LocalContextFlags().has_value());
+    EXPECT_FALSE(record.LocalContextFlags());
 }
 
 TEST(PacBioBamRecord, LocalContextFlagsSetter)
@@ -122,7 +122,7 @@ TEST(PacBioBamRecord, LocalContextFlagsSetter)
     auto record{MakeFullRecord()};
     record.LocalContextFlags(static_cast<Data::LocalContextFlags>(7));
     const auto flags{record.LocalContextFlags()};
-    ASSERT_TRUE(flags.has_value());
+    ASSERT_TRUE(flags);
     EXPECT_EQ(static_cast<int>(*flags), 7);
 }
 
@@ -145,20 +145,20 @@ TEST(PacBioBamRecord, ReadAccuracy)
 TEST(PacBioBamRecord, PulseWidthAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_FALSE(record.PulseWidth().has_value());
+    EXPECT_FALSE(record.PulseWidth());
 }
 
 TEST(PacBioBamRecord, IPDAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_FALSE(record.IPD().has_value());
+    EXPECT_FALSE(record.IPD());
 }
 
 TEST(PacBioBamRecord, WallStartPresent)
 {
     const auto record{MakeFullRecord()};
     const auto ws{record.WallStart()};
-    ASSERT_TRUE(ws.has_value());
+    ASSERT_TRUE(ws);
     EXPECT_EQ(*ws, 1000);
 }
 
@@ -166,20 +166,20 @@ TEST(PacBioBamRecord, WallEndPresent)
 {
     const auto record{MakeFullRecord()};
     const auto we{record.WallEnd()};
-    ASSERT_TRUE(we.has_value());
+    ASSERT_TRUE(we);
     EXPECT_EQ(*we, 2000);
 }
 
 TEST(PacBioBamRecord, WallStartAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_FALSE(record.WallStart().has_value());
+    EXPECT_FALSE(record.WallStart());
 }
 
 TEST(PacBioBamRecord, WallEndAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_FALSE(record.WallEnd().has_value());
+    EXPECT_FALSE(record.WallEnd());
 }
 
 }  // namespace Samoa

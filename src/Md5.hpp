@@ -1,6 +1,7 @@
 #ifndef PBSAMOA_MD5_HPP
 #define PBSAMOA_MD5_HPP
 
+#include <array>
 #include <span>
 #include <string>
 #include <string_view>
@@ -10,6 +11,12 @@
 namespace PacBio {
 namespace Samoa {
 namespace detail {
+
+/// \brief Compute the raw 16-byte MD5 digest of input bytes.
+std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data);
+
+/// \brief Format a raw 16-byte MD5 digest as lowercase hex.
+std::string Md5DigestToHex(std::span<const std::byte, 16> digest);
 
 /// \brief Compute the MD5 hex digest of input bytes.
 ///

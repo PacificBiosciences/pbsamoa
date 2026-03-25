@@ -85,7 +85,7 @@ TEST(BgzfBlockHeader, ParseEofMarker)
 {
     const std::optional<BgzfBlockInfo> result{
         ParseBgzfBlockHeader(std::as_bytes(std::span{EOF_BYTES}))};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
 
     const BgzfBlockInfo& info{*result};
     EXPECT_EQ(info.blockSize, 28U);
@@ -98,7 +98,7 @@ TEST(BgzfBlockHeader, RejectBadMagic)
     std::array<std::uint8_t, 28> bad{EOF_BYTES};
     bad[0] = 0x00;
     const std::optional<BgzfBlockInfo> result{ParseBgzfBlockHeader(std::as_bytes(std::span{bad}))};
-    EXPECT_FALSE(result.has_value());
+    EXPECT_FALSE(result);
 }
 
 TEST(BgzfBlockHeader, RejectMissingExtraFlag)
@@ -106,14 +106,14 @@ TEST(BgzfBlockHeader, RejectMissingExtraFlag)
     std::array<std::uint8_t, 28> bad{EOF_BYTES};
     bad[3] = 0x00;
     const std::optional<BgzfBlockInfo> result{ParseBgzfBlockHeader(std::as_bytes(std::span{bad}))};
-    EXPECT_FALSE(result.has_value());
+    EXPECT_FALSE(result);
 }
 
 TEST(BgzfBlockHeader, RejectTruncatedInput)
 {
     const std::optional<BgzfBlockInfo> result{
         ParseBgzfBlockHeader(std::as_bytes(std::span{EOF_BYTES}).subspan(0U, 10U))};
-    EXPECT_FALSE(result.has_value());
+    EXPECT_FALSE(result);
 }
 
 TEST(BgzfBlockHeader, EofMarkerConstantMatchesSpec)
@@ -143,12 +143,12 @@ TEST(BgzfDecompress, RoundTripSmallData)
 
     const std::span<const std::byte> blockSpan{std::as_bytes(std::span{block})};
     const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
-    ASSERT_TRUE(info.has_value());
+    ASSERT_TRUE(info);
 
     std::vector<std::byte> output{};
     output.resize(std::size(original));
     const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(*result, std::size(original));
 
     const std::string decoded{reinterpret_cast<const char*>(std::data(output)), std::size(output)};
@@ -159,12 +159,12 @@ TEST(BgzfDecompress, EmptyBlock)
 {
     const std::span<const std::byte> blockSpan{std::as_bytes(std::span{EOF_BYTES})};
     const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
-    ASSERT_TRUE(info.has_value());
+    ASSERT_TRUE(info);
 
     std::vector<std::byte> output{};
     output.resize(65536U);
     const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(*result, 0U);
 }
 
@@ -179,12 +179,12 @@ TEST(BgzfDecompress, MaxBlockData)
 
     const std::span<const std::byte> blockSpan{std::as_bytes(std::span{block})};
     const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
-    ASSERT_TRUE(info.has_value());
+    ASSERT_TRUE(info);
 
     std::vector<std::byte> output{};
     output.resize(65536U);
     const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result);
     EXPECT_EQ(*result, 65536U);
     EXPECT_TRUE(std::ranges::equal(output, input));
 }

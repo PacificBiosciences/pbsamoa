@@ -1,11 +1,13 @@
 #ifndef PBSAMOA_WRITERUTILS_HPP
 #define PBSAMOA_WRITERUTILS_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -14,6 +16,14 @@
 
 namespace PacBio {
 namespace Samoa {
+
+inline bool IsUnavailableQualityValue(std::uint8_t quality) { return quality == 0xFF; }
+
+inline bool IsQualityUnavailable(std::span<const std::uint8_t> qualities)
+{
+    return std::empty(qualities) || std::ranges::all_of(qualities, IsUnavailableQualityValue);
+}
+
 namespace detail {
 
 /// \brief Generate a unique temporary path adjacent to \p finalPath.
@@ -61,7 +71,6 @@ inline void AtomicRename(const std::filesystem::path& src, const std::filesystem
     if (ec) {
         std::error_code removeEc;
         std::filesystem::remove(dst, removeEc);
-        ec.clear();
         std::filesystem::rename(src, dst, ec);
     }
     if (ec) {

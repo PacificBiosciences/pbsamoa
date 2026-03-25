@@ -4,7 +4,6 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
-#include <pbsamoa/core/Tags.hpp>
 
 #include <filesystem>
 #include <memory>

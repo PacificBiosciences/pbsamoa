@@ -201,16 +201,26 @@ inline TagMap RawRecord::ParseTags() const { return ParseTagsFromBam(AuxData());
 
 inline std::span<const std::byte> RawRecord::RawData() const { return data_; }
 
+namespace detail {
+
+constexpr bool HasStoredQuality(std::uint8_t quality);
+
+template <typename Filter>
+BamRecord ToOwnedFiltered(const RawRecord& raw, const Filter& filter,
+                          bool (*keep)(const Filter&, TagKey));
+
+bool KeepDroppedTag(const DropTags& filter, TagKey key);
+bool KeepKeptTag(const KeepTags& filter, TagKey key);
+
+}  // namespace detail
+
 // --- ToOwned ---
 
 inline BamRecord RawRecord::ToOwned() const
 {
     BamRecord record;
     const std::span<const std::uint8_t> qualities{Qual()};
-    const std::uint32_t seqLength{SeqLength()};
-    const bool hasStoredQualities{
-        (seqLength > 0) &&
-        !std::ranges::all_of(qualities, [](std::uint8_t q) { return q == 0xFF; })};
+    const bool hasStoredQualities{std::ranges::any_of(qualities, detail::HasStoredQuality)};
 
     record.Name(std::string{Name()})
         .Flag(Flag())
@@ -233,14 +243,17 @@ inline BamRecord RawRecord::ToOwned() const
 
 namespace detail {
 
-template <typename Pred>
-BamRecord ToOwnedFiltered(const RawRecord& raw, Pred keep)
+constexpr bool HasStoredQuality(std::uint8_t quality) { return quality != 0xFF; }
+
+template <typename Filter>
+BamRecord ToOwnedFiltered(const RawRecord& raw, const Filter& filter,
+                          bool (*keep)(const Filter&, TagKey))
 {
     BamRecord record{raw.ToOwned()};
     TagMap filtered;
     const TagMap& tags{record.Tags()};
     for (const auto& [key, value] : tags.Entries()) {
-        if (keep(key)) {
+        if (keep(filter, key)) {
             filtered.Append(key, value);
         }
     }
@@ -248,16 +261,20 @@ BamRecord ToOwnedFiltered(const RawRecord& raw, Pred keep)
     return record;
 }
 
+inline bool KeepDroppedTag(const DropTags& filter, TagKey key) { return !filter.ShouldDrop(key); }
+
+inline bool KeepKeptTag(const KeepTags& filter, TagKey key) { return filter.ShouldKeep(key); }
+
 }  // namespace detail
 
 inline BamRecord RawRecord::ToOwned(const DropTags& filter) const
 {
-    return detail::ToOwnedFiltered(*this, [&filter](TagKey k) { return !filter.ShouldDrop(k); });
+    return detail::ToOwnedFiltered(*this, filter, detail::KeepDroppedTag);
 }
 
 inline BamRecord RawRecord::ToOwned(const KeepTags& filter) const
 {
-    return detail::ToOwnedFiltered(*this, [&filter](TagKey k) { return filter.ShouldKeep(k); });
+    return detail::ToOwnedFiltered(*this, filter, detail::KeepKeptTag);
 }
 
 /// \brief Owns decompressed buffer(s) and provides access to raw record data.

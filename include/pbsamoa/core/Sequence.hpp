@@ -12,40 +12,56 @@
 
 namespace PacBio {
 namespace Samoa {
+namespace detail {
+
+inline constexpr std::array<std::uint8_t, 256> MakeBaseToCodeTable()
+{
+    std::array<std::uint8_t, 256> table{};
+    table.fill(15);
+
+    // =ACMGRSVTWYHKDBN -> 0-15
+    constexpr std::string_view bases{"=ACMGRSVTWYHKDBN"};
+    for (std::size_t i{0}; i < std::size(bases); ++i) {
+        const std::uint8_t code{static_cast<std::uint8_t>(i)};
+        const char base{bases[i]};
+
+        table[static_cast<unsigned char>(base)] = code;
+        if ((base >= 'A') && (base <= 'Z')) {
+            table[static_cast<unsigned char>(base + 32)] = code;
+        }
+    }
+
+    return table;
+}
+
+}  // namespace detail
 
 /// \brief 256-entry lookup table: ASCII char -> 4-bit code.
 /// Unmapped characters resolve to 15 (N).
-inline constexpr std::array<std::uint8_t, 256> BASE_TO_CODE = [] {
-    std::array<std::uint8_t, 256> t{};
-    for (std::uint8_t& value : t) {
-        value = 15;  // default: N
-    }
-    // =ACMGRSVTWYHKDBN -> 0-15
-    constexpr std::string_view BASES{"=ACMGRSVTWYHKDBN"};
-    for (std::uint8_t i{0}; i < 16; ++i) {
-        t[static_cast<unsigned char>(BASES[i])] = i;
-        // also handle lowercase
-        if ((BASES[i] >= 'A') && (BASES[i] <= 'Z')) {
-            t[static_cast<unsigned char>(BASES[i] + 32)] = i;
-        }
-    }
-    return t;
-}();
+inline constexpr std::array<std::uint8_t, 256> BASE_TO_CODE{detail::MakeBaseToCodeTable()};
 
 /// \brief 16-entry decode table: 4-bit code -> ASCII char.
 inline constexpr std::array<char, 16> CODE_TO_BASE = {
     '=', 'A', 'C', 'M', 'G', 'R', 'S', 'V', 'T', 'W', 'Y', 'H', 'K', 'D', 'B', 'N',
 };
 
-/// \brief 256-entry lookup: packed byte -> two ASCII bases for fast decode.
-inline constexpr std::array<std::array<char, 2>, 256> PACKED_TO_BASES = [] {
-    std::array<std::array<char, 2>, 256> t{};
-    for (std::size_t i{0}; i < std::size(t); ++i) {
-        t[i][0] = CODE_TO_BASE[(i >> 4) & 0xF];
-        t[i][1] = CODE_TO_BASE[i & 0xF];
+namespace detail {
+
+inline constexpr std::array<std::array<char, 2>, 256> MakePackedToBasesTable()
+{
+    std::array<std::array<char, 2>, 256> table{};
+    for (std::size_t i{0}; i < std::size(table); ++i) {
+        table[i][0] = CODE_TO_BASE[(i >> 4) & 0xF];
+        table[i][1] = CODE_TO_BASE[i & 0xF];
     }
-    return t;
-}();
+    return table;
+}
+
+}  // namespace detail
+
+/// \brief 256-entry lookup: packed byte -> two ASCII bases for fast decode.
+inline constexpr std::array<std::array<char, 2>, 256> PACKED_TO_BASES{
+    detail::MakePackedToBasesTable()};
 
 /// \brief Pack a text sequence into 4-bit encoding (2 bases per byte).
 std::vector<std::byte> PackSequence(std::string_view seq);
@@ -85,7 +101,7 @@ public:
 
 private:
     std::span<const std::byte> data_;
-    std::uint32_t length_;
+    std::uint32_t length_{0};
 };
 
 }  // namespace Samoa

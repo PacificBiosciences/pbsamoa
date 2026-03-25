@@ -1,8 +1,8 @@
 #include <pbsamoa/io/SamWriter.hpp>
 
+#include "BinaryUtils.hpp"
 #include "WriterUtils.hpp"
 
-#include <algorithm>
 #include <format>
 #include <fstream>
 #include <string>
@@ -12,23 +12,6 @@
 namespace PacBio {
 namespace Samoa {
 namespace {
-
-constexpr std::uint8_t MISSING_BAM_QUALITY{0xFF};
-
-std::int32_t ToSamPosition(const std::int32_t zeroBasedPos)
-{
-    if (zeroBasedPos < 0) {
-        return 0;
-    }
-    return zeroBasedPos + 1;
-}
-
-bool QualitiesUnavailable(std::span<const std::uint8_t> qual)
-{
-    return std::empty(qual) || std::ranges::all_of(qual, [](const std::uint8_t quality) {
-               return quality == MISSING_BAM_QUALITY;
-           });
-}
 
 void FormatFields(std::string& buf, const SamHeader& header, std::string_view name,
                   std::uint16_t flag, std::int32_t refId, std::int32_t pos, std::uint8_t mapq,
@@ -54,7 +37,7 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // POS (0-based -> 1-based)
-    std::format_to(std::back_inserter(buf), "{}", ToSamPosition(pos));
+    std::format_to(std::back_inserter(buf), "{}", OneBasedPositionOrZero(pos));
     buf += '\t';
 
     // MAPQ
@@ -80,7 +63,7 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // PNEXT (0-based -> 1-based)
-    std::format_to(std::back_inserter(buf), "{}", ToSamPosition(nextPos));
+    std::format_to(std::back_inserter(buf), "{}", OneBasedPositionOrZero(nextPos));
     buf += '\t';
 
     // TLEN
@@ -96,7 +79,7 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // QUAL - 0xFF means unavailable in BAM; output '*'
-    if (QualitiesUnavailable(qual)) {
+    if (IsQualityUnavailable(qual)) {
         buf += '*';
     } else {
         for (const std::uint8_t quality : qual) {
@@ -143,7 +126,7 @@ SamWriter::SamWriter(const std::filesystem::path& path, const SamHeader& header,
 
 SamWriter::~SamWriter()
 {
-    if ((impl_ != nullptr) && (!impl_->closed)) {
+    if (impl_ && !impl_->closed) {
         Close();
     }
 }

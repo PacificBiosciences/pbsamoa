@@ -28,6 +28,7 @@ test_exe = executable(
         'TestMetrics.cpp',
         'TestMultiBam.cpp',
         'TestPacBioBamRecord.cpp',
+        'TestParseUtils.cpp',
         'TestPulseBitset.cpp',
         'TestQuerySurfaces.cpp',
         'TestRawRecord.cpp',

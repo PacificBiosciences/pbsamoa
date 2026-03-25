@@ -104,8 +104,8 @@ TEST(GenomicInterval, ValidatesCoordinatesAndMutators)
     EXPECT_EQ(interval.Stop(), 25);
     EXPECT_TRUE(interval.Empty());
 
-    EXPECT_THROW([] { GenomicInterval(std::string{"chr1"}, -1, 5); }(), std::invalid_argument);
-    EXPECT_THROW([] { GenomicInterval(std::string{"chr1"}, 10, 9); }(), std::invalid_argument);
+    EXPECT_THROW(GenomicInterval(std::string{"chr1"}, -1, 5), std::invalid_argument);
+    EXPECT_THROW(GenomicInterval(std::string{"chr1"}, 10, 9), std::invalid_argument);
     EXPECT_THROW(interval.Start(-1), std::invalid_argument);
     EXPECT_THROW(interval.Stop(24), std::invalid_argument);
 }

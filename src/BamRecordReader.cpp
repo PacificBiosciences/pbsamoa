@@ -1,5 +1,7 @@
 #include <pbsamoa/io/BamRecordReader.hpp>
 
+#include "ReaderUtils.hpp"
+
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/Tags.hpp>
@@ -34,6 +36,36 @@ namespace {
 
 using QueueItem = std::expected<BamRecord, std::exception_ptr>;
 using DecodePool = PacBio::Parallel::ThreadPool<>;
+using TagFilter = std::variant<std::monostate, DropTags, KeepTags>;
+
+struct DecodeVisitor
+{
+    const RawRecord& view;
+
+    BamRecord operator()(std::monostate) const { return view.ToOwned(); }
+
+    template <typename FilterT>
+    BamRecord operator()(const FilterT& filter) const
+    {
+        return view.ToOwned(filter);
+    }
+};
+
+struct QueryRangeVisitor
+{
+    const TagFilter* tagFilter;
+    const GenomicInterval& interval;
+
+    BamRecordReader::QueryRange operator()(const std::filesystem::path& source) const
+    {
+        return BamRecordReader::QueryRange{source, interval, *tagFilter};
+    }
+
+    BamRecordReader::QueryRange operator()(const BamCollection& source) const
+    {
+        return BamRecordReader::QueryRange{source, interval, *tagFilter};
+    }
+};
 
 std::shared_ptr<DecodePool> CreateDecodePool(std::size_t decodeWorkers)
 {
@@ -47,28 +79,23 @@ std::shared_ptr<DecodePool> CreateDecodePool(std::size_t decodeWorkers)
     });
 }
 
-BamRawReader CreateViewReaderForCollection(const BamCollection& collection,
-                                           BamRawReaderConfig config)
+BamRecord DecodeView(const RawRecord& view, const TagFilter& tagFilter)
 {
-    // Keep source_ intact so Query() can build fresh readers later; the
-    // sequential decode path consumes its own BamCollection copy.
-    return BamRawReader{collection, std::move(config)};
+    return std::visit(DecodeVisitor{view}, tagFilter);
 }
 
-BamRecord DecodeView(const RawRecord& view,
-                     const std::variant<std::monostate, DropTags, KeepTags>& tagFilter)
+struct DecodeBatchWorker
 {
-    return std::visit(
-        [&](const auto& filter) -> BamRecord {
-            using T = std::remove_cvref_t<decltype(filter)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-                return view.ToOwned();
-            } else {
-                return view.ToOwned(filter);
-            }
-        },
-        tagFilter);
-}
+    const RawRecordBatch* Batch;
+    std::vector<BamRecord>* Owned;
+    const TagFilter* TagFilterState;
+
+    void operator()(std::int32_t i) const
+    {
+        const RawRecord view{Batch->RecordData(i)};
+        (*Owned)[static_cast<std::size_t>(i)] = DecodeView(view, *TagFilterState);
+    }
+};
 
 }  // namespace
 
@@ -92,7 +119,7 @@ struct BamRecordReader::Impl
     SamHeader header_;
     std::shared_ptr<DecodePool> pool_;
     rigtorp::SPSCQueue<QueueItem> queue_;
-    std::variant<std::monostate, DropTags, KeepTags> tagFilter_;
+    TagFilter tagFilter_;
     ByteLimit batchBudget_;
     bool eof_{false};
     bool parallelBgzf_;
@@ -102,6 +129,36 @@ struct BamRecordReader::Impl
     std::condition_variable readyCv_;
     std::atomic<bool> done_{false};
     std::jthread producer_;
+
+    static std::unique_ptr<Impl> Create(BamCollection collection, BamRecordReaderConfig config)
+    {
+        if (collection.Size() == 1) {
+            return std::make_unique<Impl>(collection.Files().front().Filename(), std::move(config));
+        }
+        return std::make_unique<Impl>(std::move(collection), std::move(config));
+    }
+
+    static const std::filesystem::path& SingleInputPath(
+        const std::vector<std::filesystem::path>& paths)
+    {
+        return paths.front();
+    }
+
+    static const std::filesystem::path& SingleInputPath(const std::vector<BamFile>& files)
+    {
+        return files.front().Filename();
+    }
+
+    template <typename Source>
+    static std::unique_ptr<Impl> CreateFromInputs(Source inputs, BamRecordReaderConfig config)
+    {
+        if (std::size(inputs) == 1) {
+            return std::make_unique<Impl>(SingleInputPath(inputs), std::move(config));
+        }
+        return Create(BamCollection{std::move(inputs)}, std::move(config));
+    }
+
+    static void RunProducerLoop(std::stop_token stopToken, Impl* self);
 
     Impl(const std::filesystem::path& path, BamRecordReaderConfig config)
         : source_{path}
@@ -119,8 +176,7 @@ struct BamRecordReader::Impl
 
     Impl(BamCollection collection, BamRecordReaderConfig config)
         : source_{std::move(collection)}
-        , viewReader_{CreateViewReaderForCollection(std::get<BamCollection>(source_),
-                                                    config.RawReaderConfig)}
+        , viewReader_{std::get<BamCollection>(source_), config.RawReaderConfig}
         , header_{viewReader_.Header()}
         , pool_{CreateDecodePool(config.DecodeWorkers)}
         , queue_{config.OutputCapacity}
@@ -132,40 +188,61 @@ struct BamRecordReader::Impl
         StartProducer();
     }
 
-    ~Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
 
+    bool QueueReady() { return queue_.front() || done_.load(std::memory_order_acquire); }
+
     void SignalConsumer()
     {
         // Pair the notify with a mutex acquisition so the consumer's wait/predicate
         // observes producer progress through the same synchronization point.
-        {
-            const std::lock_guard lock{readyMutex_};
-        }
+        std::unique_lock lock{readyMutex_};
+        lock.unlock();
         readyCv_.notify_one();
     }
 
-    void StartProducer()
+    void StartProducer() { producer_ = std::jthread{&Impl::RunProducerLoop, this}; }
+
+    void PushTerminalItem(std::exception_ptr error, std::stop_token stopToken)
     {
-        producer_ = std::jthread{[this](std::stop_token stopToken) { ProducerLoop(stopToken); }};
+        while (!queue_.try_push(QueueItem{std::unexpected{error}})) {
+            if (stopToken.stop_requested()) {
+                return;
+            }
+            std::this_thread::yield();
+        }
+        done_.store(true, std::memory_order_release);
+        SignalConsumer();
     }
 
     QueueItem* WaitForQueueFront()
     {
         QueueItem* item{queue_.front()};
-        if (item != nullptr) {
+        if (item) {
             return item;
         }
 
         counters_.consumerStalls.fetch_add(1, std::memory_order_relaxed);
         std::unique_lock lock{readyMutex_};
-        readyCv_.wait(lock, [this]() {
-            return queue_.front() != nullptr || done_.load(std::memory_order_acquire);
-        });
+        while (!QueueReady()) {
+            readyCv_.wait(lock);
+        }
         return queue_.front();
+    }
+
+    std::optional<QueueItem> PopFrontItem()
+    {
+        QueueItem* item{WaitForQueueFront()};
+        if (!item) {
+            return std::nullopt;
+        }
+
+        QueueItem queueItem{std::move(*item)};
+        queue_.pop();
+        return queueItem;
     }
 
     void ProducerLoop(std::stop_token stopToken)
@@ -189,13 +266,8 @@ struct BamRecordReader::Impl
                 std::vector<BamRecord> owned(n);
 
                 const auto decodeStart{std::chrono::steady_clock::now()};
-                PacBio::Parallel::Dispatch(
-                    pool_,
-                    [&](std::int32_t i) {
-                        const RawRecord view{batch->RecordData(i)};
-                        owned[i] = DecodeView(view, tagFilter_);
-                    },
-                    n);
+                const DecodeBatchWorker worker{std::addressof(*batch), &owned, &tagFilter_};
+                PacBio::Parallel::Dispatch(pool_, worker, n);
                 counters_.decodeNs.fetch_add(
                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                    std::chrono::steady_clock::now() - decodeStart)
@@ -223,26 +295,17 @@ struct BamRecordReader::Impl
                 }
             }
 
-            done_.store(true, std::memory_order_release);
-            while (!queue_.try_push(QueueItem{std::unexpected{std::exception_ptr{}}})) {
-                if (stopToken.stop_requested()) {
-                    return;
-                }
-                std::this_thread::yield();
-            }
-            SignalConsumer();
+            PushTerminalItem(std::exception_ptr{}, stopToken);
         } catch (...) {
-            done_.store(true, std::memory_order_release);
-            while (!queue_.try_push(QueueItem{std::unexpected{std::current_exception()}})) {
-                if (stopToken.stop_requested()) {
-                    return;
-                }
-                std::this_thread::yield();
-            }
-            SignalConsumer();
+            PushTerminalItem(std::current_exception(), stopToken);
         }
     }
 };
+
+void BamRecordReader::Impl::RunProducerLoop(std::stop_token stopToken, Impl* self)
+{
+    self->ProducerLoop(stopToken);
+}
 
 struct BamRecordReader::QueryRange::Impl
 {
@@ -320,31 +383,19 @@ BamRecordReader::BamRecordReader(const std::filesystem::path& path, BamRecordRea
 }
 
 BamRecordReader::BamRecordReader(BamCollection collection, BamRecordReaderConfig config)
+    : impl_{Impl::Create(std::move(collection), std::move(config))}
 {
-    if (collection.Size() == 1) {
-        impl_ = std::make_unique<Impl>(collection.Files().front().Filename(), std::move(config));
-        return;
-    }
-    impl_ = std::make_unique<Impl>(std::move(collection), std::move(config));
 }
 
 BamRecordReader::BamRecordReader(std::vector<std::filesystem::path> paths,
                                  BamRecordReaderConfig config)
+    : impl_{Impl::CreateFromInputs(std::move(paths), std::move(config))}
 {
-    if (std::size(paths) == 1) {
-        impl_ = std::make_unique<Impl>(paths.front(), std::move(config));
-        return;
-    }
-    impl_ = std::make_unique<Impl>(BamCollection{std::move(paths)}, std::move(config));
 }
 
 BamRecordReader::BamRecordReader(std::vector<BamFile> files, BamRecordReaderConfig config)
+    : impl_{Impl::CreateFromInputs(std::move(files), std::move(config))}
 {
-    if (std::size(files) == 1) {
-        impl_ = std::make_unique<Impl>(files.front().Filename(), std::move(config));
-        return;
-    }
-    impl_ = std::make_unique<Impl>(BamCollection{std::move(files)}, std::move(config));
 }
 
 BamRecordReader::~BamRecordReader() = default;
@@ -361,26 +412,23 @@ std::optional<BamRecord> BamRecordReader::ReadRecord()
         return std::nullopt;
     }
 
-    QueueItem* item{impl_->WaitForQueueFront()};
-    if (item == nullptr) {
+    std::optional<QueueItem> queueItem{impl_->PopFrontItem()};
+    if (!queueItem) {
         impl_->eof_ = true;
         return std::nullopt;
     }
 
-    if (!item->has_value()) {
-        const std::exception_ptr& ep{item->error()};
-        impl_->queue_.pop();
-        if (ep) {
+    QueueItem& item{*queueItem};
+    if (!item) {
+        if (const std::exception_ptr ep{item.error()}; ep) {
             std::rethrow_exception(ep);
         }
         impl_->eof_ = true;
         return std::nullopt;
     }
 
-    BamRecord record{std::move(item->value())};
-    impl_->queue_.pop();
     impl_->counters_.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
-    return record;
+    return BamRecord{std::move(*item)};
 }
 
 // --- RecordRange ---
@@ -400,10 +448,7 @@ BamRecordReader::RecordRange::Iterator::Iterator() = default;
 
 BamRecordReader::RecordRange::Iterator::Iterator(BamRecordReader* reader) : reader_{reader}
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
 }
 
 const BamRecord& BamRecordReader::RecordRange::Iterator::operator*() const { return *current_; }
@@ -412,10 +457,7 @@ const BamRecord* BamRecordReader::RecordRange::Iterator::operator->() const { re
 
 BamRecordReader::RecordRange::Iterator& BamRecordReader::RecordRange::Iterator::operator++()
 {
-    current_ = reader_->ReadRecord();
-    if (!current_) {
-        reader_ = nullptr;
-    }
+    detail::AdvanceReaderIterator(reader_, current_);
     return *this;
 }
 
@@ -449,13 +491,7 @@ BamRecordReader::QueryRange& BamRecordReader::QueryRange::operator=(QueryRange&&
 
 BamRecordReader::QueryRange::Iterator::Iterator() = default;
 
-BamRecordReader::QueryRange::Iterator::Iterator(QueryRange* range) : range_{range}
-{
-    current_ = range_->ReadRecord();
-    if (!current_) {
-        range_ = nullptr;
-    }
-}
+BamRecordReader::QueryRange::Iterator::Iterator(QueryRange* range) : range_{range} { Advance(); }
 
 const BamRecord& BamRecordReader::QueryRange::Iterator::operator*() const { return *current_; }
 
@@ -463,10 +499,7 @@ const BamRecord* BamRecordReader::QueryRange::Iterator::operator->() const { ret
 
 BamRecordReader::QueryRange::Iterator& BamRecordReader::QueryRange::Iterator::operator++()
 {
-    current_ = range_->ReadRecord();
-    if (!current_) {
-        range_ = nullptr;
-    }
+    Advance();
     return *this;
 }
 
@@ -475,6 +508,11 @@ void BamRecordReader::QueryRange::Iterator::operator++(int) { ++(*this); }
 bool BamRecordReader::QueryRange::Iterator::operator==(const Iterator& other) const
 {
     return range_ == other.range_;
+}
+
+void BamRecordReader::QueryRange::Iterator::Advance()
+{
+    detail::AdvanceReaderIterator(range_, current_, &BamRecordReader::QueryRange::ReadRecord);
 }
 
 BamRecordReader::QueryRange::Iterator BamRecordReader::QueryRange::begin()
@@ -513,11 +551,7 @@ BamRecordReader::QueryRange BamRecordReader::Query(std::string_view refName, std
 
 BamRecordReader::QueryRange BamRecordReader::Query(const GenomicInterval& interval)
 {
-    return std::visit(
-        [this, &interval](const auto& source) -> QueryRange {
-            return QueryRange{source, interval, impl_->tagFilter_};
-        },
-        impl_->source_);
+    return std::visit(QueryRangeVisitor{&impl_->tagFilter_, interval}, impl_->source_);
 }
 
 ReaderMetrics BamRecordReader::GetMetrics() const

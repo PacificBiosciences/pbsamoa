@@ -4,26 +4,34 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <string>
 #include <string_view>
 #include <system_error>
-
-#include <cctype>
-#include <cstdint>
+#include <utility>
 
 namespace PacBio {
 namespace Samoa {
 namespace tests {
+
+inline char SanitizePathChar(unsigned char c)
+{
+    if (std::isalnum(c) != 0) {
+        return static_cast<char>(c);
+    }
+    return '_';
+}
 
 inline std::string SanitizePathComponent(std::string_view input)
 {
     std::string result;
     result.reserve(input.size());
     for (const unsigned char c : input) {
-        result.push_back(std::isalnum(c) ? static_cast<char>(c) : '_');
+        result.push_back(SanitizePathChar(c));
     }
     if (result.empty()) {
         result = "unnamed";
@@ -34,10 +42,12 @@ inline std::string SanitizePathComponent(std::string_view input)
 inline std::filesystem::path MakeUniqueTempDirPath(std::string_view tag)
 {
     const auto* testInfo = ::testing::UnitTest::GetInstance()->current_test_info();
-    const std::string suiteName{
-        testInfo != nullptr ? SanitizePathComponent(testInfo->test_suite_name()) : "suite"};
-    const std::string testName{testInfo != nullptr ? SanitizePathComponent(testInfo->name())
-                                                   : "test"};
+    std::string suiteName{"suite"};
+    std::string testName{"test"};
+    if (testInfo) {
+        suiteName = SanitizePathComponent(testInfo->test_suite_name());
+        testName = SanitizePathComponent(testInfo->name());
+    }
 
     static std::atomic<std::uint64_t> counter{0};
     const std::uint64_t nonce{counter.fetch_add(1, std::memory_order_relaxed)};
@@ -61,17 +71,13 @@ public:
     TempDirGuard(const TempDirGuard&) = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
 
-    TempDirGuard(TempDirGuard&& other) noexcept : path_{std::move(other.path_)}
-    {
-        other.path_.clear();
-    }
+    TempDirGuard(TempDirGuard&& other) noexcept : path_{std::exchange(other.path_, {})} {}
 
     TempDirGuard& operator=(TempDirGuard&& other) noexcept
     {
         if (this != &other) {
             Cleanup();
-            path_ = std::move(other.path_);
-            other.path_.clear();
+            path_ = std::exchange(other.path_, {});
         }
         return *this;
     }
@@ -103,6 +109,28 @@ private:
         path_.clear();
     }
 
+    std::filesystem::path path_;
+};
+
+class TempFileGuard
+{
+public:
+    explicit TempFileGuard(std::filesystem::path path) : path_{std::move(path)} {}
+
+    TempFileGuard(const TempFileGuard&) = delete;
+    TempFileGuard& operator=(const TempFileGuard&) = delete;
+    TempFileGuard(TempFileGuard&&) = delete;
+    TempFileGuard& operator=(TempFileGuard&&) = delete;
+
+    const std::filesystem::path& Path() const { return path_; }
+
+    ~TempFileGuard()
+    {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+private:
     std::filesystem::path path_;
 };
 

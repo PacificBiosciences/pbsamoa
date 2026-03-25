@@ -29,7 +29,7 @@ TEST(BgzfReader, ReadFirstBlock)
     std::vector<std::byte> buffer{};
     buffer.resize(65536U);
     const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-    ASSERT_TRUE(bytesRead.has_value());
+    ASSERT_TRUE(bytesRead);
     EXPECT_GT(*bytesRead, 0U);
 }
 
@@ -45,7 +45,7 @@ TEST(BgzfReader, ReadAllBlocks)
 
     while (true) {
         const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
-        if ((!bytesRead.has_value()) || (*bytesRead == 0U)) {
+        if (!bytesRead || (*bytesRead == 0U)) {
             break;
         }
         totalDecompressed += *bytesRead;
@@ -71,14 +71,14 @@ TEST(BgzfReader, SeekToVirtualOffset)
     std::vector<std::byte> firstRead{};
     firstRead.resize(65536U);
     const std::optional<std::size_t> firstReadSize{reader.ReadBlock(firstRead)};
-    ASSERT_TRUE(firstReadSize.has_value());
+    ASSERT_TRUE(firstReadSize);
 
     reader.Seek(VirtualOffset{0U, 0U});
 
     std::vector<std::byte> secondRead{};
     secondRead.resize(65536U);
     const std::optional<std::size_t> secondReadSize{reader.ReadBlock(secondRead)};
-    ASSERT_TRUE(secondReadSize.has_value());
+    ASSERT_TRUE(secondReadSize);
     ASSERT_EQ(*firstReadSize, *secondReadSize);
 
     EXPECT_TRUE(std::ranges::equal(std::span<const std::byte>{firstRead}.first(*firstReadSize),

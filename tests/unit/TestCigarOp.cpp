@@ -52,8 +52,8 @@ TEST(CigarOp, AllOperationTypes)
 
 TEST(CigarOp, CharToCigarOpRejectsInvalid)
 {
-    EXPECT_FALSE(CharToCigarOp('Z').has_value());
-    EXPECT_FALSE(CharToCigarOp('0').has_value());
+    EXPECT_FALSE(CharToCigarOp('Z'));
+    EXPECT_FALSE(CharToCigarOp('0'));
 }
 
 TEST(CigarOp, Equality)
@@ -190,23 +190,23 @@ TEST(Reg2Bins, LargeRegionProducesManyBins)
 
 TEST(CigarParse, ZeroLengthOpReturnsError)
 {
-    EXPECT_FALSE(ParseCigar("0M").has_value());
-    EXPECT_FALSE(ParseCigar("0S2M").has_value());
-    EXPECT_FALSE(ParseCigar("3M0D2I").has_value());
+    EXPECT_FALSE(ParseCigar("0M"));
+    EXPECT_FALSE(ParseCigar("0S2M"));
+    EXPECT_FALSE(ParseCigar("3M0D2I"));
 }
 
 TEST(CigarParse, EmptyStringReturnsEmpty)
 {
     const auto cigar{ParseCigar("")};
-    ASSERT_TRUE(cigar.has_value());
+    ASSERT_TRUE(cigar);
     EXPECT_TRUE(std::empty(*cigar));
 }
 
-TEST(CigarParse, InvalidOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8Z").has_value()); }
+TEST(CigarParse, InvalidOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8Z")); }
 
-TEST(CigarParse, MissingOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8").has_value()); }
+TEST(CigarParse, MissingOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8")); }
 
-TEST(CigarParse, BadIntegerReturnsError) { EXPECT_FALSE(ParseCigar("M8").has_value()); }
+TEST(CigarParse, BadIntegerReturnsError) { EXPECT_FALSE(ParseCigar("M8")); }
 
 }  // namespace Samoa
 }  // namespace PacBio

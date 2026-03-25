@@ -36,22 +36,27 @@ std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> raw
     return combined;
 }
 
-PendingCallback BuildPendingCallback(std::vector<std::byte>&& rawData, const bool enabled)
+void EmitRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten,
+                   std::vector<std::byte> combined, PendingCallback callback)
 {
-    PendingCallback callback{};
-    if (!enabled) {
-        return callback;
-    }
-
-    callback.rawData = std::move(rawData);
-    callback.active = true;
-    return callback;
+    bgzf.Write(std::move(combined), std::move(callback));
+    recordsWritten.fetch_add(1, std::memory_order_relaxed);
 }
 
-PendingCallback BuildPendingCallback(std::span<const std::byte> rawData, const bool enabled)
+void WriteRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten,
+                    std::span<const std::byte> rawData, PendingCallback callback)
 {
-    return BuildPendingCallback(
-        std::vector<std::byte>{std::ranges::begin(rawData), std::ranges::end(rawData)}, enabled);
+    EmitRawRecord(bgzf, recordsWritten, BuildCombinedRecordPayload(rawData), std::move(callback));
+}
+
+void WriteRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten,
+                    std::vector<std::byte>&& rawData)
+{
+    PendingCallback callback{};
+    callback.rawData = std::move(rawData);
+    callback.active = true;
+    EmitRawRecord(bgzf, recordsWritten, BuildCombinedRecordPayload(callback.rawData),
+                  std::move(callback));
 }
 
 void WriteHeaderBlock(BgzfWriter& bgzf, const SamHeader& header)
@@ -65,8 +70,7 @@ void WriteHeaderBlock(BgzfWriter& bgzf, const SamHeader& header)
 struct BamWriter::Impl
 {
     BgzfWriter bgzf;
-    const BamWriterConfig config;
-    const bool callbacksEnabled;
+    bool callbacksEnabled{false};
     std::atomic<std::uint64_t> recordsWritten{0};
     bool closed{false};
 
@@ -78,14 +82,14 @@ struct BamWriter::Impl
     }
 
     Impl(const std::filesystem::path& path, const SamHeader& header, const BamWriterConfig& cfg)
-        : bgzf{path, MergeBgzfConfig(cfg)}, config{cfg}, callbacksEnabled{false}
+        : bgzf{path, MergeBgzfConfig(cfg)}, callbacksEnabled{false}
     {
         WriteHeaderBlock(bgzf, header);
     }
 
     Impl(const std::filesystem::path& path, const SamHeader& header, const BamWriterConfig& cfg,
          IndexCallback cb)
-        : bgzf{path, MergeBgzfConfig(cfg)}, config{cfg}, callbacksEnabled{true}
+        : bgzf{path, MergeBgzfConfig(cfg)}, callbacksEnabled{true}
     {
         bgzf.SetCallback(std::move(cb));
         WriteHeaderBlock(bgzf, header);
@@ -106,7 +110,7 @@ BamWriter::BamWriter(const std::filesystem::path& path, const SamHeader& header,
 
 BamWriter::~BamWriter()
 {
-    if ((impl_ != nullptr) && (!impl_->closed)) {
+    if (impl_ && !impl_->closed) {
         Close();
     }
 }
@@ -117,18 +121,24 @@ BamWriter& BamWriter::operator=(BamWriter&&) noexcept = default;
 void BamWriter::Write(const BamRecord& record)
 {
     std::vector<std::byte> serialized{record.SerializeToBam()};
-    std::vector<std::byte> combined{BuildCombinedRecordPayload(serialized)};
-    PendingCallback callback{BuildPendingCallback(std::move(serialized), impl_->callbacksEnabled)};
-    impl_->bgzf.Write(std::move(combined), std::move(callback));
-    impl_->recordsWritten.fetch_add(1, std::memory_order_relaxed);
+    if (impl_->callbacksEnabled) {
+        WriteRawRecord(impl_->bgzf, impl_->recordsWritten, std::move(serialized));
+        return;
+    }
+
+    WriteRawRecord(impl_->bgzf, impl_->recordsWritten, std::span<const std::byte>{serialized},
+                   PendingCallback{});
 }
 
 void BamWriter::Write(std::span<const std::byte> rawData)
 {
-    std::vector<std::byte> combined{BuildCombinedRecordPayload(rawData)};
-    PendingCallback callback{BuildPendingCallback(rawData, impl_->callbacksEnabled)};
-    impl_->bgzf.Write(std::move(combined), std::move(callback));
-    impl_->recordsWritten.fetch_add(1, std::memory_order_relaxed);
+    if (impl_->callbacksEnabled) {
+        std::vector<std::byte> rawBytes{std::ranges::begin(rawData), std::ranges::end(rawData)};
+        WriteRawRecord(impl_->bgzf, impl_->recordsWritten, std::move(rawBytes));
+        return;
+    }
+
+    WriteRawRecord(impl_->bgzf, impl_->recordsWritten, rawData, PendingCallback{});
 }
 
 void BamWriter::Write(const RawRecord& byteView) { Write(byteView.RawData()); }

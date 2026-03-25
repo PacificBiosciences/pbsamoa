@@ -1,6 +1,7 @@
 #include <pbsamoa/index/ZmwIndex.hpp>
 
 #include "BinaryUtils.hpp"
+#include "PathUtils.hpp"
 #include "ZmiInternal.hpp"
 
 #include <pbsamoa/core/Bgzf.hpp>
@@ -59,11 +60,6 @@ constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536};
 constexpr std::size_t PBI_HEADER_SIZE{32};
 constexpr std::array<char, 4> PBI_MAGIC{'P', 'B', 'I', '\1'};
 
-std::filesystem::path SidecarPath(const std::filesystem::path& bamPath, std::string_view suffix)
-{
-    return std::filesystem::path{bamPath.string() + std::string{suffix}};
-}
-
 std::size_t CheckedMul(std::size_t lhs, std::size_t rhs, std::string_view what)
 {
     if ((lhs != 0) && (rhs > (std::numeric_limits<std::size_t>::max() / lhs))) {
@@ -97,22 +93,24 @@ std::vector<std::byte> ReadAllBgzfData(BgzfReader& reader)
     return data;
 }
 
-void ReadInt32Column(std::vector<std::int32_t>& output, std::span<const std::byte> data,
-                     std::size_t offset, std::uint32_t count)
+template <typename T, typename Reader>
+void ReadColumn(std::vector<T>& output, std::span<const std::byte> data, std::size_t offset,
+                std::uint32_t count, Reader reader)
 {
     output.reserve(std::size(output) + count);
+    const std::byte* const columnData{std::data(data) + offset};
     for (std::uint32_t i{0}; i < count; ++i) {
-        output.push_back(ReadI32LE(std::data(data) + offset + (i * sizeof(std::int32_t))));
+        output.push_back(reader(columnData + (i * sizeof(T))));
     }
 }
 
-void ReadInt64Column(std::vector<std::int64_t>& output, std::span<const std::byte> data,
-                     std::size_t offset, std::uint32_t count)
+template <typename IndexMap, typename Key>
+const typename IndexMap::mapped_type* LookupIndices(const IndexMap& index, const Key& key)
 {
-    output.reserve(std::size(output) + count);
-    for (std::uint32_t i{0}; i < count; ++i) {
-        output.push_back(ReadI64LE(std::data(data) + offset + (i * sizeof(std::int64_t))));
+    if (const auto it{index.find(key)}; it != index.end()) {
+        return &it->second;
     }
+    return nullptr;
 }
 
 void AppendOffsets(std::vector<std::int64_t>& output, std::span<const std::ptrdiff_t> indices,
@@ -124,13 +122,42 @@ void AppendOffsets(std::vector<std::int64_t>& output, std::span<const std::ptrdi
     }
 }
 
-std::vector<std::int64_t> BuildOffsetResult(std::span<const std::ptrdiff_t> indices,
-                                            std::span<const std::int64_t> offsets)
+template <typename IndexMap, typename Key>
+void AppendLookupOffsets(std::vector<std::int64_t>& output, const IndexMap& index, const Key& key,
+                         std::span<const std::int64_t> offsets)
 {
-    std::vector<std::int64_t> result;
-    AppendOffsets(result, indices, offsets);
-    return result;
+    if (const auto* indices{LookupIndices(index, key)}; indices) {
+        AppendOffsets(output, *indices, offsets);
+    }
 }
+
+template <typename IndexMap, typename Key, typename Error>
+std::int64_t FirstOffsetOrThrow(const IndexMap& index, const Key& key,
+                                std::span<const std::int64_t> offsets, Error&& error)
+{
+    const auto* indices{LookupIndices(index, key)};
+    if (!indices) {
+        throw std::runtime_error{error()};
+    }
+    return offsets[indices->front()];
+}
+
+struct ZmwNotFoundError
+{
+    std::int32_t zmw;
+
+    std::string operator()() const { return std::format("ZMW not found: {}", zmw); }
+};
+
+struct ZmwIdentityNotFoundError
+{
+    ZmwIdentity id;
+
+    std::string operator()() const
+    {
+        return std::format("ZMW identity not found: rgId={} zmw={}", id.rgId, id.zmw);
+    }
+};
 
 }  // namespace
 
@@ -243,7 +270,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     std::size_t offset{PBI_HEADER_SIZE};
 
     // Column 1: rgId (numReads × int32)
-    ReadInt32Column(index.rgIds_, data, offset, numReads);
+    ReadColumn(index.rgIds_, data, offset, numReads, ReadI32LE);
     offset += int32ColBytes;
 
     // Column 2: qStart (skip)
@@ -253,7 +280,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     offset += int32ColBytes;
 
     // Column 4: holeNumber (numReads × int32)
-    ReadInt32Column(index.zmws_, data, offset, numReads);
+    ReadColumn(index.zmws_, data, offset, numReads, ReadI32LE);
     offset += int32ColBytes;
 
     // Column 5: readQual (skip)
@@ -263,7 +290,7 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     offset += uint8ColBytes;
 
     // Column 7: fileOffset (numReads × int64)
-    ReadInt64Column(index.offsets_, data, offset, numReads);
+    ReadColumn(index.offsets_, data, offset, numReads, ReadI64LE);
 
     return index;
 }
@@ -287,48 +314,43 @@ std::uint64_t ZmwIndex::IdentityKey(std::int32_t rgId, std::int32_t zmw)
            static_cast<std::uint64_t>(static_cast<std::uint32_t>(zmw));
 }
 
-void ZmwIndex::BuildIndex() const
+std::uint64_t ZmwIndex::IdentityKey(ZmwIdentity id) { return IdentityKey(id.rgId, id.zmw); }
+
+void ZmwIndex::BuildIndex() const { std::call_once(indexOnce_, &ZmwIndex::BuildIndexImpl, this); }
+
+void ZmwIndex::BuildIndexImpl() const
 {
-    std::call_once(indexOnce_, [this]() {
-        // Skip if already populated (e.g., moved from a built index)
-        if (!std::empty(zmwIndex_)) {
-            return;
-        }
-        const std::ptrdiff_t n{std::ssize(zmws_)};
-        zmwIndex_.reserve(std::size(zmws_));
-        identityIndex_.reserve(std::size(zmws_));
-        for (std::ptrdiff_t i{0}; i < n; ++i) {
-            zmwIndex_[zmws_[i]].push_back(i);
-            const std::uint64_t key{IdentityKey(rgIds_[i], zmws_[i])};
-            identityIndex_[key].push_back(i);
-        }
-        cachedNumZmws_ = std::size(identityIndex_);
-    });
+    // Skip if already populated (e.g., moved from a built index).
+    if (!std::empty(zmwIndex_)) {
+        return;
+    }
+    const std::ptrdiff_t n{std::ssize(zmws_)};
+    zmwIndex_.reserve(std::size(zmws_));
+    identityIndex_.reserve(std::size(zmws_));
+    for (std::ptrdiff_t i{0}; i < n; ++i) {
+        zmwIndex_[zmws_[i]].push_back(i);
+        const std::uint64_t key{IdentityKey(rgIds_[i], zmws_[i])};
+        identityIndex_[key].push_back(i);
+    }
+    cachedNumZmws_ = std::size(identityIndex_);
 }
 
 std::vector<std::int64_t> ZmwIndex::Find(std::int32_t zmw) const
 {
     BuildIndex();
 
-    const auto it{zmwIndex_.find(zmw)};
-    if (it == std::ranges::end(zmwIndex_)) {
-        return {};
-    }
-
-    return BuildOffsetResult(it->second, offsets_);
+    std::vector<std::int64_t> result;
+    AppendLookupOffsets(result, zmwIndex_, zmw, offsets_);
+    return result;
 }
 
 std::vector<std::int64_t> ZmwIndex::Find(ZmwIdentity id) const
 {
     BuildIndex();
 
-    const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
-    const auto it{identityIndex_.find(key)};
-    if (it == std::ranges::end(identityIndex_)) {
-        return {};
-    }
-
-    return BuildOffsetResult(it->second, offsets_);
+    std::vector<std::int64_t> result;
+    AppendLookupOffsets(result, identityIndex_, IdentityKey(id), offsets_);
+    return result;
 }
 
 std::vector<std::int64_t> ZmwIndex::Find(std::span<const ZmwIdentity> ids) const
@@ -338,11 +360,7 @@ std::vector<std::int64_t> ZmwIndex::Find(std::span<const ZmwIdentity> ids) const
     std::vector<std::int64_t> result;
     result.reserve(std::size(ids));
     for (const ZmwIdentity& id : ids) {
-        const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
-        const auto it{identityIndex_.find(key)};
-        if (it != std::ranges::end(identityIndex_)) {
-            AppendOffsets(result, it->second, offsets_);
-        }
+        AppendLookupOffsets(result, identityIndex_, IdentityKey(id), offsets_);
     }
     return result;
 }
@@ -356,7 +374,7 @@ std::vector<ZmwIdentity> ZmwIndex::UniqueZmws() const
     seen.reserve(std::size(zmws_));
     for (std::ptrdiff_t i{0}; i < std::ssize(zmws_); ++i) {
         const ZmwIdentity id{rgIds_[i], zmws_[i]};
-        const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
+        const std::uint64_t key{IdentityKey(id)};
         if (seen.insert(key).second) {
             result.push_back(id);
         }
@@ -369,25 +387,15 @@ std::int64_t ZmwIndex::FirstOffset(std::int32_t zmw) const
 {
     BuildIndex();
 
-    const auto it{zmwIndex_.find(zmw)};
-    if (it == std::ranges::end(zmwIndex_)) {
-        throw std::runtime_error{std::format("ZMW not found: {}", zmw)};
-    }
-    // First entry is the lowest file-order index (indices are inserted in order)
-    return offsets_[it->second.front()];
+    return FirstOffsetOrThrow(zmwIndex_, zmw, offsets_, ZmwNotFoundError{zmw});
 }
 
 std::int64_t ZmwIndex::FirstOffset(ZmwIdentity id) const
 {
     BuildIndex();
 
-    const std::uint64_t key{IdentityKey(id.rgId, id.zmw)};
-    const auto it{identityIndex_.find(key)};
-    if (it == std::ranges::end(identityIndex_)) {
-        throw std::runtime_error{
-            std::format("ZMW identity not found: rgId={} zmw={}", id.rgId, id.zmw)};
-    }
-    return offsets_[it->second.front()];
+    return FirstOffsetOrThrow(identityIndex_, IdentityKey(id), offsets_,
+                              ZmwIdentityNotFoundError{id});
 }
 
 std::uint64_t ZmwIndex::NumRecords() const { return std::size(offsets_); }

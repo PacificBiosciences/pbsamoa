@@ -1,13 +1,15 @@
 #include "ZmwUtils.hpp"
 
+#include <pbsamoa/core/Tags.hpp>
+
 #include <charconv>
+#include <cstddef>
 #include <system_error>
+#include <variant>
 
 namespace PacBio {
 namespace Samoa {
 namespace {
-
-std::string_view PrefixBeforeSlash(std::string_view text) { return text.substr(0, text.find('/')); }
 
 template <typename Integer>
 Integer ParseOrZero(std::string_view text, int base = 10)
@@ -21,6 +23,15 @@ Integer ParseOrZero(std::string_view text, int base = 10)
     return value;
 }
 
+std::int32_t ReadGroupIdFromTags(const TagMap& tags)
+{
+    const TagValue* rgValue{tags.Get(RG_TAG)};
+    if (const auto* rgText{std::get_if<std::string>(rgValue)}) {
+        return ParseReadGroupId(*rgText);
+    }
+    return 0;
+}
+
 }  // namespace
 
 std::int32_t ParseZmwFromName(std::string_view name)
@@ -29,7 +40,19 @@ std::int32_t ParseZmwFromName(std::string_view name)
     if (firstSlash == std::string_view::npos) {
         return 0;
     }
-    return ParseOrZero<std::int32_t>(PrefixBeforeSlash(name.substr(firstSlash + 1)));
+
+    const std::size_t secondSlash{name.find('/', firstSlash + 1)};
+    const std::size_t zmwStart{firstSlash + 1};
+    std::string_view zmwField{};
+    if (secondSlash == std::string_view::npos) {
+        zmwField = name.substr(zmwStart);
+    } else {
+        zmwField = name.substr(zmwStart, secondSlash - zmwStart);
+    }
+    if (zmwField.empty()) {
+        return 0;
+    }
+    return ParseOrZero<std::int32_t>(zmwField);
 }
 
 std::string_view MovieZmwPrefix(std::string_view name)
@@ -38,16 +61,17 @@ std::string_view MovieZmwPrefix(std::string_view name)
     if (firstSlash == std::string_view::npos) {
         return name;
     }
-    const std::string_view zmwField{PrefixBeforeSlash(name.substr(firstSlash + 1))};
-    if ((firstSlash + 1 + std::size(zmwField)) == std::size(name)) {
+
+    const std::size_t secondSlash{name.find('/', firstSlash + 1)};
+    if (secondSlash == std::string_view::npos) {
         return name;
     }
-    return name.substr(0, firstSlash + 1 + std::size(zmwField));
+    return name.substr(0, secondSlash);
 }
 
 std::string_view ReadGroupBaseId(std::string_view readGroupId)
 {
-    return PrefixBeforeSlash(readGroupId);
+    return readGroupId.substr(0, readGroupId.find('/'));
 }
 
 std::int32_t ParseReadGroupId(std::string_view readGroupId)
@@ -57,6 +81,11 @@ std::int32_t ParseReadGroupId(std::string_view readGroupId)
         return 0;
     }
     return static_cast<std::int32_t>(ParseOrZero<std::uint32_t>(baseId, 16));
+}
+
+ZmwIdentity ParseZmwIdentity(std::string_view name, const TagMap& tags)
+{
+    return ZmwIdentity{ReadGroupIdFromTags(tags), ParseZmwFromName(name)};
 }
 
 }  // namespace Samoa

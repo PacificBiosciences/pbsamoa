@@ -18,7 +18,7 @@ template <typename Reader>
 std::size_t ReadAllRecords(Reader& reader)
 {
     std::size_t count{0};
-    while (reader.ReadRecord().has_value()) {
+    while (reader.ReadRecord()) {
         ++count;
     }
     return count;
@@ -144,7 +144,7 @@ TEST(Metrics, LivePollingDuringRead)
     // Read a few records and check metrics mid-stream
     for (int i{0}; i < 10; ++i) {
         const auto rec{reader.ReadRecord()};
-        ASSERT_TRUE(rec.has_value());
+        ASSERT_TRUE(rec);
     }
 
     const ReaderMetrics mid{reader.GetMetrics()};
@@ -152,7 +152,7 @@ TEST(Metrics, LivePollingDuringRead)
     EXPECT_GE(mid.Decode.RecordsDecoded, 10U);
 
     // Finish reading
-    while (reader.ReadRecord().has_value()) {
+    while (reader.ReadRecord()) {
     }
 
     const ReaderMetrics finalMetrics{reader.GetMetrics()};

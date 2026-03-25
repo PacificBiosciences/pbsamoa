@@ -119,6 +119,86 @@ CramSliceOffsetInfo FirstDataSliceOffsetInfo(const std::filesystem::path& cramPa
     };
 }
 
+CramSlice MakeRawExternalSlice(const std::int32_t recordCounter, const std::int32_t contentId)
+{
+    CramSlice slice;
+    slice.Header.RefSeqId = -1;
+    slice.Header.AlignmentStart = 1;
+    slice.Header.AlignmentSpan = 0;
+    slice.Header.NumRecords = 1;
+    slice.Header.RecordCounter = recordCounter;
+    slice.Header.NumBlocks = 2;
+    slice.Header.BlockContentIds = {contentId};
+    slice.Header.EmbeddedRefBlockId = -1;
+
+    slice.CoreBlock.Method = CramBlockMethod::RAW;
+    slice.CoreBlock.ContentType = CramBlockContentType::CORE_DATA;
+    slice.CoreBlock.ContentId = 0;
+    slice.CoreBlock.RawSize = 0;
+    slice.CoreBlock.CompressedSize = 0;
+    slice.CoreBlock.Data = {};
+
+    CramBlock ext;
+    ext.Method = CramBlockMethod::RAW;
+    ext.ContentType = CramBlockContentType::EXTERNAL_DATA;
+    ext.ContentId = contentId;
+    ext.Data = {std::byte{0x01}, std::byte{0x02}};
+    ext.RawSize = 2;
+    ext.CompressedSize = 2;
+    slice.ExternalBlocks.push_back(std::move(ext));
+    return slice;
+}
+
+void AppendSerializedRecord(std::vector<std::byte>& buffer,
+                            std::vector<RawRecordBatch::RecordExtent>& extents,
+                            const BamRecord& record)
+{
+    const std::vector<std::byte> bytes = record.SerializeToBam();
+    const auto offset = static_cast<std::uint32_t>(std::size(buffer));
+    buffer.insert(std::end(buffer), std::begin(bytes), std::end(bytes));
+    extents.push_back(
+        RawRecordBatch::RecordExtent{offset, static_cast<std::uint32_t>(std::size(bytes))});
+}
+
+void ExpectDecodedIntTag(const BamRecord& record, const TagKey key, const std::int64_t expected)
+{
+    const auto* tag = record.Tags().Get(key);
+    ASSERT_TRUE(tag);
+    const auto* value = std::get_if<std::int64_t>(tag);
+    ASSERT_TRUE(value);
+    EXPECT_EQ(*value, expected);
+}
+
+std::vector<std::byte> EmptyCompressionResult(std::span<const std::byte> /*data*/) { return {}; }
+
+std::vector<std::byte> EmptyDecompressionResult(std::span<const std::byte> /*data*/,
+                                                std::size_t /*rawSize*/)
+{
+    return {};
+}
+
+std::vector<std::byte> XorCompress(std::span<const std::byte> data)
+{
+    std::vector<std::byte> result(data.begin(), data.end());
+    for (auto& byte : result) {
+        byte ^= std::byte{0xFF};
+    }
+    return result;
+}
+
+std::vector<std::byte> XorDecompress(std::span<const std::byte> data, std::size_t /*rawSize*/)
+{
+    return XorCompress(data);
+}
+
+void WriteSingleRecord(const std::filesystem::path& path, const SamHeader& header,
+                       const CramWriterConfig& config, const BamRecord& record)
+{
+    CramWriter writer{path, header, config};
+    writer.Write(record);
+    writer.Close();
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -631,35 +711,6 @@ TEST(CramContainer, SerializeAndParseRoundTrip)
     WriteItf8(extDesc.Parameters, 1);
     compressionHeader.DataSeriesEncodings.emplace_back(CramDataSeries::BF, extDesc);
 
-    auto makeSlice = [](std::int32_t recordCounter, std::int32_t contentId) {
-        CramSlice slice;
-        slice.Header.RefSeqId = -1;
-        slice.Header.AlignmentStart = 1;
-        slice.Header.AlignmentSpan = 0;
-        slice.Header.NumRecords = 1;
-        slice.Header.RecordCounter = recordCounter;
-        slice.Header.NumBlocks = 2;
-        slice.Header.BlockContentIds = {contentId};
-        slice.Header.EmbeddedRefBlockId = -1;
-
-        slice.CoreBlock.Method = CramBlockMethod::RAW;
-        slice.CoreBlock.ContentType = CramBlockContentType::CORE_DATA;
-        slice.CoreBlock.ContentId = 0;
-        slice.CoreBlock.RawSize = 0;
-        slice.CoreBlock.CompressedSize = 0;
-        slice.CoreBlock.Data = {};
-
-        CramBlock ext;
-        ext.Method = CramBlockMethod::RAW;
-        ext.ContentType = CramBlockContentType::EXTERNAL_DATA;
-        ext.ContentId = contentId;
-        ext.Data = {std::byte{0x01}, std::byte{0x02}};
-        ext.RawSize = 2;
-        ext.CompressedSize = 2;
-        slice.ExternalBlocks.push_back(std::move(ext));
-        return slice;
-    };
-
     CramContainer container;
     container.Header.RefSeqId = -1;
     container.Header.StartPos = 1;
@@ -668,7 +719,7 @@ TEST(CramContainer, SerializeAndParseRoundTrip)
     container.Header.RecordCounter = 0;
     container.Header.Bases = 0;
     container.CompressionHeader = std::move(compressionHeader);
-    container.Slices = {makeSlice(0, 1), makeSlice(1, 2)};
+    container.Slices = {MakeRawExternalSlice(0, 1), MakeRawExternalSlice(1, 2)};
 
     const auto serialized = SerializeContainer(container);
     ASSERT_FALSE(std::empty(serialized));
@@ -1056,13 +1107,13 @@ TEST(CramCodec, CreateCodecFromDescriptor)
     WriteItf8(desc.Parameters, 5);
 
     auto codec = CreateCodec(desc);
-    ASSERT_NE(codec, nullptr);
+    ASSERT_TRUE(codec);
 
     // Null codec
     CramEncodingDescriptor nullDesc;
     nullDesc.CodecId = CramCodecId::NONE;
     auto nullCodec = CreateCodec(nullDesc);
-    ASSERT_NE(nullCodec, nullptr);
+    ASSERT_TRUE(nullCodec);
 }
 
 // ===========================================================================
@@ -1123,16 +1174,10 @@ TEST(CramCompression, RegistryHasBuiltins)
 TEST(CramCompression, CannotOverrideBuiltins)
 {
     auto& registry = CompressionRegistry::Instance();
-    EXPECT_THROW(
-        registry.Register(
-            0, [](std::span<const std::byte>) -> std::vector<std::byte> { return {}; },
-            [](std::span<const std::byte>, std::size_t) -> std::vector<std::byte> { return {}; }),
-        std::runtime_error);
-    EXPECT_THROW(
-        registry.Register(
-            8, [](std::span<const std::byte>) -> std::vector<std::byte> { return {}; },
-            [](std::span<const std::byte>, std::size_t) -> std::vector<std::byte> { return {}; }),
-        std::runtime_error);
+    EXPECT_THROW(registry.Register(0, EmptyCompressionResult, EmptyDecompressionResult),
+                 std::runtime_error);
+    EXPECT_THROW(registry.Register(8, EmptyCompressionResult, EmptyDecompressionResult),
+                 std::runtime_error);
 }
 
 TEST(CramCompression, CustomRegistration)
@@ -1140,22 +1185,7 @@ TEST(CramCompression, CustomRegistration)
     auto& registry = CompressionRegistry::Instance();
 
     // Register a custom "XOR" compression as method 200
-    registry.Register(
-        200,
-        [](std::span<const std::byte> data) -> std::vector<std::byte> {
-            std::vector<std::byte> result(data.begin(), data.end());
-            for (auto& b : result) {
-                b = b ^ std::byte{0xFF};
-            }
-            return result;
-        },
-        [](std::span<const std::byte> data, std::size_t /*rawSize*/) -> std::vector<std::byte> {
-            std::vector<std::byte> result(data.begin(), data.end());
-            for (auto& b : result) {
-                b = b ^ std::byte{0xFF};
-            }
-            return result;
-        });
+    registry.Register(200, XorCompress, XorDecompress);
 
     EXPECT_TRUE(registry.HasMethod(200));
 
@@ -1416,7 +1446,7 @@ TEST(CramWriterConfig, NewFieldsHaveCorrectDefaults)
 {
     CramWriterConfig config;
     EXPECT_EQ(config.SlicesPerContainer, 1);
-    EXPECT_FALSE(config.CompressionLevel.has_value());
+    EXPECT_FALSE(config.CompressionLevel);
     EXPECT_FALSE(config.UseTempFile);
 }
 
@@ -1431,7 +1461,7 @@ TEST_F(CramWriterReaderTest, WriteHeaderOnly)
     CramReader reader{tmpPath};
     EXPECT_EQ(reader.Header().Version(), "1.6");
     EXPECT_EQ(std::size(reader.Header().ReferenceSequences()), 1u);
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST_F(CramWriterReaderTest, WriteAndReadUnmappedRecords)
@@ -1473,7 +1503,7 @@ TEST_F(CramWriterReaderTest, ReadRawRecordRoundTrip)
 
     CramReader reader{tmpPath};
     const auto raw = reader.ReadRawRecord();
-    ASSERT_TRUE(raw.has_value());
+    ASSERT_TRUE(raw);
     EXPECT_EQ(raw->Name(), "raw_decode");
     EXPECT_EQ(raw->RefId(), 0);
     EXPECT_EQ(raw->Pos(), 100);
@@ -1481,13 +1511,13 @@ TEST_F(CramWriterReaderTest, ReadRawRecordRoundTrip)
     EXPECT_EQ(raw->Seq().ToString(), "ACGTA");
 
     const TagMap tags = raw->ParseTags();
-    const TagValue* nm = tags.Get(TagKey{'N', 'M'});
-    ASSERT_NE(nm, nullptr);
+    const auto* nm = tags.Get(TagKey{'N', 'M'});
+    ASSERT_TRUE(nm);
     const auto* nmValue = std::get_if<std::int64_t>(nm);
-    ASSERT_NE(nmValue, nullptr);
+    ASSERT_TRUE(nmValue);
     EXPECT_EQ(*nmValue, 2);
 
-    EXPECT_FALSE(reader.ReadRawRecord().has_value());
+    EXPECT_FALSE(reader.ReadRawRecord());
 }
 
 TEST_F(CramWriterReaderTest, RawRecordsRangeRoundTrip)
@@ -1533,17 +1563,17 @@ TEST_F(CramWriterReaderTest, WriteRawRecordRoundTrip)
 
     CramReader reader{tmpPath};
     const auto decoded = reader.ReadRecord();
-    ASSERT_TRUE(decoded.has_value());
+    ASSERT_TRUE(decoded);
     EXPECT_EQ(decoded->Name(), "raw_mapped");
     EXPECT_EQ(decoded->RefId(), 0);
     EXPECT_EQ(decoded->Pos(), 100);
     EXPECT_EQ(decoded->MapQ(), 30u);
     EXPECT_EQ(decoded->Sequence(), "ACGTA");
 
-    const TagValue* nm = decoded->Tags().Get(TagKey{'N', 'M'});
-    ASSERT_NE(nm, nullptr);
+    const auto* nm = decoded->Tags().Get(TagKey{'N', 'M'});
+    ASSERT_TRUE(nm);
     const auto* nmValue = std::get_if<std::int64_t>(nm);
-    ASSERT_NE(nmValue, nullptr);
+    ASSERT_TRUE(nmValue);
     EXPECT_EQ(*nmValue, 1);
 }
 
@@ -1588,15 +1618,8 @@ TEST_F(CramWriterReaderTest, WriteRawRecordBatchRoundTrip)
 
     std::vector<std::byte> buffer;
     std::vector<RawRecordBatch::RecordExtent> extents;
-    const auto appendRecord = [&](const BamRecord& record) {
-        const std::vector<std::byte> bytes = record.SerializeToBam();
-        const auto offset = static_cast<std::uint32_t>(std::size(buffer));
-        buffer.insert(std::end(buffer), std::begin(bytes), std::end(bytes));
-        extents.push_back(
-            RawRecordBatch::RecordExtent{offset, static_cast<std::uint32_t>(std::size(bytes))});
-    };
-    appendRecord(first);
-    appendRecord(second);
+    AppendSerializedRecord(buffer, extents, first);
+    AppendSerializedRecord(buffer, extents, second);
 
     const RawRecordBatch batch{std::move(buffer), std::move(extents)};
 
@@ -1608,18 +1631,18 @@ TEST_F(CramWriterReaderTest, WriteRawRecordBatchRoundTrip)
     CramReader reader{tmpPath};
     const auto d1 = reader.ReadRecord();
     const auto d2 = reader.ReadRecord();
-    ASSERT_TRUE(d1.has_value());
-    ASSERT_TRUE(d2.has_value());
+    ASSERT_TRUE(d1);
+    ASSERT_TRUE(d2);
     EXPECT_EQ(d1->Name(), "batch_read_1");
     EXPECT_EQ(d1->Sequence(), "ACGT");
     EXPECT_EQ(d2->Name(), "batch_read_2");
     EXPECT_EQ(d2->Pos(), 150);
     EXPECT_EQ(d2->Sequence(), "TGCA");
 
-    const TagValue* xy = d2->Tags().Get(TagKey{'X', 'Y'});
-    ASSERT_NE(xy, nullptr);
+    const auto* xy = d2->Tags().Get(TagKey{'X', 'Y'});
+    ASSERT_TRUE(xy);
     const auto* xyValue = std::get_if<std::string>(xy);
-    ASSERT_NE(xyValue, nullptr);
+    ASSERT_TRUE(xyValue);
     EXPECT_EQ(*xyValue, "value");
 }
 
@@ -1633,7 +1656,7 @@ TEST_F(CramWriterReaderTest, WriteMappedRecordRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "mapped1");
     EXPECT_EQ(record->Flag(), 0u);
     EXPECT_EQ(record->RefId(), 0);
@@ -1673,7 +1696,7 @@ TEST_F(CramWriterReaderTest, CigarRoundTripWithFeatures)
 
     CramReader reader{tmpPath};
     const auto decoded = reader.ReadRecord();
-    ASSERT_TRUE(decoded.has_value());
+    ASSERT_TRUE(decoded);
 
     const auto cigar = decoded->Cigar();
     ASSERT_EQ(std::size(cigar), 7u);
@@ -1728,19 +1751,19 @@ TEST_F(CramWriterReaderTest, ReadGroupRoundTrip)
 
     CramReader reader{tmpPath};
     const auto d1 = reader.ReadRecord();
-    ASSERT_TRUE(d1.has_value());
-    const TagValue* rg1 = d1->Tags().Get(TagKey{'R', 'G'});
-    ASSERT_NE(rg1, nullptr);
+    ASSERT_TRUE(d1);
+    const auto* rg1 = d1->Tags().Get(TagKey{'R', 'G'});
+    ASSERT_TRUE(rg1);
     const auto* rgText1 = std::get_if<std::string>(rg1);
-    ASSERT_NE(rgText1, nullptr);
+    ASSERT_TRUE(rgText1);
     EXPECT_EQ(*rgText1, "rg1");
 
     const auto d2 = reader.ReadRecord();
-    ASSERT_TRUE(d2.has_value());
-    const TagValue* rg2 = d2->Tags().Get(TagKey{'R', 'G'});
-    ASSERT_NE(rg2, nullptr);
+    ASSERT_TRUE(d2);
+    const auto* rg2 = d2->Tags().Get(TagKey{'R', 'G'});
+    ASSERT_TRUE(rg2);
     const auto* rgText2 = std::get_if<std::string>(rg2);
-    ASSERT_NE(rgText2, nullptr);
+    ASSERT_TRUE(rgText2);
     EXPECT_EQ(*rgText2, "rg2");
 }
 
@@ -1784,51 +1807,43 @@ TEST_F(CramWriterReaderTest, TagRoundTrip)
 
     CramReader reader{tmpPath};
     const auto decoded = reader.ReadRecord();
-    ASSERT_TRUE(decoded.has_value());
+    ASSERT_TRUE(decoded);
 
-    const auto expectIntTag = [&](TagKey key, std::int64_t expected) {
-        const TagValue* tag = decoded->Tags().Get(key);
-        ASSERT_NE(tag, nullptr);
-        const auto* value = std::get_if<std::int64_t>(tag);
-        ASSERT_NE(value, nullptr);
-        EXPECT_EQ(*value, expected);
-    };
-
-    const TagValue* ta = decoded->Tags().Get(TagKey{'T', 'A'});
-    ASSERT_NE(ta, nullptr);
+    const auto* ta = decoded->Tags().Get(TagKey{'T', 'A'});
+    ASSERT_TRUE(ta);
     const auto* taChar = std::get_if<char>(ta);
-    ASSERT_NE(taChar, nullptr);
+    ASSERT_TRUE(taChar);
     EXPECT_EQ(*taChar, 'Q');
 
-    expectIntTag(TagKey{'T', 'c'}, -128);
-    expectIntTag(TagKey{'T', 'C'}, 255);
-    expectIntTag(TagKey{'T', 's'}, -32768);
-    expectIntTag(TagKey{'T', 'S'}, 65535);
-    expectIntTag(TagKey{'T', 'i'}, -2147483648LL);
-    expectIntTag(TagKey{'T', 'I'}, 4000000000LL);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 'c'}, -128);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 'C'}, 255);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 's'}, -32768);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 'S'}, 65535);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 'i'}, -2147483648LL);
+    ExpectDecodedIntTag(*decoded, TagKey{'T', 'I'}, 4000000000LL);
 
-    const TagValue* tf = decoded->Tags().Get(TagKey{'T', 'f'});
-    ASSERT_NE(tf, nullptr);
+    const auto* tf = decoded->Tags().Get(TagKey{'T', 'f'});
+    ASSERT_TRUE(tf);
     const auto* tfFloat = std::get_if<float>(tf);
-    ASSERT_NE(tfFloat, nullptr);
+    ASSERT_TRUE(tfFloat);
     EXPECT_FLOAT_EQ(*tfFloat, 3.5F);
 
-    const TagValue* tz = decoded->Tags().Get(TagKey{'T', 'Z'});
-    ASSERT_NE(tz, nullptr);
+    const auto* tz = decoded->Tags().Get(TagKey{'T', 'Z'});
+    ASSERT_TRUE(tz);
     const auto* tzText = std::get_if<std::string>(tz);
-    ASSERT_NE(tzText, nullptr);
+    ASSERT_TRUE(tzText);
     EXPECT_EQ(*tzText, "text");
 
-    const TagValue* th = decoded->Tags().Get(TagKey{'T', 'H'});
-    ASSERT_NE(th, nullptr);
+    const auto* th = decoded->Tags().Get(TagKey{'T', 'H'});
+    ASSERT_TRUE(th);
     const auto* thHex = std::get_if<HexString>(th);
-    ASSERT_NE(thHex, nullptr);
+    ASSERT_TRUE(thHex);
     EXPECT_EQ(thHex->value, "0A0B");
 
-    const TagValue* tb = decoded->Tags().Get(TagKey{'T', 'B'});
-    ASSERT_NE(tb, nullptr);
+    const auto* tb = decoded->Tags().Get(TagKey{'T', 'B'});
+    ASSERT_TRUE(tb);
     const auto* tbArray = std::get_if<TagArray>(tb);
-    ASSERT_NE(tbArray, nullptr);
+    ASSERT_TRUE(tbArray);
     EXPECT_EQ(tbArray->ElementType(), 'C');
     EXPECT_EQ(tbArray->Count(), 3u);
     const auto data = tbArray->Data();
@@ -2073,7 +2088,7 @@ TEST_F(CramWriterReaderTest, CompressionLevelRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "level_test");
     EXPECT_EQ(record->Sequence(), "ACGTACGTACGT");
 }
@@ -2096,7 +2111,7 @@ TEST_F(CramWriterReaderTest, UseTempFileAtomicWrite)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "atomic");
 }
 
@@ -2112,7 +2127,7 @@ TEST_F(CramWriterReaderTest, GzipCompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "read1");
     EXPECT_EQ(record->Sequence(), "ACGTACGTACGT");
 }
@@ -2129,7 +2144,7 @@ TEST_F(CramWriterReaderTest, RawCompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "rawread");
     EXPECT_EQ(record->Sequence(), "AAAA");
 }
@@ -2140,12 +2155,9 @@ TEST_F(CramWriterReaderTest, UnknownCompressionMethodThrows)
     CramWriterConfig config;
     config.BlockCompressionMethod = static_cast<CramBlockMethod>(201);
 
-    EXPECT_THROW(([&]() {
-                     CramWriter writer{tmpPath, header, config};
-                     writer.Write(MakeMappedRecord("codec_record", "ACGTACGT"));
-                     writer.Close();
-                 }()),
-                 std::runtime_error);
+    EXPECT_THROW(
+        WriteSingleRecord(tmpPath, header, config, MakeMappedRecord("codec_record", "ACGTACGT")),
+        std::runtime_error);
 }
 
 TEST_F(CramWriterReaderTest, Rans4x8CompressionRoundTrip)
@@ -2160,7 +2172,7 @@ TEST_F(CramWriterReaderTest, Rans4x8CompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "r8");
     EXPECT_EQ(record->Sequence(), "ACGTACGT");
 }
@@ -2177,7 +2189,7 @@ TEST_F(CramWriterReaderTest, Rans4x16CompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "r16");
     EXPECT_EQ(record->Sequence(), "TGCATGCA");
 }
@@ -2194,7 +2206,7 @@ TEST_F(CramWriterReaderTest, AdaptiveArithCompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "arith");
     EXPECT_EQ(record->Sequence(), "GATTACA");
 }
@@ -2213,7 +2225,7 @@ TEST_F(CramWriterReaderTest, FqzcompCompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "fqz");
     EXPECT_EQ(record->Sequence(), "ACGTACGT");
     ASSERT_EQ(record->Qualities().size(), 8u);
@@ -2296,8 +2308,8 @@ TEST_F(CramWriterReaderTest, NameTokeniserCompressionRoundTrip)
     CramReader reader{tmpPath};
     const auto r1 = reader.ReadRecord();
     const auto r2 = reader.ReadRecord();
-    ASSERT_TRUE(r1.has_value());
-    ASSERT_TRUE(r2.has_value());
+    ASSERT_TRUE(r1);
+    ASSERT_TRUE(r2);
     EXPECT_EQ(r1->Name(), "movie/1/ccs");
     EXPECT_EQ(r2->Name(), "movie/2/ccs");
 }
@@ -2325,8 +2337,8 @@ TEST_F(CramWriterReaderTest, PerDataSeriesCompressionOverridesRoundTrip)
     CramReader reader{tmpPath};
     const auto rec1 = reader.ReadRecord();
     const auto rec2 = reader.ReadRecord();
-    ASSERT_TRUE(rec1.has_value());
-    ASSERT_TRUE(rec2.has_value());
+    ASSERT_TRUE(rec1);
+    ASSERT_TRUE(rec2);
     EXPECT_EQ(rec1->Name(), "movie/100/ccs");
     EXPECT_EQ(rec2->Name(), "movie/101/ccs");
     ASSERT_EQ(rec1->Qualities().size(), 8u);
@@ -2342,12 +2354,9 @@ TEST_F(CramWriterReaderTest, InvalidPerDataSeriesCompressionOverrideThrows)
     config.BlockCompressionMethod = CramBlockMethod::GZIP;
     config.DataSeriesCompressionMethods[CramDataSeries::BA] = CramBlockMethod::FQZCOMP;
 
-    EXPECT_THROW(([&]() {
-                     CramWriter writer{tmpPath, header, config};
-                     writer.Write(MakeUnmappedRecord("invalid_override", "ACGT"));
-                     writer.Close();
-                 }()),
-                 std::runtime_error);
+    EXPECT_THROW(
+        WriteSingleRecord(tmpPath, header, config, MakeUnmappedRecord("invalid_override", "ACGT")),
+        std::runtime_error);
 }
 
 TEST_F(CramWriterReaderTest, VersionUpgradesTo31ForV31Codecs)
@@ -2431,7 +2440,7 @@ TEST_F(CramWriterReaderTest, Bzip2CompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "bzread");
     EXPECT_EQ(record->Sequence(), "ACGTACGT");
 }
@@ -2450,7 +2459,7 @@ TEST_F(CramWriterReaderTest, LzmaCompressionRoundTrip)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "lzread");
     EXPECT_EQ(record->Sequence(), "TGCATGCA");
 }
@@ -2468,7 +2477,7 @@ TEST_F(CramWriterReaderTest, QualityScoresPreserved)
 
     CramReader reader{tmpPath};
     const auto record = reader.ReadRecord();
-    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record);
     const auto& quals = record->Qualities();
     ASSERT_EQ(std::size(quals), 4u);
     EXPECT_EQ(quals[0], 10u);
@@ -2491,7 +2500,7 @@ TEST_F(CramWriterReaderTest, EmptyFileAfterHeader)
     }
 
     CramReader reader{tmpPath};
-    EXPECT_FALSE(reader.ReadRecord().has_value());
+    EXPECT_FALSE(reader.ReadRecord());
 }
 
 TEST_F(CramWriterReaderTest, TruncatedContainerThrows)
