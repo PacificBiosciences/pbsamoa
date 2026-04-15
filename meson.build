@@ -10,7 +10,7 @@ project(
     ],
     license: 'BSD-3',
     meson_version: '>= 1.1.0',
-    version: '0.1.0',
+    version: '26.2.0',
 )
 
 ############
