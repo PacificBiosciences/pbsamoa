@@ -116,16 +116,15 @@ std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
     // Process complete 64-byte blocks.
     const std::span<const std::uint8_t> bytes{reinterpret_cast<const std::uint8_t*>(data.data()),
                                               std::size(data)};
-    std::size_t offset{0};
-    while ((offset + 64) <= std::size(bytes)) {
+    const std::size_t remaining{std::size(bytes) % 64};
+    const std::size_t fullBytes{std::size(bytes) - remaining};
+    for (std::size_t offset{0}; offset < fullBytes; offset += 64) {
         Md5Transform(state, bytes.subspan(offset).first<64>());
-        offset += 64;
     }
 
     // Pad: remaining bytes + 0x80 + zeros + 8-byte length.
     std::array<std::uint8_t, 128> buffer{};
-    const std::size_t remaining{std::size(bytes) - offset};
-    std::copy_n(std::data(bytes) + offset, remaining, std::data(buffer));
+    std::copy_n(std::data(bytes) + fullBytes, remaining, std::data(buffer));
     buffer[remaining] = 0x80;
 
     std::size_t padded{64U};

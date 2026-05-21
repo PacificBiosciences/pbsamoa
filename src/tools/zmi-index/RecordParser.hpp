@@ -217,7 +217,7 @@ private:
 
     [[nodiscard]] std::size_t BufferAvailable() const noexcept
     {
-        return std::size(buf_) - static_cast<std::size_t>(cursor_ - windowStart_);
+        return std::size(buf_) - (cursor_ - windowStart_);
     }
 
     [[nodiscard]] const std::byte* CursorPtr() const noexcept
@@ -229,7 +229,7 @@ private:
 
     void Compact()
     {
-        const std::size_t consumed{static_cast<std::size_t>(cursor_ - windowStart_)};
+        const std::size_t consumed{cursor_ - windowStart_};
         if (consumed == 0U) {
             return;
         }
