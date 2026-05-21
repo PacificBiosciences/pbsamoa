@@ -398,7 +398,7 @@ struct BgzfReader::Impl
     std::unique_ptr<BgzfPipelineState> pipeline{};
 
     // Records returned to caller (sync modes only; pipeline tracks internally)
-    std::uint64_t recordsConsumed{0};
+    std::atomic<std::uint64_t> recordsConsumed{0};
 
     explicit Impl(const std::filesystem::path& path);
     Impl(const std::filesystem::path& path, std::size_t numWorkers);
@@ -2034,7 +2034,7 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
 
     auto rec{ReadRecordSync()};
     if (rec) {
-        ++recordsConsumed;
+        recordsConsumed.fetch_add(1, std::memory_order_relaxed);
     }
     return rec;
 }
@@ -2046,7 +2046,7 @@ BgzfMetrics BgzfReader::Impl::GetMetrics() const
     }
 
     BgzfMetrics m{};
-    m.RecordsConsumed = recordsConsumed;
+    m.RecordsConsumed = recordsConsumed.load(std::memory_order_relaxed);
     return m;
 }
 
