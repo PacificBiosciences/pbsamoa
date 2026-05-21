@@ -2,6 +2,7 @@
 
 #include "Md5.hpp"
 
+#include <algorithm>
 #include <array>
 #include <span>
 #include <string>
@@ -51,9 +52,9 @@ constexpr std::uint32_t LeftRotate(std::uint32_t x, std::uint32_t c)
 
 void Md5Transform(std::array<std::uint32_t, 4>& state, std::span<const std::uint8_t, 64> block)
 {
-    std::array<std::uint32_t, 16> M{};
+    std::array<std::uint32_t, 16> message{};
     for (std::size_t i{0}; i < 16; ++i) {
-        std::memcpy(&M[i], std::data(block) + i * 4, 4);
+        std::memcpy(&message[i], std::data(block) + i * 4, 4);
     }
 
     std::uint32_t a{state[0]};
@@ -77,7 +78,7 @@ void Md5Transform(std::array<std::uint32_t, 4>& state, std::span<const std::uint
             f = c ^ (b | ~d);
             g = (7 * i) % 16;
         }
-        f = f + a + K[i] + M[g];
+        f = f + a + K[i] + message[g];
         a = d;
         d = c;
         c = b;
@@ -110,7 +111,7 @@ std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
 {
     std::array<std::uint32_t, 4> state{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
 
-    const std::uint64_t bitLen{static_cast<std::uint64_t>(std::size(data)) * 8};
+    const std::uint64_t bitLen{std::uint64_t{std::size(data)} * 8};
 
     // Process complete 64-byte blocks.
     const std::span<const std::uint8_t> bytes{reinterpret_cast<const std::uint8_t*>(data.data()),
@@ -124,7 +125,7 @@ std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
     // Pad: remaining bytes + 0x80 + zeros + 8-byte length.
     std::array<std::uint8_t, 128> buffer{};
     const std::size_t remaining{std::size(bytes) - offset};
-    std::memcpy(std::data(buffer), std::data(bytes) + offset, remaining);
+    std::copy_n(std::data(bytes) + offset, remaining, std::data(buffer));
     buffer[remaining] = 0x80;
 
     std::size_t padded{64U};

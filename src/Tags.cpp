@@ -1,7 +1,8 @@
 #include <pbsamoa/core/Tags.hpp>
 
-#include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
+
+#include <pbsamoa/core/Endian.hpp>
 
 #include <algorithm>
 #include <array>
@@ -87,22 +88,22 @@ void AppendIntegerTagValue(std::vector<std::byte>& result, char bamType, std::in
             result.push_back(static_cast<std::byte>(value));
             break;
         case 's': {
-            const std::int16_t narrowed = value;
+            const auto narrowed = static_cast<std::int16_t>(value);
             AppendI16LE(result, narrowed);
             break;
         }
         case 'S': {
-            const std::uint16_t narrowed = value;
+            const auto narrowed = static_cast<std::uint16_t>(value);
             AppendU16LE(result, narrowed);
             break;
         }
         case 'i': {
-            const std::int32_t narrowed = value;
+            const auto narrowed = static_cast<std::int32_t>(value);
             AppendI32LE(result, narrowed);
             break;
         }
         case 'I': {
-            const std::uint32_t narrowed = value;
+            const auto narrowed = static_cast<std::uint32_t>(value);
             AppendU32LE(result, narrowed);
             break;
         }
@@ -121,32 +122,32 @@ void AppendIntegerTagValue(std::byte*& dest, char bamType, std::int64_t value)
 {
     switch (bamType) {
         case 'c': {
-            const std::int8_t narrowed = value;
+            const auto narrowed = static_cast<std::int8_t>(value);
             AppendRawByte(dest, static_cast<std::byte>(narrowed));
             break;
         }
         case 'C': {
-            const std::uint8_t narrowed = value;
+            const auto narrowed = static_cast<std::uint8_t>(value);
             AppendRawByte(dest, static_cast<std::byte>(narrowed));
             break;
         }
         case 's': {
-            const std::int16_t narrowed = value;
+            const auto narrowed = static_cast<std::int16_t>(value);
             WriteI16Raw(dest, narrowed);
             break;
         }
         case 'S': {
-            const std::uint16_t narrowed = value;
+            const auto narrowed = static_cast<std::uint16_t>(value);
             WriteU16Raw(dest, narrowed);
             break;
         }
         case 'i': {
-            const std::int32_t narrowed = value;
+            const auto narrowed = static_cast<std::int32_t>(value);
             WriteI32Raw(dest, narrowed);
             break;
         }
         case 'I': {
-            const std::uint32_t narrowed = value;
+            const auto narrowed = static_cast<std::uint32_t>(value);
             WriteU32Raw(dest, narrowed);
             break;
         }
@@ -581,13 +582,14 @@ void TagMap::Append(TagKey key, TagValue value) { entries_.emplace_back(key, std
 
 SortedTagKeySet::SortedTagKeySet(std::initializer_list<TagKey> keys) : keys_{keys}
 {
-    std::ranges::sort(keys_, {}, &TagKey::Value);
+    std::ranges::sort(keys_, {}, [](TagKey k) { return k.Value(); });
 }
 
 bool SortedTagKeySet::Contains(TagKey key) const
 {
     const std::uint16_t keyValue{key.Value()};
-    const auto it = std::ranges::lower_bound(keys_, keyValue, {}, &TagKey::Value);
+    const auto it =
+        std::ranges::lower_bound(keys_, keyValue, {}, [](TagKey k) { return k.Value(); });
     return (it != std::ranges::end(keys_)) && (it->Value() == keyValue);
 }
 
@@ -862,7 +864,7 @@ void AppendFloatRaw(std::string& out, float v)
     }
 }
 
-char* AppendUnsignedDecimal(char* dest, unsigned value)
+char* AppendUnsignedDecimal(char* dest, std::uint32_t value)
 {
     if (value >= 100U) {
         *dest = static_cast<char>('0' + (value / 100U));
@@ -885,14 +887,14 @@ char* AppendUnsignedDecimal(char* dest, unsigned value)
     return dest;
 }
 
-char* AppendSignedDecimal(char* dest, int value)
+char* AppendSignedDecimal(char* dest, std::int32_t value)
 {
     if (value < 0) {
         *dest = '-';
         ++dest;
-        return AppendUnsignedDecimal(dest, static_cast<unsigned>(-value));
+        return AppendUnsignedDecimal(dest, static_cast<std::uint32_t>(-value));
     }
-    return AppendUnsignedDecimal(dest, static_cast<unsigned>(value));
+    return AppendUnsignedDecimal(dest, static_cast<std::uint32_t>(value));
 }
 
 struct UInt8ArrayOverwriteWriter
@@ -910,8 +912,8 @@ std::size_t UInt8ArrayOverwriteWriter::operator()(char* buf, std::size_t /*bufSi
     for (std::uint32_t i{0}; i < count; ++i) {
         *dest = ',';
         ++dest;
-        dest =
-            AppendUnsignedDecimal(dest, static_cast<unsigned>(static_cast<std::uint8_t>(data[i])));
+        dest = AppendUnsignedDecimal(
+            dest, static_cast<std::uint32_t>(static_cast<std::uint8_t>(data[i])));
     }
     return static_cast<std::size_t>(dest - buf);
 }
@@ -929,7 +931,7 @@ std::size_t Int8ArrayOverwriteWriter::operator()(char* buf, std::size_t /*bufSiz
 {
     char* dest{buf + startPos};
     for (std::uint32_t i{0}; i < count; ++i) {
-        const int value{static_cast<std::int8_t>(data[i])};
+        const std::int32_t value{static_cast<std::int8_t>(data[i])};
         *dest = ',';
         ++dest;
         dest = AppendSignedDecimal(dest, value);
