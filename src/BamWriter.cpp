@@ -18,7 +18,7 @@ constexpr std::size_t BAM_BLOCK_SIZE_PREFIX_BYTES{4};
 
 std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> rawData)
 {
-    if (std::size(rawData) > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    if (std::size(rawData) > std::size_t{std::numeric_limits<std::int32_t>::max()}) {
         throw std::invalid_argument{
             std::format("BamWriter::Write: raw record size ({}) exceeds BAM block_size limit",
                         std::size(rawData))};
@@ -52,11 +52,11 @@ void WriteRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten
 void WriteRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten,
                     std::vector<std::byte>&& rawData)
 {
+    std::vector<std::byte> combined{BuildCombinedRecordPayload(rawData)};
     PendingCallback callback{};
     callback.rawData = std::move(rawData);
     callback.active = true;
-    EmitRawRecord(bgzf, recordsWritten, BuildCombinedRecordPayload(callback.rawData),
-                  std::move(callback));
+    EmitRawRecord(bgzf, recordsWritten, std::move(combined), std::move(callback));
 }
 
 void WriteHeaderBlock(BgzfWriter& bgzf, const SamHeader& header)
