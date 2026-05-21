@@ -40,6 +40,7 @@ if cram_script.found()
         'sam_write_roundtrip',
         'zmi_build',
         'zmi_chunk',
+        'zmi_index',
         'zmi_query',
     ]
 

@@ -106,6 +106,19 @@ pbsamoa zmi-build input.bam output.bam
 # creates output.bam and output.bam.zmi
 ```
 
+### zmi-index — build `.zmi` for an existing BAM
+
+Build a `.zmi` sidecar from an existing BAM without rewriting the BAM.
+Uses parallel BGZF decompression. `--threads` defaults to
+`hardware_concurrency()`.
+
+```sh
+pbsamoa zmi-index input.bam
+# creates input.bam.zmi
+
+pbsamoa zmi-index --threads 8 --quiet input.bam
+```
+
 ### zmi-query — query by ZMW
 
 Extract records for specific ZMW hole numbers.

@@ -44,6 +44,7 @@ test_exe = executable(
         'TestTags.cpp',
         'TestVirtualOffset.cpp',
         'TestZmi.cpp',
+        'TestZmiIndex.cpp',
         'TestZmwUtils.cpp',
         'TestZmwWhitelist.cpp',
     ) + configure_file(

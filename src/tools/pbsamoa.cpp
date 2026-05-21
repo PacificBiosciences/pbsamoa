@@ -5,6 +5,7 @@
 #include "convert/Convert.hpp"
 #include "dump/Dump.hpp"
 #include "zmi-build/ZmiBuild.hpp"
+#include "zmi-index/ZmiIndex.hpp"
 #include "zmi-query/ZmiQuery.hpp"
 
 #include <pbsamoa/PbSamoaLibraryInfo.hpp>
@@ -32,6 +33,7 @@ constexpr std::array COMMANDS{
     CommandSpec{"bai-build", PacBio::Samoa::BaiBuild::Runner},
     CommandSpec{"bai-query", PacBio::Samoa::BaiQuery::Runner},
     CommandSpec{"zmi-build", PacBio::Samoa::ZmiBuild::Runner},
+    CommandSpec{"zmi-index", PacBio::Samoa::ZmiIndex::Runner},
     CommandSpec{"zmi-query", PacBio::Samoa::ZmiQuery::Runner},
     CommandSpec{"bench", PacBio::Samoa::Bench::Runner},
 };
@@ -50,6 +52,7 @@ void PrintUsage()
                "  bai-build  Build BAI index for a BAM file\n"
                "  bai-query  Query BAM records by genomic region\n"
                "  zmi-build  Copy BAM and build ZMI index alongside\n"
+               "  zmi-index  Build ZMI index for an existing BAM (no rewrite)\n"
                "  zmi-query  Query BAM records by ZMW hole number\n"
                "  bench      Benchmark pbsamoa read/write performance\n"
                "\n"
@@ -60,6 +63,7 @@ void PrintUsage()
                "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
                "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
                "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
+               "  pbsamoa zmi-index  input.bam              Build .zmi sidecar (no rewrite)\n"
                "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
                "  pbsamoa bench      input.bam              Run benchmarks\n",
                PacBio::Samoa::LibraryFormattedVersion());

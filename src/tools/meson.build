@@ -7,6 +7,7 @@ subdir('chunk')
 subdir('convert')
 subdir('dump')
 subdir('zmi-build')
+subdir('zmi-index')
 subdir('zmi-query')
 
 pbsamoa = executable(
