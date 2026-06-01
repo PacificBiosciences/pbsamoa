@@ -17,6 +17,19 @@ TEST(CigarClipping, ClipToQuery_AllMatch_TrimBothEnds)
     EXPECT_EQ(result.newPos, 52);
 }
 
+TEST(CigarClipping, ClipToQuery_EmptyCigar_Unmapped)
+{
+    // Unmapped record (no CIGAR): query bases map 1:1, so the front offset must be
+    // applied directly rather than derived from a CIGAR walk. Sequence length 20,
+    // clip to query [4,16): keep 12 bases starting at offset 4.
+    const std::vector<CigarOp> cigar{};
+    const auto result{ClipCigarToQuery(cigar, 4, 16, 0, 20, -1, false)};
+    EXPECT_TRUE(result.cigar.empty());
+    EXPECT_EQ(result.clipOffset, 4U);
+    EXPECT_EQ(result.clipLength, 12U);
+    EXPECT_EQ(result.newPos, -1);
+}
+
 TEST(CigarClipping, ClipToQuery_AllMatch_NoClip)
 {
     const auto cigar{ParseCigar("10M")};

@@ -234,7 +234,13 @@ ClipResult ClipCigarToQuery(std::span<const CigarOp> cigar, std::int32_t querySt
         }
     }
 
-    // If we get here, frontRemove was fully consumed by whole ops (or was 0).
+    // Any frontRemove left over corresponds to query bases not represented by a
+    // CIGAR op — e.g. an unmapped record with an empty CIGAR. Such bases have no
+    // alignment, so they map 1:1 onto the query offset; carry the remainder
+    // directly. For a valid clip of a mapped read the CIGAR always consumes
+    // frontRemove fully, leaving this at zero (no behavior change).
+    queryOffset += frontRemove;
+
     // Copy remaining ops from idx onward.
     std::vector<CigarOp> result{RemainingOps(cigar, idx)};
 

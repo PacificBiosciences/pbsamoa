@@ -1,12 +1,12 @@
 #include <pbsamoa/core/TagClipping.hpp>
 
+#include <pbsamoa/core/Basemods.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include "PulseBitset.hpp"
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <iterator>
 #include <memory>
 #include <numeric>
@@ -36,20 +36,6 @@ std::string SnapshotStringTag(const TagMap& tags, TagKey key)
         return {};
     }
     return *tagString;
-}
-
-std::string_view TakeDelimitedSegment(std::string_view& text, char delimiter)
-{
-    const std::size_t delimiterPos{text.find(delimiter)};
-    if (delimiterPos == std::string_view::npos) {
-        const std::string_view segment{text};
-        text = {};
-        return segment;
-    }
-
-    const std::string_view segment{text.substr(0, delimiterPos)};
-    text = text.substr(delimiterPos + 1);
-    return segment;
 }
 
 template <typename Iterator>
@@ -93,162 +79,6 @@ bool ClipSubstring(TagValue& value, std::size_t offset, std::size_t length)
         return true;
     }
     return false;
-}
-
-/// \brief A single modification type parsed from an MM string.
-///
-/// E.g., "C+m?,1,3,0" -> prefix = "C+m?", skips = {1, 3, 0}
-struct BasemodRecord
-{
-    std::string prefix;  // e.g. "C+m", "C+m?", "A+a."
-    std::vector<std::int32_t> skips;
-};
-
-struct ClippedBasemodWindow
-{
-    std::size_t frontRemoved{0};
-    std::size_t retained{0};
-    std::vector<std::int32_t> skips;
-};
-
-/// \brief Parse an MM tag string into ordered modification records.
-///
-/// Format: "C+m,1,3,0;A+a,2;" -> [{prefix="C+m", skips={1,3,0}}, {prefix="A+a",
-/// skips={2}}]
-std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
-{
-    std::vector<BasemodRecord> records;
-
-    while (!std::empty(mm)) {
-        const std::string_view segment{TakeDelimitedSegment(mm, ';')};
-
-        if (std::size(segment) < 3) {
-            // Minimum valid: "C+m" (3 chars)
-            continue;
-        }
-
-        // Parse prefix: BASE OP MOD_CODE [.?]
-        // First char is base, second is +/-, third+ is mod code(s)
-        // Optional trailing '.' or '?' before the first comma
-        std::size_t prefixLen{3};
-        if ((prefixLen < std::size(segment)) &&
-            ((segment[prefixLen] == '?') || (segment[prefixLen] == '.'))) {
-            ++prefixLen;
-        }
-
-        BasemodRecord rec;
-        rec.prefix = std::string{segment.substr(0, prefixLen)};
-
-        // Parse comma-separated skip counts after the prefix
-        std::size_t pos{prefixLen};
-        while (pos < std::size(segment)) {
-            if (segment[pos] == ',') {
-                ++pos;
-            }
-            std::int32_t num{0};
-            const auto* first{std::data(segment) + pos};
-            const auto* last{std::data(segment) + std::size(segment)};
-            const auto [ptr, ec]{std::from_chars(first, last, num)};
-            if (ec == std::errc{}) {
-                rec.skips.push_back(num);
-                pos += static_cast<std::size_t>(ptr - first);
-            } else {
-                break;
-            }
-        }
-
-        records.push_back(std::move(rec));
-    }
-
-    return records;
-}
-
-/// \brief For a single modification type, compute how many modification
-/// sites fall before, within, and after a clip window.
-///
-/// Uses the same prefix-sum algorithm as pbbam's ClipBasemodsTag.
-///
-/// \param[in] canonicalBase  the base to count (e.g., 'C')
-/// \param[in] skips          original skip counts
-/// \param[in] sequence       full original sequence
-/// \param[in] clipOffset     start of clip window
-/// \param[in] clipLength     length of clip window
-/// \param[out] frontRemoved  number of mod sites before clip window
-/// \param[out] retained      number of mod sites within clip window
-/// \param[out] newSkips      rewritten skip counts for retained sites
-void ClipSingleModType(char canonicalBase, std::span<const std::int32_t> skips,
-                       std::string_view sequence, std::size_t clipOffset, std::size_t clipLength,
-                       std::size_t& frontRemoved, std::size_t& retained,
-                       std::vector<std::int32_t>& newSkips)
-{
-    // Count canonical bases before and within the clip window
-    const std::int32_t basesBeforeClip =
-        std::ranges::count(sequence.substr(0, clipOffset), canonicalBase);
-    const std::int32_t basesInClip =
-        std::ranges::count(sequence.substr(clipOffset, clipLength), canonicalBase);
-
-    // Build prefix sums: prefixSum[i] = total canonical bases seen up to
-    // and including modification site i.
-    // For skip value s, we pass (s+1) canonical bases to reach the next mod.
-    std::vector<std::int32_t> prefixSum;
-    prefixSum.reserve(std::size(skips));
-    std::int32_t pSum{0};
-    for (const std::int32_t s : skips) {
-        pSum += (s + 1);
-        prefixSum.push_back(pSum);
-    }
-
-    // Find the range of modification sites within the clip window.
-    // A mod site at prefixSum[i] is "in" the clip if:
-    //   basesBeforeClip < prefixSum[i] <= basesBeforeClip + basesInClip
-    const auto startIt{std::ranges::lower_bound(prefixSum, basesBeforeClip + 1)};
-    const auto endIt{std::ranges::upper_bound(prefixSum, basesBeforeClip + basesInClip)};
-
-    const std::size_t startIdx = std::ranges::distance(prefixSum.begin(), startIt);
-    const std::size_t endIdx = std::ranges::distance(prefixSum.begin(), endIt);
-
-    frontRemoved = startIdx;
-    retained = endIdx - startIdx;
-
-    newSkips.clear();
-    if (retained > 0) {
-        // Copy the retained skip counts
-        newSkips.assign(std::cbegin(skips) + startIdx, std::cbegin(skips) + endIdx);
-
-        // Adjust the first retained skip count: it should reflect the number
-        // of canonical bases between the clip window start and the first
-        // retained modification site.
-        newSkips[0] = prefixSum[startIdx] - basesBeforeClip - 1;
-    }
-}
-
-ClippedBasemodWindow ClipBasemodWindowForRecord(const BasemodRecord& record,
-                                                std::string_view sequence, std::size_t clipOffset,
-                                                std::size_t clipLength)
-{
-    ClippedBasemodWindow result;
-    ClipSingleModType(record.prefix[0], record.skips, sequence, clipOffset, clipLength,
-                      result.frontRemoved, result.retained, result.skips);
-    return result;
-}
-
-/// \brief Reconstruct an MM string from clipped modification records.
-std::string RewriteBasemodString(std::span<const BasemodRecord> records,
-                                 std::span<const std::vector<std::int32_t>> clippedSkips)
-{
-    std::string out;
-    std::array<char, 16> numBuf{};
-    for (std::size_t i{0}; i < std::size(records); ++i) {
-        out.append(records[i].prefix);
-        for (const std::int32_t s : clippedSkips[i]) {
-            out += ',';
-            const std::to_chars_result toCharsResult{
-                std::to_chars(std::data(numBuf), std::data(numBuf) + std::size(numBuf), s)};
-            out.append(std::data(numBuf), toCharsResult.ptr);
-        }
-        out += ';';
-    }
-    return out;
 }
 
 }  // namespace
@@ -308,16 +138,16 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         }
 
         const std::vector<BasemodRecord> records{ParseBasemodString(*str)};
-        std::vector<std::vector<std::int32_t>> allClippedSkips;
-        allClippedSkips.reserve(std::size(records));
+        std::vector<BasemodRecord> clippedRecords;
+        clippedRecords.reserve(std::size(records));
 
         for (const BasemodRecord& rec : records) {
-            ClippedBasemodWindow clipped{
-                ClipBasemodWindowForRecord(rec, ctx.sequence, clipOffset, clipLength)};
-            allClippedSkips.push_back(std::move(clipped.skips));
+            const BasemodClipWindow window{
+                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength)};
+            clippedRecords.push_back(BasemodRecord{rec.Prefix, window.RetainedSkips});
         }
 
-        *str = RewriteBasemodString(records, allClippedSkips);
+        *str = WriteBasemodString(clippedRecords);
         return true;
     }
 
@@ -342,17 +172,17 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         std::size_t qvOffset{0};  // running offset into the original ML array
 
         for (const BasemodRecord& rec : records) {
-            const ClippedBasemodWindow clipped{
-                ClipBasemodWindowForRecord(rec, ctx.sequence, clipOffset, clipLength)};
+            const BasemodClipWindow window{
+                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength)};
             // Copy retained QVs for this modification type
-            const std::size_t srcByteOffset{(qvOffset + clipped.frontRemoved) * elemSize};
-            const std::size_t srcByteLength{clipped.retained * elemSize};
+            const std::size_t srcByteOffset{(qvOffset + window.FrontRemoved) * elemSize};
+            const std::size_t srcByteLength{window.Retained * elemSize};
             const auto srcData{arr->Data()};
             retainedBytes.insert(std::end(retainedBytes), std::cbegin(srcData) + srcByteOffset,
                                  std::cbegin(srcData) + srcByteOffset + srcByteLength);
 
             // Advance past all QVs for this modification type
-            qvOffset += std::size(rec.skips);
+            qvOffset += std::size(rec.Skips);
         }
 
         // Write retained bytes back
