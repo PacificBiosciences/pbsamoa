@@ -17,6 +17,7 @@ test_exe = executable(
         'TestBamRecordReader.cpp',
         'TestBamWriter.cpp',
         'TestBamZmwReader.cpp',
+        'TestBasemods.cpp',
         'TestBgzf.cpp',
         'TestBgzfPipeline.cpp',
         'TestBgzfReader.cpp',

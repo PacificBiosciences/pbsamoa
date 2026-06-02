@@ -1,0 +1,40 @@
+#include <pbsamoa/core/Basemods.hpp>
+
+#include <gtest/gtest.h>
+
+#include <string>
+#include <vector>
+
+namespace PacBio {
+namespace Samoa {
+
+TEST(Basemods, ChebiNumericModCodeParsed)
+{
+    // A numeric ChEBI mod code is a single code, not a base followed by a skip count
+    // (htslib sam_mods.c). "C+76792,5,12" must keep the digits in the prefix.
+    const std::vector<BasemodRecord> records{ParseBasemodString("C+76792,5,12;")};
+    ASSERT_EQ(std::size(records), 1U);
+    EXPECT_EQ(records[0].Prefix, "C+76792");
+    ASSERT_EQ(std::size(records[0].Skips), 2U);
+    EXPECT_EQ(records[0].Skips[0], 5);
+    EXPECT_EQ(records[0].Skips[1], 12);
+}
+
+TEST(Basemods, ChebiModCodeRoundTrips)
+{
+    const std::vector<BasemodRecord> records{ParseBasemodString("C+76792,5,12;")};
+    EXPECT_EQ(WriteBasemodString(records), "C+76792,5,12;");
+}
+
+TEST(Basemods, SingleLetterModCodeStillParses)
+{
+    const std::vector<BasemodRecord> records{ParseBasemodString("C+m?,1,3,0;A+a,2;")};
+    ASSERT_EQ(std::size(records), 2U);
+    EXPECT_EQ(records[0].Prefix, "C+m?");
+    EXPECT_EQ(records[0].Skips, (std::vector<std::int32_t>{1, 3, 0}));
+    EXPECT_EQ(records[1].Prefix, "A+a");
+    EXPECT_EQ(records[1].Skips, (std::vector<std::int32_t>{2}));
+}
+
+}  // namespace Samoa
+}  // namespace PacBio

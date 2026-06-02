@@ -43,8 +43,19 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
             continue;
         }
 
-        // Prefix: BASE OP MOD_CODE [.?]
-        std::size_t prefixLen{3};
+        // Prefix: BASE OP MOD_CODE [.?]. MOD_CODE is either a numeric ChEBI id
+        // (e.g. "C+76792") or a letter code (e.g. "C+m"); per htslib (sam_mods.c:298-312)
+        // a digit run is a single ChEBI code rather than a base + skip count.
+        std::size_t prefixLen{2};  // BASE + OP
+        if ((prefixLen < std::size(segment)) && (segment[prefixLen] >= '0') &&
+            (segment[prefixLen] <= '9')) {
+            while ((prefixLen < std::size(segment)) && (segment[prefixLen] >= '0') &&
+                   (segment[prefixLen] <= '9')) {
+                ++prefixLen;
+            }
+        } else if (prefixLen < std::size(segment)) {
+            ++prefixLen;  // single-letter mod code
+        }
         if ((prefixLen < std::size(segment)) &&
             ((segment[prefixLen] == '?') || (segment[prefixLen] == '.'))) {
             ++prefixLen;
