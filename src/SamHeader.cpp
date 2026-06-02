@@ -8,6 +8,7 @@
 #include <expected>
 #include <format>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 #include <cctype>
@@ -416,6 +417,9 @@ SamHeader::SamHeader() = default;
 std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
 {
     SamHeader header;
+    // The spec (SAMv1 §1.3) requires @SQ SN names to be distinct; htslib treats a repeat
+    // as a fatal parse error (header.c:236-240). Track seen names to enforce the same.
+    std::unordered_set<std::string> seenRefNames;
     const std::vector<std::string_view> lines{Split(text, '\n')};
     for (const std::string_view line : lines) {
         if (std::empty(line)) {
@@ -444,11 +448,15 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
             continue;
         }
         if (recordType == "@SQ") {
-            if (auto result =
-                    AppendParsedRecord(header.references_, ParseReferenceSequenceRecord(fields));
-                !result) {
-                return std::unexpected{std::move(result.error())};
+            auto parsed{ParseReferenceSequenceRecord(fields)};
+            if (!parsed) {
+                return std::unexpected{std::move(parsed.error())};
             }
+            if (!seenRefNames.insert(std::string{parsed->Name()}).second) {
+                return std::unexpected{"Duplicate @SQ SN \"" + std::string{parsed->Name()} +
+                                       "\" in sam header"};
+            }
+            header.references_.push_back(std::move(*parsed));
             continue;
         }
         if (recordType == "@RG") {

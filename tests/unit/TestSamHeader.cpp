@@ -144,6 +144,24 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
     EXPECT_EQ(*tp, "circular");
 }
 
+TEST(SamHeader, DuplicateSqSnIsRejected)
+{
+    // SAMv1 §1.3: @SQ SN names must be distinct; htslib treats a repeat as fatal.
+    const std::string text =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:chr1\tLN:1000\n"
+        "@SQ\tSN:chr1\tLN:2000\n";
+    EXPECT_FALSE(SamHeader::FromText(text).has_value());
+}
+
+TEST(SamHeader, ConflictingDuplicateLnIsRejected)
+{
+    // A repeated LN with a different value is a fatal error (htslib header.c:183-187).
+    EXPECT_FALSE(SamHeader::FromText("@SQ\tSN:chr1\tLN:10\tLN:20\n").has_value());
+    // ... but a repeated LN with the same value is tolerated.
+    EXPECT_TRUE(SamHeader::FromText("@SQ\tSN:chr1\tLN:10\tLN:10\n").has_value());
+}
+
 TEST(SamHeader, ParseReadGroups)
 {
     const std::string text =
