@@ -1,10 +1,13 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/Endian.hpp>
+#include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/Sequence.hpp>
+#include <pbsamoa/core/Tags.hpp>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -235,6 +238,36 @@ TEST(BamRecord, SerializeToBamNameOverflowThrows)
     // Construct with short name, then verify serialize works
     rec.Name("ok").Flag(0).Sequence("A");
     EXPECT_NO_THROW(rec.SerializeToBam());
+}
+
+TEST(BamRecord, LongCigarRoundTripsViaCgTag)
+{
+    // A CIGAR with > 65535 ops must serialize as the kSmN placeholder + CG:B,I tag and
+    // decode back to the full CIGAR (SAMv1 §4.2.2).
+    constexpr std::uint32_t opCount{70000};
+    std::vector<CigarOp> cigar;
+    cigar.reserve(opCount);
+    for (std::uint32_t i{0}; i < opCount; ++i) {
+        cigar.emplace_back(CigarOpType::M, 1);  // each 1M consumes one query + ref base
+    }
+
+    BamRecord rec;
+    rec.Name("longcig")
+        .Flag(0)
+        .RefId(0)
+        .Pos(0)
+        .Cigar(std::move(cigar))
+        .Sequence(std::string(opCount, 'A'));
+
+    const std::vector<std::byte> bytes{rec.SerializeToBam()};
+
+    // On-disk n_cigar_op must be the 2-op placeholder, not the real count.
+    EXPECT_EQ(ReadU16LE(std::data(bytes) + 12), 2U);
+
+    // Decode: RawRecord must expand the CG tag back to the full CIGAR and drop the CG tag.
+    const RawRecord decoded{std::span<const std::byte>{bytes}};
+    EXPECT_EQ(std::size(decoded.CigarOps()), opCount);
+    EXPECT_FALSE(decoded.ParseTags().Contains(TagKey{'C', 'G'}));
 }
 
 }  // namespace Samoa

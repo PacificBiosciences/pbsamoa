@@ -205,12 +205,21 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
             "BAM limit of 254 characters"};
     }
     const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(name_) + 1)};  // +NUL
-    if (std::size(cigar_) > std::numeric_limits<std::uint16_t>::max()) {
+
+    // A CIGAR with >65535 ops cannot fit n_cigar_op; BAM stores a 2-op 'kSmN' placeholder
+    // and the real ops in a CG:B,I tag (SAMv1 §4.2.2), matching htslib.
+    const std::size_t realOpCount{std::size(cigar_)};
+    const bool longCigar{realOpCount > std::numeric_limits<std::uint16_t>::max()};
+    const std::int64_t cigRefLen{ReferenceLength(cigar_)};
+    if (longCigar && (cigRefLen >= (std::int64_t{1} << 28))) {
+        // The placeholder's N op length is the reference span, which must fit the 28-bit
+        // CIGAR field; htslib falls back to SAM/CRAM when it does not.
         throw std::invalid_argument{
-            "BamRecord::SerializeToBam: CIGAR exceeds BAM "
-            "limit of 65535 operations"};
+            "BamRecord::SerializeToBam: CIGAR reference span too large for the CG-tag "
+            "long-CIGAR encoding; write SAM or CRAM instead"};
     }
-    const std::uint16_t nCigarOp{static_cast<std::uint16_t>(std::size(cigar_))};
+    const std::uint16_t nCigarOp{longCigar ? std::uint16_t{2}
+                                           : static_cast<std::uint16_t>(realOpCount)};
     const std::uint32_t seqLen{static_cast<std::uint32_t>(std::size(sequence_))};
     if (!std::empty(qualities_) && (std::size(qualities_) != seqLen)) {
         throw std::invalid_argument{
@@ -226,9 +235,12 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     // Compute tag size without allocating
     const std::size_t tagSize{SerializedBamSize(tags_)};
 
-    // Total size: 32 (fixed) + nameLen + 4*nCigarOp + packedSeqLen + seqLen +
-    // tagSize
-    const std::size_t totalSize{32U + nameLen + 4U * nCigarOp + packedSeqLen + seqLen + tagSize};
+    // CG spillover: 'C','G','B','I' (4) + uint32 count (4) + 4 bytes per real op.
+    const std::size_t cgTagBytes{longCigar ? (8U + 4U * realOpCount) : 0U};
+
+    // Total size: 32 (fixed) + nameLen + 4*nCigarOp + packedSeqLen + seqLen + tagSize + CG tag
+    const std::size_t totalSize{32U + nameLen + 4U * nCigarOp + packedSeqLen + seqLen + tagSize +
+                                cgTagBytes};
 
     std::vector<std::byte> result(totalSize);
     std::byte* p{std::data(result)};
@@ -254,11 +266,19 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     p[offset + std::size(name_)] = std::byte{0};
     offset += nameLen;
 
-    // CIGAR (array of uint32)
-    for (const CigarOp& op : cigar_) {
-        const std::uint32_t raw{op.RawValue()};
-        WriteU32LEAt(p + offset, raw);
+    // CIGAR (array of uint32). A long CIGAR writes the 2-op 'kSmN' placeholder here; the
+    // real ops follow in a CG tag appended after the regular tags.
+    if (longCigar) {
+        WriteU32LEAt(p + offset, (seqLen << 4U) | std::to_underlying(CigarOpType::S));
         offset += 4;
+        WriteU32LEAt(p + offset, (static_cast<std::uint32_t>(cigRefLen) << 4U) |
+                                     std::to_underlying(CigarOpType::N));
+        offset += 4;
+    } else {
+        for (const CigarOp& op : cigar_) {
+            WriteU32LEAt(p + offset, op.RawValue());
+            offset += 4;
+        }
     }
 
     // Packed sequence (write directly into result buffer)
@@ -280,6 +300,21 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     // Tags (write directly into result buffer)
     if (tagSize > 0) {
         AppendTagsToBam(tags_, p + offset);
+    }
+    offset += tagSize;
+
+    // CG tag carrying the real long CIGAR as a B:I array of packed ops.
+    if (longCigar) {
+        p[offset + 0] = std::byte{'C'};
+        p[offset + 1] = std::byte{'G'};
+        p[offset + 2] = std::byte{'B'};
+        p[offset + 3] = std::byte{'I'};
+        WriteU32LEAt(p + offset + 4, static_cast<std::uint32_t>(realOpCount));
+        offset += 8;
+        for (const CigarOp& op : cigar_) {
+            WriteU32LEAt(p + offset, op.RawValue());
+            offset += 4;
+        }
     }
 
     return result;
