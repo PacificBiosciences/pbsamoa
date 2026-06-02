@@ -70,11 +70,16 @@ public:
 private:
     std::vector<std::byte> data_;
     std::vector<CigarOp> cigar_;
+    bool cgExpanded_{false};  // true if a CG-tag long CIGAR was expanded into cigar_
 
     std::size_t CigarOffset() const;
     std::size_t SeqOffset() const;
     std::size_t QualOffset() const;
     std::size_t AuxOffset() const;
+
+    /// \brief Expand a CG:B,I long-CIGAR placeholder into cigar_ (SAMv1 §4.2.2).
+    /// Out-of-line: only invoked when the cheap placeholder guard in the ctor matches.
+    void ExpandLongCigarFromCgTag();
 };
 
 // --- inline implementations ---
@@ -110,6 +115,15 @@ inline RawRecord::RawRecord(std::span<const std::byte> data) : data_{data.begin(
         cigar_.resize(count);
         std::memcpy(cigar_.data(), std::data(data_) + CigarOffset(),
                     static_cast<std::size_t>(count) * sizeof(CigarOp));
+    }
+
+    // CG-tag long-CIGAR placeholder check (SAMv1 §4.2.2; htslib bam_tag2cigar). A record
+    // with >65535 ops stores 'kSmN' (n_cigar_op=2, cigar[0] = soft-clip of the whole read)
+    // and the real CIGAR in a CG:B,I tag. The guard is cheap and almost always false;
+    // the actual expansion is out-of-line.
+    if (cigar_.size() == 2U && RefId() >= 0 && Pos() >= 0 &&
+        cigar_[0].RawValue() == ((SeqLength() << 4U) | std::to_underlying(CigarOpType::S))) {
+        ExpandLongCigarFromCgTag();
     }
 }
 
@@ -197,7 +211,15 @@ inline std::int64_t RawRecord::QueryLength() const
     return ::PacBio::Samoa::QueryLength(CigarOps());
 }
 
-inline TagMap RawRecord::ParseTags() const { return ParseTagsFromBam(AuxData()); }
+inline TagMap RawRecord::ParseTags() const
+{
+    TagMap tags{ParseTagsFromBam(AuxData())};
+    if (cgExpanded_) {
+        // The CG tag is now redundant: its contents live in the expanded cigar_.
+        tags.Remove(TagKey{'C', 'G'});
+    }
+    return tags;
+}
 
 inline std::span<const std::byte> RawRecord::RawData() const { return data_; }
 

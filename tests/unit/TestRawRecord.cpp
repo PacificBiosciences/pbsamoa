@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <bit>
 #include <span>
 #include <vector>
@@ -95,6 +96,54 @@ std::vector<std::byte> MakeLittleEndianRawRecordBytes()
     // packed seq + qual
     data[44] = std::byte{0x10};             // "A"
     data[45] = static_cast<std::byte>(40);  // quality
+    return data;
+}
+
+// Build a BAM record carrying the kSmN long-CIGAR placeholder (n_cigar_op=2, cigar[0] =
+// soft-clip of the whole read) per SAMv1 §4.2.2. \p withCgTag adds the real CIGAR in a
+// CG:B,I tag; \p validPlaceholder=false makes cigar[0] a non-clip op so the placeholder
+// guard must not fire. Seq is the 4-base "ACGT"; the CG CIGAR (1M1I2M) has query length 4.
+std::vector<std::byte> MakeLongCigarPlaceholderBytes(bool withCgTag, bool validPlaceholder = true)
+{
+    const std::uint32_t seqLen{4};
+    std::vector<std::byte> data(32, std::byte{0});
+    WriteI32LE(std::data(data) + 0, 0);   // refId (>= 0)
+    WriteI32LE(std::data(data) + 4, 0);   // pos (>= 0)
+    data[8] = std::byte{3};               // l_read_name "cg\0"
+    WriteU16LE(std::data(data) + 12, 2);  // n_cigar_op = 2 (placeholder)
+    WriteU32LE(std::data(data) + 16, seqLen);
+    WriteI32LE(std::data(data) + 20, -1);  // next_refID
+    WriteI32LE(std::data(data) + 24, -1);  // next_pos
+
+    const auto appendU32{[&data](std::uint32_t value) {
+        std::array<std::byte, 4> buf{};
+        WriteU32LE(std::data(buf), value);
+        data.insert(std::end(data), std::begin(buf), std::end(buf));
+    }};
+
+    data.push_back(std::byte{'c'});
+    data.push_back(std::byte{'g'});
+    data.push_back(std::byte{0});
+
+    appendU32(validPlaceholder ? ((seqLen << 4U) | 4U) : ((seqLen << 4U) | 0U));  // 4S or 4M
+    appendU32((4U << 4U) | 3U);                                                   // 4N filler
+
+    data.push_back(std::byte{(1 << 4) | 2});  // packed seq "AC"
+    data.push_back(std::byte{(4 << 4) | 8});  // packed seq "GT"
+    for (int i{0}; i < 4; ++i) {
+        data.push_back(std::byte{0xFF});  // qual unavailable
+    }
+
+    if (withCgTag) {
+        data.push_back(std::byte{'C'});
+        data.push_back(std::byte{'G'});
+        data.push_back(std::byte{'B'});
+        data.push_back(std::byte{'I'});
+        appendU32(3U);               // element count
+        appendU32((1U << 4U) | 0U);  // 1M
+        appendU32((1U << 4U) | 1U);  // 1I
+        appendU32((2U << 4U) | 0U);  // 2M
+    }
     return data;
 }
 
@@ -217,6 +266,45 @@ TEST(RawRecord, FixedFieldsAndCigarDecodeFromLittleEndianBytes)
     ASSERT_EQ(std::size(cigar), 2U);
     EXPECT_EQ(cigar[0].RawValue(), 0x01020320U);
     EXPECT_EQ(cigar[1].RawValue(), 0x04050671U);
+}
+
+TEST(RawRecord, LongCigarPlaceholderExpandsFromCgTag)
+{
+    const std::vector<std::byte> data{MakeLongCigarPlaceholderBytes(/*withCgTag=*/true)};
+    const RawRecord view{std::span<const std::byte>{data}};
+
+    // The 2-op kSmN placeholder must be replaced by the 3-op CIGAR from the CG tag.
+    const CigarView cigar{view.CigarOps()};
+    ASSERT_EQ(std::size(cigar), 3U);
+    EXPECT_EQ(cigar[0].RawValue(), (1U << 4U) | 0U);  // 1M
+    EXPECT_EQ(cigar[1].RawValue(), (1U << 4U) | 1U);  // 1I
+    EXPECT_EQ(cigar[2].RawValue(), (2U << 4U) | 0U);  // 2M
+
+    // The now-redundant CG tag must be dropped from the decoded tags / owned record.
+    EXPECT_FALSE(view.ParseTags().Contains(TagKey{'C', 'G'}));
+    const BamRecord owned{view.ToOwned()};
+    EXPECT_EQ(std::size(owned.Cigar()), 3U);
+    EXPECT_FALSE(owned.Tags().Contains(TagKey{'C', 'G'}));
+}
+
+TEST(RawRecord, LongCigarPlaceholderWithoutCgTagIsNotExpanded)
+{
+    const std::vector<std::byte> data{MakeLongCigarPlaceholderBytes(/*withCgTag=*/false)};
+    const RawRecord view{std::span<const std::byte>{data}};
+
+    // No CG tag present — the placeholder must be left as the literal 2-op CIGAR.
+    EXPECT_EQ(std::size(view.CigarOps()), 2U);
+}
+
+TEST(RawRecord, NonPlaceholderCigarWithCgTagIsNotExpanded)
+{
+    // cigar[0] is not a full-read soft clip, so the CG tag must be left untouched.
+    const std::vector<std::byte> data{
+        MakeLongCigarPlaceholderBytes(/*withCgTag=*/true, /*validPlaceholder=*/false)};
+    const RawRecord view{std::span<const std::byte>{data}};
+
+    EXPECT_EQ(std::size(view.CigarOps()), 2U);
+    EXPECT_TRUE(view.ParseTags().Contains(TagKey{'C', 'G'}));
 }
 
 TEST(RawRecord, NonNullTerminatedNameThrows)
