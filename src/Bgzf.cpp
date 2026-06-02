@@ -1404,7 +1404,9 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                                 std::chrono::steady_clock::now() - readStart)
                                 .count()),
                         std::memory_order_relaxed);
-                    break;  // Truncated
+                    // Truncated header mid-stream is corruption, not a clean EOF (which is
+                    // gcount()==0 above). Propagate as an error like htslib.
+                    throw std::runtime_error{"Truncated BGZF block header in record region"};
                 }
 
                 const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
@@ -1416,7 +1418,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                                 std::chrono::steady_clock::now() - readStart)
                                 .count()),
                         std::memory_order_relaxed);
-                    break;  // Invalid header
+                    throw std::runtime_error{"Invalid BGZF block header in record region"};
                 }
 
                 // Read rest of block
@@ -1432,7 +1434,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                     std::memory_order_relaxed);
 
                 if (static_cast<std::size_t>(file.gcount()) < remaining) {
-                    break;  // Truncated
+                    throw std::runtime_error{"Truncated BGZF block in record region"};
                 }
 
                 const std::uint32_t isize{ReadU32LE(std::data(compressed) + info->blockSize - 4U)};
@@ -1952,8 +1954,9 @@ bool BgzfReader::Impl::RefillRecordBuffer()
         std::span<std::byte>{recordBuf}.subspan(recordBufSize, MAX_DECOMPRESSED_BLOCK_SIZE))};
 
     if (!bytesRead) {
-        syncEof = true;
-        return remaining > 0;
+        // nullopt means a truncated/invalid block or a CRC mismatch — corruption, not a
+        // clean end-of-stream (which ReadBlockSync reports as 0). Fail loud like htslib.
+        throw std::runtime_error{"Truncated or invalid BGZF block in record region"};
     }
     if (*bytesRead == 0) {
         syncEof = true;
