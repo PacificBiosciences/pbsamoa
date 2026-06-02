@@ -5,6 +5,7 @@
 #include <charconv>
 #include <expected>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -41,13 +42,6 @@ std::expected<IntType, std::string> ParseInteger(std::string_view text, std::str
     return value;
 }
 
-inline std::unexpected<std::string> InvalidRegionFormat(std::string_view text,
-                                                        std::string_view expectedFormat)
-{
-    return std::unexpected{
-        std::format("invalid region format '{}' (expected {})", text, expectedFormat)};
-}
-
 struct ParsedRegionFields
 {
     std::string_view RefName;
@@ -56,20 +50,22 @@ struct ParsedRegionFields
 };
 
 inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
-    std::string_view text, std::string_view expectedFormat)
+    std::string_view text, std::string_view /*expectedFormat*/)
 {
     // Split on the rightmost colon so reference names that themselves contain ':'
     // (e.g. "HLA-DRB1*12:17") are handled, matching htslib hts_parse_region (hts.c).
     const std::size_t colonPos{text.rfind(':')};
     if (colonPos == std::string_view::npos) {
-        return InvalidRegionFormat(text, expectedFormat);
+        // Bare reference name -> whole reference (htslib accepts this).
+        return ParsedRegionFields{.RefName = text, .StartText = {}, .EndText = {}};
     }
 
     const std::string_view refName{text.substr(0, colonPos)};
     const std::string_view rest{text.substr(colonPos + 1)};
     const std::size_t dashPos{rest.find('-')};
     if (dashPos == std::string_view::npos) {
-        return InvalidRegionFormat(text, expectedFormat);
+        // "chr:100" -> from start to the end of the reference.
+        return ParsedRegionFields{.RefName = refName, .StartText = rest, .EndText = {}};
     }
 
     return ParsedRegionFields{
@@ -81,25 +77,37 @@ inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
 
 inline std::expected<ParsedRegion, std::string> BuildParsedRegion(const ParsedRegionFields& fields)
 {
-    const auto parsedStart{ParseInteger<std::int32_t>(fields.StartText, "region start")};
-    if (!parsedStart) {
-        return std::unexpected{parsedStart.error()};
+    // Open-ended end runs to the end of the reference (htslib uses HTS_POS_MAX; here the
+    // coordinate type is 32-bit, so INT32_MAX is the sentinel Query treats as "no upper bound").
+    constexpr std::int32_t OPEN_END{std::numeric_limits<std::int32_t>::max()};
+
+    // Start: empty or "0" -> whole-reference start; otherwise a 1-based coordinate.
+    std::int32_t beg{0};
+    if (!std::empty(fields.StartText)) {
+        const auto parsedStart{ParseInteger<std::int32_t>(fields.StartText, "region start")};
+        if (!parsedStart) {
+            return std::unexpected{parsedStart.error()};
+        }
+        if (*parsedStart < 0) {
+            return std::unexpected{"region start must be >= 0"};
+        }
+        beg = (*parsedStart > 0) ? (*parsedStart - 1) : 0;
     }
 
-    const auto parsedEnd{ParseInteger<std::int32_t>(fields.EndText, "region end")};
-    if (!parsedEnd) {
-        return std::unexpected{parsedEnd.error()};
+    // End: empty -> open; otherwise a 1-based inclusive end == 0-based exclusive end.
+    std::int32_t end{OPEN_END};
+    if (!std::empty(fields.EndText)) {
+        const auto parsedEnd{ParseInteger<std::int32_t>(fields.EndText, "region end")};
+        if (!parsedEnd) {
+            return std::unexpected{parsedEnd.error()};
+        }
+        if (*parsedEnd < beg) {
+            return std::unexpected{"region end must be >= start"};
+        }
+        end = *parsedEnd;
     }
 
-    if ((*parsedStart < 1) || (*parsedEnd < *parsedStart)) {
-        return std::unexpected{"region must satisfy start >= 1 and end >= start"};
-    }
-
-    return ParsedRegion{
-        .RefName = std::string{fields.RefName},
-        .Beg = *parsedStart - 1,
-        .End = *parsedEnd,
-    };
+    return ParsedRegion{.RefName = std::string{fields.RefName}, .Beg = beg, .End = end};
 }
 
 inline std::expected<ParsedRegion, std::string> ParseRegion(std::string_view text,
