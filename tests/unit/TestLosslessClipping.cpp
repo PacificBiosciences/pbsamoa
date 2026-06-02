@@ -273,6 +273,23 @@ TEST(LosslessClipping, RejectsUnsupportedClipTags)
     EXPECT_THROW(ClipToQueryLossless(record, 4, 16), std::runtime_error);
 }
 
+// dq/iq/mq/sq/dt/st are per-base tags the PacBio default clipper trims (substring
+// strategy) but lossless storage neither captures nor restores. Clipping a record
+// carrying them would silently shorten them with no way to undo, so they must be
+// rejected up front like the pulse/pileup tags.
+TEST(LosslessClipping, RejectsDefaultClippedPerBaseTags)
+{
+    for (const TagKey key : {TagKey{'d', 'q'}, TagKey{'i', 'q'}, TagKey{'m', 'q'}, TagKey{'s', 'q'},
+                             TagKey{'d', 't'}, TagKey{'s', 't'}}) {
+        const std::string label{key.First(), key.Second()};
+        BamRecord record{MakeUnmappedRecord(20)};
+        TagMap tags{record.Tags()};
+        tags.Set(key, std::string(20, '!'));  // per-base length matches the sequence
+        record.Tags(std::move(tags));
+        EXPECT_THROW(ClipToQueryLossless(record, 4, 16), std::runtime_error) << label;
+    }
+}
+
 TEST(LosslessClipping, NoStorageWhenNothingClipped)
 {
     BamRecord record{MakeUnmappedRecord(20)};

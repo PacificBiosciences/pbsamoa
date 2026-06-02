@@ -165,26 +165,16 @@ std::vector<std::uint8_t> QualitiesFromFastq(std::string_view fastq)
     return quals;
 }
 
-// Per-base tags that the tag clipper trims but lossless storage does not yet
-// capture (raw-subread pulse + subread-pileup tags). Rejected up front so a clip
-// can never silently drop data that undo would need.
-constexpr std::array<TagKey, 16> UNSUPPORTED_CLIP_TAGS{{
-    TagKey{'p', 'c'},
-    TagKey{'p', 't'},
-    TagKey{'p', 'q'},
-    TagKey{'p', 'v'},
-    TagKey{'p', 'g'},
-    TagKey{'p', 'a'},
-    TagKey{'p', 'm'},
-    TagKey{'p', 's'},
-    TagKey{'p', 'i'},
-    TagKey{'p', 'd'},
-    TagKey{'p', 'x'},
-    TagKey{'p', 'e'},
-    TagKey{'s', 'f'},
-    TagKey{'s', 'm'},
-    TagKey{'s', 'x'},
-    TagKey{'s', 'a'},
+// Per-base tags that the PacBio default clipper trims but lossless storage does not
+// capture: legacy per-base QV/tag strings (dq/iq/mq/sq/dt/st), raw-subread pulse, and
+// subread-pileup tags. Only the kinetic tracks and MM/ML are captured above; everything
+// else is rejected up front so a clip can never silently drop data that undo would need.
+constexpr std::array<TagKey, 22> UNSUPPORTED_CLIP_TAGS{{
+    TagKey{'d', 'q'}, TagKey{'i', 'q'}, TagKey{'m', 'q'}, TagKey{'s', 'q'}, TagKey{'d', 't'},
+    TagKey{'s', 't'}, TagKey{'p', 'c'}, TagKey{'p', 't'}, TagKey{'p', 'q'}, TagKey{'p', 'v'},
+    TagKey{'p', 'g'}, TagKey{'p', 'a'}, TagKey{'p', 'm'}, TagKey{'p', 's'}, TagKey{'p', 'i'},
+    TagKey{'p', 'd'}, TagKey{'p', 'x'}, TagKey{'p', 'e'}, TagKey{'s', 'f'}, TagKey{'s', 'm'},
+    TagKey{'s', 'x'}, TagKey{'s', 'a'},
 }};
 
 // Capture the removed base-modification calls (MM/ML) into the `ls` lead/trail
