@@ -40,6 +40,7 @@ struct CompressedEntry
     std::size_t offset;        // offset into batch's contiguous compressed buffer
     std::size_t size;          // DEFLATE payload size (no BGZF framing)
     std::uint32_t isize;       // expected decompressed size from BGZF trailer
+    std::uint32_t crc32;       // expected CRC32 from BGZF trailer (payload dropped before decode)
     std::uint64_t fileOffset;  // original file position for VirtualOffset tracking
 };
 
@@ -80,6 +81,16 @@ constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U + 256U};
 constexpr std::size_t OUTPUT_QUEUE_CAPACITY{4096};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t BLOCKS_PER_BATCH{32};
+
+// Verify a freshly decompressed BGZF block against its expected CRC32 (RFC1952 trailer,
+// stored 8 bytes before the block end). libdeflate_deflate_decompress decodes raw DEFLATE
+// and does NOT check the gzip trailer, so without this a corrupted block that still inflates
+// is accepted silently. Mirrors htslib bgzf_uncompress() (bgzf.c:747-754).
+[[nodiscard]] bool BgzfCrcValid(std::uint32_t expectedCrc, const std::byte* output,
+                                std::size_t outputSize)
+{
+    return libdeflate_crc32(0, output, outputSize) == expectedCrc;
+}
 
 }  // namespace
 
@@ -173,6 +184,11 @@ std::optional<std::size_t> DecompressBgzfBlock(std::span<const std::byte> blockD
         decompressor.get(), std::data(blockData) + info.compressedDataOffset,
         info.compressedDataSize, std::data(output), isize, &actualOut)};
     if (result != LIBDEFLATE_SUCCESS) {
+        return std::nullopt;
+    }
+
+    const std::uint32_t expectedCrc{ReadU32LE(std::data(blockData) + info.blockSize - 8U)};
+    if (!BgzfCrcValid(expectedCrc, std::data(output), actualOut)) {
         return std::nullopt;
     }
 
@@ -1196,6 +1212,12 @@ void BgzfPipelineState::ParseHeader()
             throw std::runtime_error{"BGZF decompression failed while parsing BAM header"};
         }
 
+        const std::uint32_t expectedCrc{
+            ReadU32LE(std::data(syncCompressed) + info->blockSize - 8U)};
+        if (!BgzfCrcValid(expectedCrc, std::data(blockBuf), actualOut)) {
+            throw std::runtime_error{"BGZF CRC32 mismatch while parsing BAM header"};
+        }
+
         // Append to header buffer
         if (headerLen + actualOut > std::size(headerBuf)) {
             headerBuf.resize(headerLen + actualOut + MAX_DECOMPRESSED_BLOCK_SIZE);
@@ -1417,8 +1439,9 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                 if (isize == 0U) {
                     break;  // EOF marker
                 }
+                const std::uint32_t crc32{ReadU32LE(std::data(compressed) + info->blockSize - 8U)};
 
-                // Append compressed payload to batch buffer
+                // Append compressed payload to batch buffer (trailer dropped — carry crc32 along)
                 const std::size_t batchOffset{std::size(batchBuffer)};
                 const std::size_t cdataOffset{info->compressedDataOffset};
                 const std::size_t cdataSize{info->compressedDataSize};
@@ -1428,6 +1451,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                     .offset = batchOffset,
                     .size = cdataSize,
                     .isize = isize,
+                    .crc32 = crc32,
                     .fileOffset = blockOffset,
                 });
                 batchCompressedBytes += info->blockSize;
@@ -1540,6 +1564,11 @@ std::optional<std::size_t> BgzfPipelineState::ReadBlockSync(std::span<std::byte>
         return std::nullopt;
     }
 
+    const std::uint32_t expectedCrc{ReadU32LE(std::data(syncCompressed) + blockSize - 8U)};
+    if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
+        return std::nullopt;
+    }
+
     return actualOut;
 }
 
@@ -1629,6 +1658,9 @@ detail::DecompressedBatch BgzfPipelineState::DecompressBatchTask::operator()(
             entry.size, std::data(batch.data) + outOffset, entry.isize, &actualOut)};
         if (result != LIBDEFLATE_SUCCESS) {
             throw std::runtime_error{"BGZF decompression failed"};
+        }
+        if (!BgzfCrcValid(entry.crc32, std::data(batch.data) + outOffset, actualOut)) {
+            throw std::runtime_error{"BGZF CRC32 mismatch"};
         }
         outOffset += actualOut;
     }
@@ -1806,6 +1838,11 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> 
         syncDecompressor.get(), std::data(compressedBuf) + info->compressedDataOffset,
         info->compressedDataSize, std::data(buffer), isize, &actualOut)};
     if (result != LIBDEFLATE_SUCCESS) {
+        return std::nullopt;
+    }
+
+    const std::uint32_t expectedCrc{ReadU32LE(std::data(compressedBuf) + blockSize - 8U)};
+    if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
         return std::nullopt;
     }
 
