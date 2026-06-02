@@ -114,6 +114,13 @@ TEST(CigarParse, AllOpTypes)
     EXPECT_EQ(cigar[8].Type(), CigarOpType::X);
 }
 
+TEST(CigarParse, RejectsOpLengthExceeding28BitField)
+{
+    // The BAM CIGAR field is len<<4|op; a length >= 2^28 would clobber the op code.
+    EXPECT_TRUE(ParseCigar("268435455M").has_value());   // 2^28 - 1: largest valid
+    EXPECT_FALSE(ParseCigar("268435456M").has_value());  // 2^28: out of range
+}
+
 TEST(CigarToString, RoundTrip)
 {
     const std::string original{"8M2I4M1D3M"};

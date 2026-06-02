@@ -55,6 +55,11 @@ std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view tex
         if (length == 0) {
             return std::unexpected{"Invalid CIGAR: operation length must be >= 1"};
         }
+        // The BAM CIGAR field packs the length into 28 bits (len << 4 | op); a larger value
+        // would corrupt the op code. std::from_chars already rejects > UINT32_MAX.
+        if (length > 0x0FFFFFFFu) {
+            return std::unexpected{"Invalid CIGAR: operation length out of range [1, 268435455]"};
+        }
         result.emplace_back(*opType, length);
         pos = opPos + 1;
     }
