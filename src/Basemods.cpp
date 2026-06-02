@@ -113,11 +113,16 @@ BasemodClipWindow ClipBasemodRecord(const BasemodRecord& record, std::string_vie
     }
     const char canonicalBase{record.Prefix[0]};
 
-    // Count canonical bases before and within the clip window.
-    const std::int32_t basesBeforeClip{static_cast<std::int32_t>(
-        std::ranges::count(sequence.substr(0, clipOffset), canonicalBase))};
-    const std::int32_t basesInClip{static_cast<std::int32_t>(
-        std::ranges::count(sequence.substr(clipOffset, clipLength), canonicalBase))};
+    // Count canonical bases before and within the clip window. The 'N' wildcard matches
+    // every base (htslib freq[15] = l_qseq), not the literal character 'N'.
+    const auto countBases{[canonicalBase](std::string_view s) -> std::int32_t {
+        if (canonicalBase == 'N') {
+            return static_cast<std::int32_t>(std::ssize(s));
+        }
+        return static_cast<std::int32_t>(std::ranges::count(s, canonicalBase));
+    }};
+    const std::int32_t basesBeforeClip{countBases(sequence.substr(0, clipOffset))};
+    const std::int32_t basesInClip{countBases(sequence.substr(clipOffset, clipLength))};
 
     // prefixSum[i] = total canonical bases consumed up to and including site i
     // (skip value s consumes s+1 canonical bases to reach the next mod).

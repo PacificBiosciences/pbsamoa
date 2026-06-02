@@ -36,5 +36,20 @@ TEST(Basemods, SingleLetterModCodeStillParses)
     EXPECT_EQ(records[1].Skips, (std::vector<std::int32_t>{2}));
 }
 
+TEST(Basemods, NBaseModCountsAllBases)
+{
+    // The 'N' canonical base is a wildcard matching every base, so on a pure-ACGT read the
+    // mod sites must still be located. Mods at the 1st/2nd/3rd base ("N+n,0,0,0").
+    BasemodRecord rec;
+    rec.Prefix = "N+n";
+    rec.Skips = {0, 0, 0};
+
+    // Clip away the first two bases; retain a 4-base window.
+    const BasemodClipWindow window{ClipBasemodRecord(rec, "ACGTACGT", /*clipOffset=*/2,
+                                                     /*clipLength=*/4)};
+    EXPECT_EQ(window.FrontRemoved, 2U);  // sites at bases 0 and 1 fall before the window
+    EXPECT_EQ(window.Retained, 1U);      // site at base 2 is retained
+}
+
 }  // namespace Samoa
 }  // namespace PacBio
