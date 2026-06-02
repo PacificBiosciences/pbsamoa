@@ -58,7 +58,9 @@ struct ParsedRegionFields
 inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
     std::string_view text, std::string_view expectedFormat)
 {
-    const std::size_t colonPos{text.find(':')};
+    // Split on the rightmost colon so reference names that themselves contain ':'
+    // (e.g. "HLA-DRB1*12:17") are handled, matching htslib hts_parse_region (hts.c).
+    const std::size_t colonPos{text.rfind(':')};
     if (colonPos == std::string_view::npos) {
         return InvalidRegionFormat(text, expectedFormat);
     }

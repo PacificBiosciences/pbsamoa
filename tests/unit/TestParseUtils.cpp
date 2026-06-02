@@ -15,6 +15,16 @@ TEST(ParseUtils, ParseRegionConvertsToZeroBasedCoordinates)
     EXPECT_EQ(region->End, 9);
 }
 
+TEST(ParseUtils, ParseRegionSplitsOnRightmostColonForColonRefNames)
+{
+    // Reference names may contain ':' (e.g. HLA alleles); the rightmost colon delimits.
+    const auto region{ParseRegion("HLA-DRB1*12:17:100-200", "ref:start-end")};
+    ASSERT_TRUE(region);
+    EXPECT_EQ(region->RefName, "HLA-DRB1*12:17");
+    EXPECT_EQ(region->Beg, 99);
+    EXPECT_EQ(region->End, 200);
+}
+
 TEST(ParseUtils, ParseRegionRejectsInvalidFormat)
 {
     const auto region{ParseRegion("chr1", "ref:start-end")};
