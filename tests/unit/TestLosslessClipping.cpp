@@ -220,6 +220,28 @@ TEST(LosslessClipping, NestedClipsRestoreBaseMods)
     EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{200, 150, 100}));
 }
 
+// A multi-code prefix ("C+mh") carries ModCodeCount==2 interleaved ML values per
+// site. A site fully inside the retained window must keep BOTH probabilities across
+// a clip/restore — the restore-path ML seeding has to advance by skip-count * stride,
+// not skip-count. Sequence "ACGT"*5 has C at positions 1,5,9,13,17; "C+mh,2" marks
+// C-index 2 (position 9), inside [4,16).
+TEST(LosslessClipping, RoundTripRestoresMultiCodeBaseModMlValues)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+mh,2;"});
+    tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({210, 110}));  // {m, h} for the single site
+    record.Tags(std::move(tags));
+
+    ClipToQueryLossless(record, 4, 16);
+    ASSERT_TRUE(RestoreFromLossless(record));
+
+    const TagValue* mm{record.Tags().Get(TagKey{'M', 'M'})};
+    ASSERT_NE(mm, nullptr);
+    EXPECT_EQ(std::get<std::string>(*mm), "C+mh,2;");
+    EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{210, 110}));
+}
+
 TEST(LosslessClipping, RejectsUnsupportedClipTags)
 {
     BamRecord record{MakeUnmappedRecord(20)};

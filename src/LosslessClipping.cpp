@@ -493,7 +493,10 @@ bool RestoreFromLossless(BamRecord& record)
             std::size_t qvOffset{0};
             for (const BasemodRecord& rec : records) {
                 sepMM[rec.Prefix] = rec.Skips;
-                const std::size_t n{std::size(rec.Skips)};
+                // ML carries ModCodeCount values per site (interleaved); multi-code mods
+                // (e.g. "C+mh") therefore occupy stride entries per skip. Seed by the same
+                // stride capture used so retained multi-code sites keep every probability.
+                const std::size_t n{std::size(rec.Skips) * ModCodeCount(rec.Prefix)};
                 if (qvOffset + n <= std::size(ml)) {
                     sepML[rec.Prefix] = std::vector<std::int64_t>(std::cbegin(ml) + qvOffset,
                                                                   std::cbegin(ml) + qvOffset + n);
