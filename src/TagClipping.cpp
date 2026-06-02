@@ -174,15 +174,18 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         for (const BasemodRecord& rec : records) {
             const BasemodClipWindow window{
                 ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength)};
+            // ML stores ModCodeCount values per site (interleaved); each retained site
+            // therefore carries `stride` contiguous ML values.
+            const std::size_t stride{ModCodeCount(rec.Prefix)};
             // Copy retained QVs for this modification type
-            const std::size_t srcByteOffset{(qvOffset + window.FrontRemoved) * elemSize};
-            const std::size_t srcByteLength{window.Retained * elemSize};
+            const std::size_t srcByteOffset{(qvOffset + window.FrontRemoved * stride) * elemSize};
+            const std::size_t srcByteLength{window.Retained * stride * elemSize};
             const auto srcData{arr->Data()};
             retainedBytes.insert(std::end(retainedBytes), std::cbegin(srcData) + srcByteOffset,
                                  std::cbegin(srcData) + srcByteOffset + srcByteLength);
 
             // Advance past all QVs for this modification type
-            qvOffset += std::size(rec.Skips);
+            qvOffset += std::size(rec.Skips) * stride;
         }
 
         // Write retained bytes back

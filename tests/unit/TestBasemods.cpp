@@ -36,6 +36,25 @@ TEST(Basemods, SingleLetterModCodeStillParses)
     EXPECT_EQ(records[1].Skips, (std::vector<std::int32_t>{2}));
 }
 
+TEST(Basemods, MultiModCodeParsedAndRoundTrips)
+{
+    // "C+mh" carries two modifications (m, h) sharing one delta list.
+    const std::vector<BasemodRecord> records{ParseBasemodString("C+mh,5,12;")};
+    ASSERT_EQ(std::size(records), 1U);
+    EXPECT_EQ(records[0].Prefix, "C+mh");
+    EXPECT_EQ(records[0].Skips, (std::vector<std::int32_t>{5, 12}));
+    EXPECT_EQ(WriteBasemodString(records), "C+mh,5,12;");
+}
+
+TEST(Basemods, ModCodeCountReflectsStride)
+{
+    EXPECT_EQ(ModCodeCount("C+m"), 1U);
+    EXPECT_EQ(ModCodeCount("C+m?"), 1U);
+    EXPECT_EQ(ModCodeCount("C+mh"), 2U);
+    EXPECT_EQ(ModCodeCount("C+mhf."), 3U);
+    EXPECT_EQ(ModCodeCount("C+76792"), 1U);  // numeric ChEBI code = single modification
+}
+
 TEST(Basemods, NBaseModCountsAllBases)
 {
     // The 'N' canonical base is a wildcard matching every base, so on a pure-ACGT read the

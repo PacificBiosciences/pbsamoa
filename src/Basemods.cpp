@@ -53,8 +53,14 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
                    (segment[prefixLen] <= '9')) {
                 ++prefixLen;
             }
-        } else if (prefixLen < std::size(segment)) {
-            ++prefixLen;  // single-letter mod code
+        } else {
+            // Letter mod code: consume the whole run, e.g. "C+mh" carries two modifications
+            // sharing one delta list (spec SAMtags: 'C+mh,5;' == 'C+m,5;C+h,5;').
+            while ((prefixLen < std::size(segment)) &&
+                   ((((segment[prefixLen] >= 'a') && (segment[prefixLen] <= 'z'))) ||
+                    (((segment[prefixLen] >= 'A') && (segment[prefixLen] <= 'Z'))))) {
+                ++prefixLen;
+            }
         }
         if ((prefixLen < std::size(segment)) &&
             ((segment[prefixLen] == '?') || (segment[prefixLen] == '.'))) {
@@ -102,6 +108,24 @@ std::string WriteBasemodString(std::span<const BasemodRecord> records)
         out += ';';
     }
     return out;
+}
+
+std::size_t ModCodeCount(std::string_view prefix)
+{
+    if (std::size(prefix) < 3) {
+        return 0;
+    }
+    std::string_view code{prefix.substr(2)};  // drop BASE + OP
+    if (!std::empty(code) && ((code.back() == '?') || (code.back() == '.'))) {
+        code.remove_suffix(1);
+    }
+    if (std::empty(code)) {
+        return 0;
+    }
+    if ((code.front() >= '0') && (code.front() <= '9')) {
+        return 1;  // a numeric ChEBI code is a single modification
+    }
+    return std::size(code);  // one modification per letter
 }
 
 BasemodClipWindow ClipBasemodRecord(const BasemodRecord& record, std::string_view sequence,

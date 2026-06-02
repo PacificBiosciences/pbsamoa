@@ -30,6 +30,13 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm);
 /// \brief Serialize modification records back into an MM tag string.
 std::string WriteBasemodString(std::span<const BasemodRecord> records);
 
+/// \brief Number of modification codes carried by a record's prefix: the count of
+/// letter codes (e.g. "C+mh" -> 2) or 1 for a numeric ChEBI code (e.g. "C+76792").
+///
+/// This is the ML stride — ML stores this many quality values per modification site,
+/// interleaved per site (spec SAMtags: "C+mh,5,12" -> ML m@0,h@0,m@1,h@1).
+std::size_t ModCodeCount(std::string_view prefix);
+
 /// \brief Partition of one record's modification sites against a query clip
 /// window [clipOffset, clipOffset + clipLength).
 struct BasemodClipWindow

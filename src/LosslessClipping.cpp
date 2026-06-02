@@ -206,13 +206,15 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
     if (const TagArray* mlArray{GetArray(tags, TagKey{'M', 'L'})}; mlArray != nullptr) {
         mlValues = DecodeIntArray(*mlArray);
     }
-    std::size_t totalSkips{0};
+    std::size_t totalMlValues{0};
     for (const BasemodRecord& rec : records) {
-        totalSkips += std::size(rec.Skips);
+        // ML carries ModCodeCount values per site (interleaved); multi-letter mods (e.g.
+        // "C+mh") therefore consume more ML entries than skip counts.
+        totalMlValues += std::size(rec.Skips) * ModCodeCount(rec.Prefix);
     }
     // Require ML to cover every MM site before slicing it; a short or malformed ML
     // is treated as absent rather than risking an out-of-range read.
-    const bool hasMl{!std::empty(mlValues) && (std::size(mlValues) >= totalSkips)};
+    const bool hasMl{!std::empty(mlValues) && (std::size(mlValues) >= totalMlValues)};
     const std::size_t clipLength{static_cast<std::size_t>(clipRight - clipLeft)};
 
     JSON::Json leadMM = JSON::Json::object();
@@ -227,22 +229,25 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
         const std::size_t total{std::size(rec.Skips)};
         const std::size_t frontN{window.FrontRemoved};
         const std::size_t trailStart{window.FrontRemoved + window.Retained};
+        // ML stride: each site occupies this many (interleaved) ML values.
+        const std::size_t stride{ModCodeCount(rec.Prefix)};
 
         if (frontN > 0) {
             leadMM[rec.Prefix] =
                 std::vector<std::int32_t>(std::cbegin(rec.Skips), std::cbegin(rec.Skips) + frontN);
             if (hasMl) {
-                leadML[rec.Prefix] = std::vector<std::int64_t>(
-                    std::cbegin(mlValues) + qvOffset, std::cbegin(mlValues) + qvOffset + frontN);
+                leadML[rec.Prefix] =
+                    std::vector<std::int64_t>(std::cbegin(mlValues) + qvOffset,
+                                              std::cbegin(mlValues) + qvOffset + frontN * stride);
             }
         }
         if (trailStart < total) {
             trailMM[rec.Prefix] = std::vector<std::int32_t>(std::cbegin(rec.Skips) + trailStart,
                                                             std::cend(rec.Skips));
             if (hasMl) {
-                trailML[rec.Prefix] =
-                    std::vector<std::int64_t>(std::cbegin(mlValues) + qvOffset + trailStart,
-                                              std::cbegin(mlValues) + qvOffset + total);
+                trailML[rec.Prefix] = std::vector<std::int64_t>(
+                    std::cbegin(mlValues) + qvOffset + trailStart * stride,
+                    std::cbegin(mlValues) + qvOffset + total * stride);
             }
         }
 
@@ -260,7 +265,7 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
             pMM[rec.Prefix] = lost;
         }
 
-        qvOffset += total;
+        qvOffset += total * stride;
     }
 
     if (!leadMM.empty()) {
