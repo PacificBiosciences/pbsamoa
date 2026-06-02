@@ -144,6 +144,13 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
     EXPECT_EQ(*tp, "circular");
 }
 
+TEST(SamHeader, HdCustomTagsRoundTrip)
+{
+    // Unknown @HD tags (here a local-use lowercase tag) must survive a parse/emit cycle.
+    const SamHeader header = *SamHeader::FromText("@HD\tVN:1.6\tSO:coordinate\tzz:custom\n");
+    EXPECT_NE(header.ToText().find("zz:custom"), std::string::npos);
+}
+
 TEST(SamHeader, HdLineWithoutVnRoundTrips)
 {
     // htslib preserves a VN-less @HD; the sort-order metadata must not be dropped.

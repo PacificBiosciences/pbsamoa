@@ -443,6 +443,9 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
                     header.groupOrder_ = std::string{value};
                 } else if (tag == "SS") {
                     header.subSort_ = std::string{value};
+                } else {
+                    // Preserve unknown/custom @HD tags so they round-trip, matching htslib.
+                    header.hdCustomTags_.emplace_back(std::string{tag}, std::string{value});
                 }
             }
             continue;
@@ -616,7 +619,7 @@ std::string SamHeader::ToText() const
     // @HD line: emit if any @HD field is set, not only VN, so a VN-less @HD carrying
     // sort-order metadata round-trips like htslib (build_header_line, header.c:743-756).
     if (!std::empty(version_) || !std::empty(sortOrder_) || !std::empty(groupOrder_) ||
-        !std::empty(subSort_)) {
+        !std::empty(subSort_) || !std::empty(hdCustomTags_)) {
         result += "@HD";
         if (!std::empty(version_)) {
             AppendSamField(result, "VN", version_);
@@ -630,6 +633,7 @@ std::string SamHeader::ToText() const
         if (!std::empty(subSort_)) {
             AppendSamField(result, "SS", subSort_);
         }
+        AppendCustomTags(result, hdCustomTags_);
         result += '\n';
     }
 

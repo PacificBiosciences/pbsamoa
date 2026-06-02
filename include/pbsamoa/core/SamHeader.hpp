@@ -221,6 +221,8 @@ private:
     std::string sortOrder_;
     std::string groupOrder_;
     std::string subSort_;
+    std::vector<std::pair<std::string, std::string>>
+        hdCustomTags_;  // @HD tags other than VN/SO/GO/SS
 
     std::vector<ReferenceSequence> references_;
     std::vector<ReadGroup> readGroups_;
