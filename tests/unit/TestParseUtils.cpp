@@ -73,6 +73,29 @@ TEST(ParseUtils, ParseRegionRejectsEndBeforeStart)
     EXPECT_EQ(region.error(), "region end must be >= start");
 }
 
+TEST(ParseUtils, ParseRegionRejectsEndOneBeforeStart)
+{
+    // The end is compared after the start has been converted to 0-based, so an end
+    // exactly one base before the start must still be rejected rather than silently
+    // becoming an empty range. "chr1:100-99" and "chr1:1-0" are both invalid.
+    const auto offByOne{ParseRegion("chr1:100-99", "ref:start-end")};
+    ASSERT_FALSE(offByOne);
+    EXPECT_EQ(offByOne.error(), "region end must be >= start");
+
+    const auto endZero{ParseRegion("chr1:1-0", "ref:start-end")};
+    ASSERT_FALSE(endZero);
+    EXPECT_EQ(endZero.error(), "region end must be >= start");
+}
+
+TEST(ParseUtils, ParseRegionAcceptsSingleBaseRange)
+{
+    // end == start (1-based) is the smallest valid range: one base.
+    const auto region{ParseRegion("chr1:100-100", "ref:start-end")};
+    ASSERT_TRUE(region);
+    EXPECT_EQ(region->Beg, 99);
+    EXPECT_EQ(region->End, 100);
+}
+
 }  // namespace Tools
 }  // namespace Samoa
 }  // namespace PacBio

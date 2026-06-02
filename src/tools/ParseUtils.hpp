@@ -101,7 +101,10 @@ inline std::expected<ParsedRegion, std::string> BuildParsedRegion(const ParsedRe
         if (!parsedEnd) {
             return std::unexpected{parsedEnd.error()};
         }
-        if (*parsedEnd < beg) {
+        // beg is already 0-based, parsedEnd is the 1-based inclusive end, so the smallest
+        // valid end equals beg + 1 (a single-base range). Reject end <= beg rather than
+        // end < beg, which would let an end one base before the start become an empty range.
+        if (*parsedEnd <= beg) {
             return std::unexpected{"region end must be >= start"};
         }
         end = *parsedEnd;
