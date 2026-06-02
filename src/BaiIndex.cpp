@@ -526,6 +526,18 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     std::optional<std::pair<std::int32_t, std::int32_t>> lastMappedCoordinate;
     bool sawUnmappedTailRecord{false};
 
+    // Per-reference statistics for the optional metadata pseudo-bin (37450), enabling
+    // samtools idxstats. begVo/endVo bracket every read placed on the reference.
+    struct RefMeta
+    {
+        std::uint64_t nMapped{0};
+        std::uint64_t nUnmapped{0};
+        std::uint64_t begVo{std::numeric_limits<std::uint64_t>::max()};
+        std::uint64_t endVo{0};
+    };
+
+    std::vector<RefMeta> refMeta(static_cast<std::size_t>(nRef));
+
     std::size_t accumPos{0};
 
     while (true) {
@@ -608,12 +620,18 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             }
             lastMappedCoordinate = currentCoordinate;
 
+            RefMeta& meta{refMeta[static_cast<std::size_t>(refId)]};
+            meta.begVo = std::min(meta.begVo, recordVo.Value());
+            meta.endVo = std::max(meta.endVo, recordEndVo.Value());
+
             if (isUnmapped) {
                 // Placed but unmapped: counted as per-reference n_unmapped (not n_no_coor),
                 // and not added to a bin since it has no alignment span.
                 ++placedUnmappedCount;
+                ++meta.nUnmapped;
             } else {
                 ++mappedCount;
+                ++meta.nMapped;
                 ReferenceIndex& refIdx{index.references_[refId]};
 
                 // Compute bin
@@ -655,6 +673,18 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         for (auto& [binNum, chunks] : ref.bins) {
             chunks = MergeChunks(chunks);
         }
+    }
+
+    // Emit the metadata pseudo-bin (37450) per reference. Added after the merge above so
+    // its two stat "chunks" — {begVo,endVo} and {n_mapped,n_unmapped} — are never merged.
+    for (std::int32_t r{0}; r < nRef; ++r) {
+        const RefMeta& meta{refMeta[static_cast<std::size_t>(r)]};
+        if ((meta.nMapped + meta.nUnmapped) == 0) {
+            continue;
+        }
+        std::vector<Chunk>& metaBin{index.references_[r].bins[BAI_METADATA_BIN]};
+        metaBin.push_back(Chunk{VirtualOffset{meta.begVo}, VirtualOffset{meta.endVo}});
+        metaBin.push_back(Chunk{VirtualOffset{meta.nMapped}, VirtualOffset{meta.nUnmapped}});
     }
 
     index.mappedCount_ = mappedCount;

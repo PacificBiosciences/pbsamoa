@@ -316,9 +316,13 @@ TEST(BaiIndex, BuildQueryRoundTripDiverseBam)
     EXPECT_GE(index.NumReferences(), 1);
     EXPECT_GT(index.MappedCount(), 0u);
 
-    // Verify chunk offsets point past the header block (> 0)
+    // Verify chunk offsets point past the header block (> 0). The metadata pseudo-bin
+    // (37450) carries statistics, not file offsets, so it is excluded.
     const ReferenceIndex& ref0{index.Reference(0)};
     for (const auto& [binNum, chunks] : ref0.bins) {
+        if (binNum == 37450U) {
+            continue;
+        }
         for (const Chunk& chunk : chunks) {
             EXPECT_GT(chunk.Begin.BlockOffset(), 0u)
                 << "Chunk begin should point past header block";
@@ -337,6 +341,9 @@ TEST(BaiIndex, BuildQueryRoundTripDiverseBam)
     // Query chr1:0-1000 — expect 10 records
     BamRawReader reader{tmpBam};
     const auto builtIndex = BaiIndex::FromFile(tmpBai);
+    // The metadata pseudo-bin must round-trip the mapped/unmapped counts (samtools idxstats).
+    EXPECT_EQ(builtIndex.MappedCount(), index.MappedCount());
+    EXPECT_EQ(builtIndex.UnmappedCount(), index.UnmappedCount());
     std::int32_t count{0};
     for ([[maybe_unused]] const auto& record : reader.Query(builtIndex, 0, 0, 1000)) {
         ++count;
