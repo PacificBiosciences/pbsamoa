@@ -687,22 +687,26 @@ CramCodecDecodeKind SubexpCodec::DecodeKind() const { return CramCodecDecodeKind
 std::int32_t SubexpCodec::DecodeInt(CramBitReader& coreReader,
                                     CramExternalBlockStore& /*extBlocks*/)
 {
-    // Read unary prefix
-    int numBits = k_;
+    // Read the unary prefix: a run of 1s terminated by a 0 (the 0 is consumed here).
     std::int32_t unary = 0;
     while (coreReader.ReadBit() == 1) {
         ++unary;
-        ++numBits;
     }
 
+    // Canonical Golomb-subexponential code (htslib cram_subexp_decode, cram_codecs.c:2434):
+    // an empty prefix has a k-bit suffix; a prefix of length u has a (k+u-1)-bit suffix plus
+    // an added base of 2^(k+u-1).
     std::int32_t value = 0;
-    if (numBits > 0) {
-        value = coreReader.ReadBits(numBits);
-    }
-
-    // Add base value for the unary prefix
-    if (unary > 0) {
-        value += (1 << (k_ + unary - 1));
+    if (unary == 0) {
+        if (k_ > 0) {
+            value = coreReader.ReadBits(k_);
+        }
+    } else {
+        const int numBits = k_ + unary - 1;
+        if (numBits > 0) {
+            value = coreReader.ReadBits(numBits);
+        }
+        value += (std::int32_t{1} << (k_ + unary - 1));
     }
 
     return value - offset_;
@@ -722,28 +726,31 @@ std::vector<std::byte> SubexpCodec::DecodeByteArray(CramBitReader& /*coreReader*
 void SubexpCodec::EncodeInt(std::int32_t value, CramBitWriter& coreWriter,
                             CramExternalBlockStore& /*extBlocks*/)
 {
-    const auto adjusted = value + offset_;
+    const std::int32_t adjusted = value + offset_;
 
-    // Find the appropriate unary prefix
-    std::int32_t base = 0;
-    int numBits = k_;
-    int unary = 0;
-
-    while (adjusted >= base + (1 << numBits)) {
-        base += (1 << numBits);
-        ++numBits;
+    // Inverse of DecodeInt. The prefix length u is the smallest count with adjusted < 2^(k+u);
+    // u == 0 maps to a k-bit suffix, otherwise a (k+u-1)-bit suffix over base 2^(k+u-1).
+    std::int32_t unary = 0;
+    while (adjusted >= (std::int64_t{1} << (k_ + unary))) {
         ++unary;
     }
 
-    // Write unary prefix (unary 1s followed by a 0)
-    for (int i = 0; i < unary; ++i) {
+    // Write the unary prefix (u ones followed by a terminating 0).
+    for (std::int32_t i = 0; i < unary; ++i) {
         coreWriter.WriteBit(1);
     }
     coreWriter.WriteBit(0);
 
-    // Write the remainder
-    if (numBits > 0) {
-        coreWriter.WriteBits(adjusted - base, numBits);
+    // Write the remainder.
+    if (unary == 0) {
+        if (k_ > 0) {
+            coreWriter.WriteBits(adjusted, k_);
+        }
+    } else {
+        const int numBits = k_ + unary - 1;
+        if (numBits > 0) {
+            coreWriter.WriteBits(adjusted - (std::int32_t{1} << (k_ + unary - 1)), numBits);
+        }
     }
 }
 

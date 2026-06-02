@@ -930,6 +930,31 @@ TEST(CramCodec, DecodeKindMatchesCodecCapabilities)
     EXPECT_EQ(byteArrayStopCodec.DecodeKind(), CramCodecDecodeKind::BYTE_ARRAY);
 }
 
+TEST(CramCodec, SubexpRoundTripCanonical)
+{
+    // Encode then decode a series; sequential decoding only stays aligned if each value
+    // consumes exactly the bits written (the over-read bug misaligns subsequent values).
+    // This is the canonical Golomb-subexponential bitstream htslib decodes.
+    const std::vector<std::int32_t> values{0, 1, 2, 3, 4, 6, 7, 8, 15, 16, 31, 100, 255, 500};
+    for (const std::int32_t k : {0, 1, 2, 3, 4}) {
+        for (const std::int32_t offset : {0, 3}) {
+            SubexpCodec codec{offset, k};
+            CramBitWriter writer;
+            CramExternalBlockStore store;
+            for (const std::int32_t v : values) {
+                codec.EncodeInt(v, writer, store);
+            }
+            writer.Flush();
+
+            const auto data = writer.Data();
+            CramBitReader reader{data};
+            for (const std::int32_t v : values) {
+                EXPECT_EQ(codec.DecodeInt(reader, store), v) << "k=" << k << " offset=" << offset;
+            }
+        }
+    }
+}
+
 TEST(CramCodec, HuffmanSingleSymbol)
 {
     HuffmanCodec codec({42}, {0});
