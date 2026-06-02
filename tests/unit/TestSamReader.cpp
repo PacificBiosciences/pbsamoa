@@ -183,21 +183,28 @@ TEST_F(SamReaderTempFile, StarSequenceAndQuality)
     EXPECT_TRUE(std::empty(record->Cigar()));
 }
 
-TEST_F(SamReaderTempFile, HeaderlessSam)
+TEST_F(SamReaderTempFile, HeaderlessSamUnmappedParses)
 {
-    // SAM with no header lines — records still parse, but refId will be -1
+    // SAM with no header lines: an unmapped record (RNAME '*') still parses with refId -1.
     const auto path =
-        WriteTempSam("headerless.sam", "read1\t0\tchr1\t100\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n");
+        WriteTempSam("headerless.sam", "read1\t4\t*\t0\t0\t*\t*\t0\t0\tACGTACGTAC\t*\n");
     SamReader reader{path};
 
-    // Empty header
     EXPECT_EQ(reader.Header().NumReferences(), 0);
     const auto record{reader.ReadRecord()};
     ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "read1");
-    // No header reference dictionary → ReferenceId returns -1
     EXPECT_EQ(record->RefId(), -1);
     EXPECT_EQ(record->Sequence(), "ACGTACGTAC");
+}
+
+TEST_F(SamReaderTempFile, HeaderlessSamWithMappedReadIsRejected)
+{
+    // htslib aborts when a non-'*' RNAME appears but the header has no @SQ lines.
+    const auto path = WriteTempSam("headerless_mapped.sam",
+                                   "read1\t0\tchr1\t100\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n");
+    SamReader reader{path};
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, EmptyFile)

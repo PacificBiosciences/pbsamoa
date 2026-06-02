@@ -66,10 +66,17 @@ void StripTrailingCr(std::string& line)
 }
 
 std::int32_t ParseReferenceId(std::string_view refName, const SamHeader& header,
-                              std::uint64_t lineNumber, std::string_view fieldName)
+                              std::uint64_t lineNumber, std::string_view fieldName,
+                              bool requireSqLines)
 {
     if (refName == "*") {
         return -1;
+    }
+
+    // htslib aborts on a non-'*' RNAME when the header has no @SQ lines (RNEXT only warns).
+    if (requireSqLines && (header.NumReferences() == 0)) {
+        throw std::runtime_error{
+            std::format("SamReader: line {}: no SQ lines present in the header", lineNumber)};
     }
 
     const std::int32_t refId{header.ReferenceId(refName)};
@@ -182,7 +189,7 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
     record.Flag(ParseInteger<std::uint16_t>(fields[1], "FLAG"));
 
-    record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME"));
+    record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME", /*requireSqLines=*/true));
 
     const std::int32_t pos{ParseInteger<std::int32_t>(fields[3], "POS")};
     record.Pos(ToZeroBasedSamPosition(pos));
@@ -198,7 +205,8 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
     if (fields[6] == "=") {
         record.NextRefId(record.RefId());
     } else {
-        record.NextRefId(ParseReferenceId(fields[6], header, lineNumber, "RNEXT"));
+        record.NextRefId(
+            ParseReferenceId(fields[6], header, lineNumber, "RNEXT", /*requireSqLines=*/false));
     }
 
     const std::int32_t pnext{ParseInteger<std::int32_t>(fields[7], "PNEXT")};
