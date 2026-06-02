@@ -1122,35 +1122,35 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
                 SerializeBArrayInt8(std::data(data) + offset, count, out);
                 offset += count;
             } else if (elemType == 's') {
-                if ((offset + count * 2) > std::size(data)) {
+                if ((offset + static_cast<std::size_t>(count) * 2) > std::size(data)) {
                     break;
                 }
                 SerializeBArrayInt<std::int16_t>(std::data(data) + offset, count, out);
-                offset += count * 2;
+                offset += static_cast<std::size_t>(count) * 2;
             } else if (elemType == 'S') {
-                if ((offset + count * 2) > std::size(data)) {
+                if ((offset + static_cast<std::size_t>(count) * 2) > std::size(data)) {
                     break;
                 }
                 SerializeBArrayInt<std::uint16_t>(std::data(data) + offset, count, out);
-                offset += count * 2;
+                offset += static_cast<std::size_t>(count) * 2;
             } else if (elemType == 'i') {
-                if ((offset + count * 4) > std::size(data)) {
+                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
                     break;
                 }
                 SerializeBArrayInt<std::int32_t>(std::data(data) + offset, count, out);
-                offset += count * 4;
+                offset += static_cast<std::size_t>(count) * 4;
             } else if (elemType == 'I') {
-                if ((offset + count * 4) > std::size(data)) {
+                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
                     break;
                 }
                 SerializeBArrayInt<std::uint32_t>(std::data(data) + offset, count, out);
-                offset += count * 4;
+                offset += static_cast<std::size_t>(count) * 4;
             } else if (elemType == 'f') {
-                if ((offset + count * 4) > std::size(data)) {
+                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
                     break;
                 }
                 SerializeBArrayFloat(std::data(data) + offset, count, out);
-                offset += count * 4;
+                offset += static_cast<std::size_t>(count) * 4;
             }
         }
     }
