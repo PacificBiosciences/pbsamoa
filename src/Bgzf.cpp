@@ -1482,8 +1482,17 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                                              &decompressors, &counters});
         }
     } catch (...) {
-        // Exceptions from Submit() are expected during shutdown (pool finalized).
-        // Pool's fail-fast mechanism handles other errors.
+        // A stop request means shutdown is in progress (e.g. Submit() throwing after the
+        // pool was finalized) — expected, ignore it. Anything else is a real read error
+        // (truncated/invalid block in the record region, open failure) that must reach the
+        // consumer instead of finalizing as a clean EOF and silently dropping records.
+        if (!stopToken.stop_requested()) {
+            const std::lock_guard lock{errorMutex};
+            if (!pipelineError.load(std::memory_order_relaxed)) {
+                errorPtr = std::current_exception();
+                pipelineError.store(true, std::memory_order_release);
+            }
+        }
     }
 
     // Signal no more work

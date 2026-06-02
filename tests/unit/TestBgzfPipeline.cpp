@@ -1,4 +1,5 @@
 #include "TestData.hpp"
+#include "TestTempDir.hpp"
 
 #include <pbsamoa/core/Bgzf.hpp>
 
@@ -284,6 +285,29 @@ TEST(BgzfReaderBam, ReadRecordEofOnHeaderOnly)
     // Should immediately return nullopt — no records in header-only file
     const auto rec{pipeline.ReadRecord()};
     EXPECT_FALSE(rec);
+}
+
+TEST(BgzfReaderBam, ParallelReadSurfacesTruncatedRecordBlock)
+{
+    // A truncated BGZF block in the record region must surface as a read error in
+    // parallel mode, not finalize as a clean EOF (which would silently drop the records
+    // already accumulated in the in-flight batch). Copy a valid multi-block BAM and cut
+    // into the last data block by dropping the 28-byte EOF marker plus two body bytes.
+    const std::filesystem::path src{tests::DataDir / "many_records.bam"};
+    tests::TempDirGuard tempDir{"bgzf_trunc"};
+    const std::filesystem::path corrupt{tempDir.File("truncated.bam")};
+    std::filesystem::copy_file(src, corrupt);
+    const auto size{std::filesystem::file_size(corrupt)};
+    ASSERT_GT(size, 30U);
+    std::filesystem::resize_file(corrupt, size - 30);
+
+    BgzfReader pipeline{corrupt, 4};
+    EXPECT_THROW(
+        {
+            while (pipeline.ReadRecord()) {
+            }
+        },
+        std::runtime_error);
 }
 
 TEST(BgzfReaderBam, ParseHeaderMatchesBamRawReader)
