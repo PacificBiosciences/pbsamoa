@@ -151,6 +151,11 @@ std::expected<PacBio::Samoa::ReferenceSequence, std::string> ParseReferenceSeque
             if (!parsedLength) {
                 return std::unexpected{std::move(parsedLength.error())};
             }
+            // htslib (header.c:158-187) tolerates a repeated LN with the same value but
+            // rejects conflicting values; a duplicate same-value LN is harmless.
+            if (length && (*length != *parsedLength)) {
+                return std::unexpected{"@SQ line has multiple LN tags with different values"};
+            }
             length = *parsedLength;
         } else {
             tags.emplace_back(std::string{tag}, std::string{value});
