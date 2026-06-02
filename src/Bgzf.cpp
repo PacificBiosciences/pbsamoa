@@ -1437,7 +1437,9 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 
                 const std::uint32_t isize{ReadU32LE(std::data(compressed) + info->blockSize - 4U)};
                 if (isize == 0U) {
-                    break;  // EOF marker
+                    // Empty block (EOF marker or appended-file boundary). The block has been
+                    // fully consumed; skip it and keep reading. Real EOF is gcount()==0 above.
+                    continue;
                 }
                 const std::uint32_t crc32{ReadU32LE(std::data(compressed) + info->blockSize - 8U)};
 
@@ -1524,52 +1526,56 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
 
 std::optional<std::size_t> BgzfPipelineState::ReadBlockSync(std::span<std::byte> buffer)
 {
-    syncBlockOffset = static_cast<std::uint64_t>(syncFile.tellg());
+    // Loop so that empty blocks (the EOF marker or an appended-file boundary) are skipped
+    // rather than mistaken for end-of-file. Physical EOF is a header read of zero bytes.
+    while (true) {
+        syncBlockOffset = static_cast<std::uint64_t>(syncFile.tellg());
 
-    syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed)), BGZF_HEADER_SIZE);
-    if (syncFile.gcount() == 0) {
-        return 0U;
-    }
-    if (syncFile.gcount() < BGZF_HEADER_SIZE) {
-        return std::nullopt;
-    }
+        syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed)), BGZF_HEADER_SIZE);
+        if (syncFile.gcount() == 0) {
+            return 0U;
+        }
+        if (syncFile.gcount() < BGZF_HEADER_SIZE) {
+            return std::nullopt;
+        }
 
-    const std::optional<BgzfBlockInfo> info{
-        ParseBgzfBlockHeader(std::span<const std::byte>{syncCompressed}.first(BGZF_HEADER_SIZE))};
-    if (!info) {
-        return std::nullopt;
-    }
+        const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
+            std::span<const std::byte>{syncCompressed}.first(BGZF_HEADER_SIZE))};
+        if (!info) {
+            return std::nullopt;
+        }
 
-    const std::size_t blockSize{info->blockSize};
-    const std::size_t remaining{blockSize - static_cast<std::size_t>(BGZF_HEADER_SIZE)};
-    syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed) + BGZF_HEADER_SIZE),
-                  static_cast<std::streamsize>(remaining));
-    if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
-        return std::nullopt;
-    }
+        const std::size_t blockSize{info->blockSize};
+        const std::size_t remaining{blockSize - static_cast<std::size_t>(BGZF_HEADER_SIZE)};
+        syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed) + BGZF_HEADER_SIZE),
+                      static_cast<std::streamsize>(remaining));
+        if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
+            return std::nullopt;
+        }
 
-    const std::uint32_t isize{ReadU32LE(std::data(syncCompressed) + blockSize - 4U)};
-    if (isize == 0U) {
-        return 0U;
-    }
-    if (std::size(buffer) < isize) {
-        return std::nullopt;
-    }
+        const std::uint32_t isize{ReadU32LE(std::data(syncCompressed) + blockSize - 4U)};
+        if (isize == 0U) {
+            continue;  // empty block — skip and read the next one
+        }
+        if (std::size(buffer) < isize) {
+            return std::nullopt;
+        }
 
-    std::size_t actualOut{0};
-    const libdeflate_result result{libdeflate_deflate_decompress(
-        syncDecompressor.get(), std::data(syncCompressed) + info->compressedDataOffset,
-        info->compressedDataSize, std::data(buffer), isize, &actualOut)};
-    if (result != LIBDEFLATE_SUCCESS) {
-        return std::nullopt;
-    }
+        std::size_t actualOut{0};
+        const libdeflate_result result{libdeflate_deflate_decompress(
+            syncDecompressor.get(), std::data(syncCompressed) + info->compressedDataOffset,
+            info->compressedDataSize, std::data(buffer), isize, &actualOut)};
+        if (result != LIBDEFLATE_SUCCESS) {
+            return std::nullopt;
+        }
 
-    const std::uint32_t expectedCrc{ReadU32LE(std::data(syncCompressed) + blockSize - 8U)};
-    if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
-        return std::nullopt;
-    }
+        const std::uint32_t expectedCrc{ReadU32LE(std::data(syncCompressed) + blockSize - 8U)};
+        if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
+            return std::nullopt;
+        }
 
-    return actualOut;
+        return actualOut;
+    }
 }
 
 const SamHeader& BgzfPipelineState::Header() const
@@ -1795,58 +1801,62 @@ void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
 
 std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> buffer)
 {
-    syncBlockOffset = syncFile.tellg();
+    // Loop so that empty blocks (the EOF marker or an appended-file boundary) are skipped
+    // rather than mistaken for end-of-file. Physical EOF is a header read of zero bytes.
+    while (true) {
+        syncBlockOffset = syncFile.tellg();
 
-    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf)), BGZF_HEADER_SIZE);
-    if (syncFile.gcount() == 0) {
-        return 0U;
-    }
-    if (syncFile.gcount() < BGZF_HEADER_SIZE) {
-        return std::nullopt;
-    }
+        syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf)), BGZF_HEADER_SIZE);
+        if (syncFile.gcount() == 0) {
+            return 0U;
+        }
+        if (syncFile.gcount() < BGZF_HEADER_SIZE) {
+            return std::nullopt;
+        }
 
-    const std::optional<BgzfBlockInfo> info{
-        ParseBgzfBlockHeader(std::span<const std::byte>{compressedBuf}.first(
-            static_cast<std::size_t>(BGZF_HEADER_SIZE)))};
-    if (!info) {
-        return std::nullopt;
-    }
+        const std::optional<BgzfBlockInfo> info{
+            ParseBgzfBlockHeader(std::span<const std::byte>{compressedBuf}.first(
+                static_cast<std::size_t>(BGZF_HEADER_SIZE)))};
+        if (!info) {
+            return std::nullopt;
+        }
 
-    const std::size_t blockSize{info->blockSize};
-    const std::size_t remaining{blockSize - BGZF_HEADER_SIZE};
-    if (std::size(compressedBuf) < blockSize) {
-        compressedBuf.resize(blockSize);
-    }
+        const std::size_t blockSize{info->blockSize};
+        const std::size_t remaining{blockSize - BGZF_HEADER_SIZE};
+        if (std::size(compressedBuf) < blockSize) {
+            compressedBuf.resize(blockSize);
+        }
 
-    syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf) + BGZF_HEADER_SIZE),
-                  static_cast<std::streamsize>(remaining));
-    if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
-        return std::nullopt;
-    }
+        syncFile.read(reinterpret_cast<char*>(std::data(compressedBuf) + BGZF_HEADER_SIZE),
+                      static_cast<std::streamsize>(remaining));
+        if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
+            return std::nullopt;
+        }
 
-    const std::uint32_t isize{ReadU32LE(std::data(compressedBuf) + blockSize - 4U)};
-    if (isize == 0U) {
-        return 0U;
-    }
+        const std::uint32_t isize{ReadU32LE(std::data(compressedBuf) + blockSize - 4U)};
+        if (isize == 0U) {
+            continue;  // empty block — skip and read the next one
+        }
 
-    if (std::size(buffer) < static_cast<std::size_t>(isize)) {
-        return std::nullopt;
-    }
+        if (std::size(buffer) < static_cast<std::size_t>(isize)) {
+            return std::nullopt;
+        }
 
-    std::size_t actualOut{0};
-    const libdeflate_result result{libdeflate_deflate_decompress(
-        syncDecompressor.get(), std::data(compressedBuf) + info->compressedDataOffset,
-        info->compressedDataSize, std::data(buffer), isize, &actualOut)};
-    if (result != LIBDEFLATE_SUCCESS) {
-        return std::nullopt;
-    }
+        std::size_t actualOut{0};
+        const libdeflate_result result{libdeflate_deflate_decompress(
+            syncDecompressor.get(), std::data(compressedBuf) + info->compressedDataOffset,
+            info->compressedDataSize, std::data(buffer), isize, &actualOut)};
+        if (result != LIBDEFLATE_SUCCESS) {
+            return std::nullopt;
+        }
 
-    const std::uint32_t expectedCrc{ReadU32LE(std::data(compressedBuf) + blockSize - 8U)};
-    if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
-        return std::nullopt;
-    }
+        const std::uint32_t expectedCrc{ReadU32LE(std::data(compressedBuf) + blockSize - 8U)};
+        if (!BgzfCrcValid(expectedCrc, std::data(buffer), actualOut)) {
+            return std::nullopt;
+        }
 
-    return actualOut;
+        return actualOut;
+    }
 }
 
 void BgzfReader::Impl::ParseHeaderSync()
