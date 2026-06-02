@@ -360,6 +360,23 @@ TEST(TagSamParse, NegativeInteger)
     EXPECT_EQ(std::get<std::int64_t>(result->second), -10);
 }
 
+TEST(TagSamParse, IntegerOutOfBamRangeRejected)
+{
+    // [INT32_MIN, UINT32_MAX] is the representable range; htslib rejects wider values.
+    EXPECT_TRUE(ParseTagFromSam("ZZ:i:4294967295").has_value());    // UINT32_MAX: ok
+    EXPECT_FALSE(ParseTagFromSam("ZZ:i:4294967296").has_value());   // > UINT32_MAX
+    EXPECT_TRUE(ParseTagFromSam("ZZ:i:-2147483648").has_value());   // INT32_MIN: ok
+    EXPECT_FALSE(ParseTagFromSam("ZZ:i:-2147483649").has_value());  // < INT32_MIN
+}
+
+TEST(TagSerialize, IntegerOutOfBamRangeThrows)
+{
+    // The BAM encode path must fail loud rather than silently truncate to 32 bits.
+    TagMap tags;
+    tags.Set(TagKey{'Z', 'Z'}, TagValue{std::int64_t{5'000'000'000}});  // > UINT32_MAX
+    EXPECT_THROW((void)SerializeTagsToBam(tags), std::runtime_error);
+}
+
 TEST(TagSamParse, StringTag)
 {
     const ParsedTag result{ParseTagFromSam("RG:Z:lane1")};

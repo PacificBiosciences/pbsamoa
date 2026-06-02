@@ -238,6 +238,13 @@ void AppendTagArrayElementToSam(std::string& result, char elemType, const std::b
 
 char SmallestIntType(std::int64_t v)
 {
+    // A BAM integer tag is representable only in [INT32_MIN, UINT32_MAX]; htslib
+    // (bam_aux_update_int) rejects wider values. Fail loud instead of truncating to 32 bits.
+    if ((v < std::numeric_limits<std::int32_t>::min()) ||
+        (v > std::numeric_limits<std::uint32_t>::max())) {
+        throw std::runtime_error{
+            std::format("Tags: integer tag value {} out of BAM-representable 32-bit range", v)};
+    }
     if ((v >= 0) && (v <= 255)) {
         return 'C';
     }
@@ -734,6 +741,12 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
         case 'i': {
             std::int64_t v{0};
             if (!ParseExact(valueStr, v)) {
+                return std::nullopt;
+            }
+            // The spec range for a SAM 'i' tag is [INT32_MIN, UINT32_MAX]; htslib rejects
+            // anything outside it rather than truncating into 32 bits.
+            if ((v < std::numeric_limits<std::int32_t>::min()) ||
+                (v > std::numeric_limits<std::uint32_t>::max())) {
                 return std::nullopt;
             }
             return std::pair{key, TagValue{v}};
