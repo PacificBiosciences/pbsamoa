@@ -927,6 +927,10 @@ struct CramReader::Impl
             std::ranges::copy(headerBytes, std::begin(eofCandidate));
             std::ranges::copy(eofTail, std::begin(eofCandidate) + 4);
 
+            // Byte 8 is an ITF-8 length nibble; only its low 4 bits are significant, so
+            // mask before comparing (matches htslib cram_check_EOF and the ITF-8 decoder).
+            eofCandidate[8] &= std::byte{0x0f};
+
             if (std::ranges::equal(CRAM_EOF_MARKER, eofCandidate)) {
                 atEof = true;
                 return std::nullopt;

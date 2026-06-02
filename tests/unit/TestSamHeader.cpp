@@ -144,6 +144,13 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
     EXPECT_EQ(*tp, "circular");
 }
 
+TEST(SamHeader, CommentLineWithoutTabIsRejected)
+{
+    // A @CO line must carry a tab-separated comment; htslib rejects a bare "@CO".
+    EXPECT_FALSE(SamHeader::FromText("@CO\n").has_value());
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@CO\n").has_value());
+}
+
 TEST(SamHeader, HdCustomTagsRoundTrip)
 {
     // Unknown @HD tags (here a local-use lowercase tag) must survive a parse/emit cycle.

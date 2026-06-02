@@ -195,11 +195,15 @@ TEST(Reg2Bins, LargeRegionProducesManyBins)
     EXPECT_GT(std::size(bins), 10U);
 }
 
-TEST(CigarParse, ZeroLengthOpReturnsError)
+TEST(CigarParse, ZeroLengthOpAccepted)
 {
-    EXPECT_FALSE(ParseCigar("0M"));
-    EXPECT_FALSE(ParseCigar("0S2M"));
-    EXPECT_FALSE(ParseCigar("3M0D2I"));
+    // Zero-length ops are grammar-valid and accepted by htslib; pbsamoa matches that.
+    EXPECT_TRUE(ParseCigar("0M").has_value());
+    EXPECT_TRUE(ParseCigar("0S2M").has_value());
+    const auto cigar{ParseCigar("3M0D2I")};
+    ASSERT_TRUE(cigar);
+    ASSERT_EQ(std::size(*cigar), 3U);
+    EXPECT_EQ((*cigar)[1], CigarOp(CigarOpType::D, 0));
 }
 
 TEST(CigarParse, EmptyStringReturnsEmpty)

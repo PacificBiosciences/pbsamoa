@@ -1101,7 +1101,12 @@ bool IsCramEofMarker(std::span<const std::byte> data)
     if (std::size(data) < std::size(CRAM_EOF_MARKER)) {
         return false;
     }
-    return std::ranges::equal(CRAM_EOF_MARKER, data.first(std::size(CRAM_EOF_MARKER)));
+    // Byte 8 is an ITF-8 length nibble; only its low 4 bits are significant. Mask the
+    // candidate before comparing (matches htslib cram_check_EOF); CRAM_EOF_MARKER[8] is 0x0f.
+    std::array<std::byte, std::size(CRAM_EOF_MARKER)> candidate{};
+    std::ranges::copy(data.first(std::size(CRAM_EOF_MARKER)), std::begin(candidate));
+    candidate[8] &= std::byte{0x0f};
+    return std::ranges::equal(CRAM_EOF_MARKER, candidate);
 }
 
 }  // namespace Samoa

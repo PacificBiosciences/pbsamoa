@@ -482,11 +482,13 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
             continue;
         }
         if (recordType == "@CO") {
-            // @CO line: everything after first tab is the comment
+            // @CO line: everything after the first tab is the comment. A @CO without a tab
+            // is malformed; reject it (htslib header.c:805-809) rather than dropping it.
             const std::size_t tabPos{line.find('\t')};
-            if (tabPos != std::string_view::npos) {
-                header.comments_.emplace_back(line.substr(tabPos + 1));
+            if (tabPos == std::string_view::npos) {
+                return std::unexpected{"Missing tab in @CO line"};
             }
+            header.comments_.emplace_back(line.substr(tabPos + 1));
             continue;
         }
         // Ignore unknown header line types (forward compatibility)
@@ -524,12 +526,19 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
 
     // Parse binary reference dictionary
     std::size_t offset{8 + lText};
-    const std::uint32_t nRef{PacBio::Samoa::ReadU32LE(std::data(data) + offset)};
+    const std::int32_t nRefSigned{PacBio::Samoa::ReadI32LE(std::data(data) + offset)};
     offset += 4;
+    if (nRefSigned < 0) {
+        return std::unexpected{"Invalid BAM binary header: negative n_ref"};
+    }
+    const std::uint32_t nRef{static_cast<std::uint32_t>(nRefSigned)};
 
-    // Build references from binary dict (authoritative for name/length)
+    // Build references from binary dict (authoritative for name/length). Bound the
+    // reservation by the bytes actually available (each ref entry is >= 8 bytes: 4-byte
+    // l_name + name + 4-byte l_ref) so a hostile n_ref cannot trigger std::bad_alloc.
     std::vector<ReferenceSequence> binaryRefs;
-    binaryRefs.reserve(nRef);
+    binaryRefs.reserve(
+        std::min<std::size_t>(static_cast<std::size_t>(nRef), (std::size(data) - offset) / 8U));
 
     for (std::uint32_t i = 0; i < nRef; ++i) {
         if (offset + 4 > std::size(data)) {
@@ -537,16 +546,17 @@ std::expected<SamHeader, std::string> SamHeader::FromBamHeaderBlock(std::span<co
         }
         const std::uint32_t lName{PacBio::Samoa::ReadU32LE(std::data(data) + offset)};
         offset += 4;
+        if (lName == 0) {
+            // l_name includes the NUL terminator, so it must be >= 1 (htslib sam.c:334).
+            return std::unexpected{"Invalid BAM binary header: zero-length reference name"};
+        }
 
         if (offset + lName + 4 > std::size(data)) {
             return std::unexpected{"BAM header block truncated in reference name"};
         }
 
         // Name is NUL-terminated, lName includes the NUL
-        std::size_t nameLength{0};
-        if (lName != 0) {
-            nameLength = static_cast<std::size_t>(lName - 1);
-        }
+        const std::size_t nameLength{static_cast<std::size_t>(lName - 1)};
         std::string name{reinterpret_cast<const char*>(std::data(data) + offset), nameLength};
         offset += lName;
         const std::int32_t lRef{PacBio::Samoa::ReadI32LE(std::data(data) + offset)};

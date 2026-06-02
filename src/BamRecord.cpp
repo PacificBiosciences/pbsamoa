@@ -64,12 +64,14 @@ std::int32_t IntTagOr(const TagMap& tags, TagKey key, std::int32_t fallback)
     return fallback;
 }
 
-std::uint16_t ComputeBamBin(std::int32_t pos, CigarView cigar)
+std::uint16_t ComputeBamBin(std::int32_t pos, CigarView cigar, bool isMapped)
 {
     if (pos < 0) {
         return BAM_UNMAPPED_BIN;
     }
-    if (std::empty(cigar)) {
+    // htslib keys the bin on mappedness: a placed-unmapped read (or one without a CIGAR)
+    // is binned over [pos, pos+1), not over its CIGAR reference span.
+    if (!isMapped || std::empty(cigar)) {
         return Reg2Bin(pos, pos + 1);
     }
 
@@ -204,7 +206,10 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
             "BamRecord::SerializeToBam: read name exceeds "
             "BAM limit of 254 characters"};
     }
-    const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(name_) + 1)};  // +NUL
+    // An empty QNAME is written as the placeholder "*" (htslib bam_set1, sam.c:534-538).
+    const std::string_view effectiveName{std::empty(name_) ? std::string_view{"*"}
+                                                           : std::string_view{name_}};
+    const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(effectiveName) + 1)};  // +NUL
 
     // A CIGAR with >65535 ops cannot fit n_cigar_op; BAM stores a 2-op 'kSmN' placeholder
     // and the real ops in a CG:B,I tag (SAMv1 §4.2.2), matching htslib.
@@ -230,7 +235,7 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     const std::uint32_t packedSeqLen{(seqLen + 1) / 2};
 
     // Compute bin
-    const std::uint16_t bin{ComputeBamBin(pos_, cigar_)};
+    const std::uint16_t bin{ComputeBamBin(pos_, cigar_, IsMapped())};
 
     // Compute tag size without allocating
     const std::size_t tagSize{SerializedBamSize(tags_)};
@@ -261,9 +266,9 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     std::size_t offset{32};
 
     // Read name (NUL-terminated)
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(name_)), std::size(name_),
-                        p + offset);
-    p[offset + std::size(name_)] = std::byte{0};
+    std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(effectiveName)),
+                        std::size(effectiveName), p + offset);
+    p[offset + std::size(effectiveName)] = std::byte{0};
     offset += nameLen;
 
     // CIGAR (array of uint32). A long CIGAR writes the 2-op 'kSmN' placeholder here; the

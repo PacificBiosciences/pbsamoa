@@ -240,6 +240,19 @@ TEST(BamRecord, SerializeToBamNameOverflowThrows)
     EXPECT_NO_THROW(rec.SerializeToBam());
 }
 
+TEST(BamRecord, EmptyNameSerializesAsStar)
+{
+    // An empty QNAME is written as the placeholder "*" (htslib bam_set1).
+    BamRecord rec;
+    rec.Name("").Flag(4).Sequence("");
+    const std::vector<std::byte> bytes{rec.SerializeToBam()};
+
+    const std::uint8_t lReadName{static_cast<std::uint8_t>(bytes[8])};
+    ASSERT_EQ(lReadName, 2U);  // '*' + NUL
+    EXPECT_EQ(static_cast<char>(bytes[32]), '*');
+    EXPECT_EQ(static_cast<char>(bytes[33]), '\0');
+}
+
 TEST(BamRecord, LongCigarRoundTripsViaCgTag)
 {
     // A CIGAR with > 65535 ops must serialize as the kSmN placeholder + CG:B,I tag and

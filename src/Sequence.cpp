@@ -21,7 +21,8 @@ constexpr std::array<char, 256> MakeComplementTable()
     table['c'] = 'g';
     table['g'] = 'c';
     table['n'] = 'n';
-    // IUPAC ambiguity codes
+    table['='] = '=';  // '=' (match-to-reference) is self-complementary; keep it lossless
+    // IUPAC ambiguity codes (upper + lower case, matching htslib's case-preserving revcomp)
     table['M'] = 'K';
     table['K'] = 'M';
     table['R'] = 'Y';
@@ -32,6 +33,16 @@ constexpr std::array<char, 256> MakeComplementTable()
     table['V'] = 'B';
     table['D'] = 'H';
     table['H'] = 'D';
+    table['m'] = 'k';
+    table['k'] = 'm';
+    table['r'] = 'y';
+    table['y'] = 'r';
+    table['s'] = 's';
+    table['w'] = 'w';
+    table['b'] = 'v';
+    table['v'] = 'b';
+    table['d'] = 'h';
+    table['h'] = 'd';
     return table;
 }
 

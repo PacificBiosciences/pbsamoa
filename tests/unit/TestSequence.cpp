@@ -119,6 +119,18 @@ TEST(Sequence, ReverseComplement_preserves_N)
     EXPECT_EQ(ReverseComplement("NNN"), "NNN");
 }
 
+TEST(Sequence, ReverseComplement_preserves_equals_base)
+{
+    // '=' (match-to-reference) is self-complementary and must round-trip, not collapse to N.
+    EXPECT_EQ(ReverseComplement("A=C"), "G=T");
+}
+
+TEST(Sequence, ReverseComplement_lowercase_iupac)
+{
+    // Lowercase IUPAC ambiguity codes complement case-preservingly (not collapse to N).
+    EXPECT_EQ(ReverseComplement("rymkswbvdh"), "dhbvwsmkry");
+}
+
 TEST(Sequence, ReverseComplementInPlace_basic)
 {
     std::string seq{"ACGT"};
