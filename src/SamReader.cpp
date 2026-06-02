@@ -56,6 +56,15 @@ std::int32_t ToZeroBasedSamPosition(const std::int32_t oneBasedPos)
     return oneBasedPos - 1;
 }
 
+void StripTrailingCr(std::string& line)
+{
+    // htslib (kgetline) drops at most one trailing '\r', so CRLF-terminated SAM parses
+    // identically to LF-terminated input without over-trimming a genuine run of CRs.
+    if (!std::empty(line) && (line.back() == '\r')) {
+        line.pop_back();
+    }
+}
+
 std::int32_t ParseReferenceId(std::string_view refName, const SamHeader& header,
                               std::uint64_t lineNumber, std::string_view fieldName)
 {
@@ -121,6 +130,7 @@ struct SamReader::Impl
         std::string line;
         while (std::getline(file, line)) {
             ++lineNumber;
+            StripTrailingCr(line);
             if ((!std::empty(line)) && (line[0] == '@')) {
                 headerText += line;
                 headerText += '\n';
@@ -234,6 +244,7 @@ std::optional<BamRecord> SamReader::ReadRecord()
     std::string line;
     while (std::getline(impl_->file, line)) {
         ++impl_->lineNumber;
+        StripTrailingCr(line);
         if (!std::empty(line)) {
             return ParseAlignmentLine(line, impl_->header, impl_->lineNumber);
         }
