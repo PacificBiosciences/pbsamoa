@@ -6,7 +6,6 @@
 
 #include <pbcopper/json/JSON.h>
 
-#include <algorithm>
 #include <array>
 #include <iterator>
 #include <map>
@@ -251,18 +250,12 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
             }
         }
 
-        // prefix-lost-bases = canonical bases before the clip minus canonical bases
-        // consumed by the front-removed mods. Added back to the first retained skip
-        // on restore.
-        const char canonical{std::empty(rec.Prefix) ? '\0' : rec.Prefix[0]};
-        const std::int32_t basesBeforeClip{
-            static_cast<std::int32_t>(std::ranges::count(sequence.substr(0, clipLeft), canonical))};
-        std::int32_t prefixAtLastFront{0};
-        for (std::size_t j = 0; j < frontN; ++j) {
-            prefixAtLastFront += rec.Skips[j] + 1;
-        }
-        if (const std::int32_t lost{basesBeforeClip - prefixAtLastFront}; lost > 0) {
-            pMM[rec.Prefix] = lost;
+        // prefix-lost-bases = canonical bases before the clip not consumed by the
+        // front-removed mods, added back to the first retained skip on restore.
+        // ClipBasemodRecord already computes this with the correct wildcard-aware count
+        // (canonical 'N' matches every base, not the literal character 'N').
+        if (window.PrefixLost > 0) {
+            pMM[rec.Prefix] = window.PrefixLost;
         }
 
         qvOffset += total * stride;

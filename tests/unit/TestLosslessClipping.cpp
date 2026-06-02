@@ -242,6 +242,27 @@ TEST(LosslessClipping, RoundTripRestoresMultiCodeBaseModMlValues)
     EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{210, 110}));
 }
 
+// Canonical base 'N' is the MM wildcard: it matches every base, not the literal
+// character 'N'. On an A/C/G/T read (no literal N) with an "N+" mod and a left clip,
+// the prefix-lost fixup must use the wildcard base count so the first retained skip
+// restores to its original value. "N+m?,5,3" marks bases 5 and 9, both inside [4,16).
+TEST(LosslessClipping, RoundTripRecoversWildcardPrefixSkip)
+{
+    BamRecord record{MakeUnmappedRecord(20)};  // "ACGT"*5 — contains no literal 'N'
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'M', 'M'}, std::string{"N+m?,5,3;"});
+    tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({180, 120}));
+    record.Tags(std::move(tags));
+
+    ClipToQueryLossless(record, 4, 16);
+    ASSERT_TRUE(RestoreFromLossless(record));
+
+    const TagValue* mm{record.Tags().Get(TagKey{'M', 'M'})};
+    ASSERT_NE(mm, nullptr);
+    EXPECT_EQ(std::get<std::string>(*mm), "N+m?,5,3;");
+    EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{180, 120}));
+}
+
 TEST(LosslessClipping, RejectsUnsupportedClipTags)
 {
     BamRecord record{MakeUnmappedRecord(20)};
