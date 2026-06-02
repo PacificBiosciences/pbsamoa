@@ -213,6 +213,17 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
         record.Sequence(std::string{sequenceField});
     }
 
+    // htslib rejects a record whose CIGAR query length disagrees with SEQ (sam.c: n_cigar &&
+    // ql != l_qseq). Skipped when SEQ is '*' or CIGAR is absent, matching htslib's guards.
+    if ((sequenceField != "*") && !record.Cigar().empty()) {
+        const std::int64_t cigarQueryLen{QueryLength(record.Cigar())};
+        if (cigarQueryLen != static_cast<std::int64_t>(std::size(sequenceField))) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: CIGAR and query sequence are of different length",
+                            lineNumber)};
+        }
+    }
+
     const std::string_view qualityField{fields[10]};
     record.Qualities(ParseQualityField(sequenceField, qualityField, lineNumber));
 
