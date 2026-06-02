@@ -699,6 +699,11 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
 
                 TagArray arr{elemType};
                 const std::size_t elemSize{arr.ElementSize()};
+                if (elemSize == 0) {
+                    // Unknown B subtype: element width is undefined, so the rest of the aux
+                    // stream cannot be located. Stop rather than mis-sync later tags.
+                    return result;
+                }
                 const std::size_t totalBytes{count * elemSize};
                 if ((offset + totalBytes) > std::size(data)) {
                     return result;
@@ -1151,6 +1156,10 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
                 }
                 SerializeBArrayFloat(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 4;
+            } else {
+                // Unknown B subtype: payload length is undefined, so stop rather than
+                // mis-sync onto bytes that are not really array data (htslib bad_aux).
+                break;
             }
         }
     }

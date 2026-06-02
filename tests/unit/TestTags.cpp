@@ -272,6 +272,21 @@ TEST(TagBamParse, SignedInt)
     EXPECT_EQ(std::get<std::int64_t>(*val), -10);
 }
 
+TEST(TagBamParse, UnknownBArraySubtypeStopsParsing)
+{
+    // 'XX:B:x' has an unknown element subtype, so its payload length is undefined; parsing
+    // must stop instead of mis-syncing onto the following bytes (htslib bad_aux behaviour).
+    const std::vector<std::byte> data{
+        std::byte{'X'},  std::byte{'X'}, std::byte{'B'}, std::byte{'x'},
+        std::byte{1},    std::byte{0},   std::byte{0},   std::byte{0},  // count = 1
+        std::byte{0xAB},                                                // bogus payload byte
+        std::byte{'N'},  std::byte{'M'}, std::byte{'C'}, std::byte{7},  // must NOT be reached
+    };
+    const TagMap tags{ParseTagsFromBam(data)};
+    EXPECT_FALSE(tags.Contains(TagKey{'X', 'X'}));
+    EXPECT_FALSE(tags.Contains(TagKey{'N', 'M'}));
+}
+
 TEST(TagBamParse, StringTypeZ)
 {
     const std::vector<std::byte> data{MakeBamStringTag('R', 'G', 'Z', "group1")};
