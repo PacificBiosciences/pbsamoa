@@ -62,6 +62,7 @@ private:
     std::vector<ReferenceIndex> references_;
     std::uint64_t mappedCount_{0};
     std::uint64_t unmappedCount_{0};
+    std::uint64_t noCoorCount_{0};  // n_no_coor: unplaced (refId < 0) reads only
 };
 
 }  // namespace Samoa

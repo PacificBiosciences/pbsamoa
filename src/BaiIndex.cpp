@@ -308,6 +308,7 @@ BaiIndex BaiIndex::FromFile(const std::filesystem::path& path)
             std::uint64_t value{};
             std::memcpy(&value, std::data(bytes), sizeof(value));
             index.unmappedCount_ += value;
+            index.noCoorCount_ += value;
         }
     }
 
@@ -355,8 +356,8 @@ void BaiIndex::ToFile(const std::filesystem::path& path) const
             }
         }
 
-        // n_no_coor
-        WriteLEToFile(file, unmappedCount_);
+        // n_no_coor: only unplaced (refId < 0) reads, per SAMv1 §5.2 and hts.c.
+        WriteLEToFile(file, noCoorCount_);
     } catch (...) {
         file.close();
         std::filesystem::remove(path);
@@ -519,7 +520,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     }
 
     std::uint64_t mappedCount{0};
-    std::uint64_t unmappedCount{0};
+    std::uint64_t placedUnmappedCount{0};  // FLAG 0x4 reads that still carry a refId >= 0
+    std::uint64_t noCoorCount{0};          // unplaced reads (refId < 0) → n_no_coor
     bool eof{false};
     std::optional<std::pair<std::int32_t, std::int32_t>> lastMappedCoordinate;
     bool sawUnmappedTailRecord{false};
@@ -580,15 +582,19 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
 
         const bool isUnmapped{(flag & 0x4) != 0};
 
-        if (isUnmapped) {
+        if (refId < 0) {
+            // Unplaced read (no coordinate): the true n_no_coor population, which always
+            // sorts after every placed read. htslib counts only these in n_no_coor.
             sawUnmappedTailRecord = true;
-            ++unmappedCount;
-        } else if ((refId >= 0) && (refId < nRef)) {
+            ++noCoorCount;
+        } else if (refId < nRef) {
+            // Placed read (refId >= 0): either mapped, or placed-unmapped (FLAG 0x4 carrying
+            // a coordinate). Both participate in coordinate ordering.
             if (sawUnmappedTailRecord) {
                 throw std::runtime_error{
                     std::format("BaiIndex::Build requires coordinate-sorted BAM "
-                                "payload; saw mapped "
-                                "refId={} pos={} after unmapped tail in {}",
+                                "payload; saw placed "
+                                "refId={} pos={} after unplaced tail in {}",
                                 refId, pos, bamPath.string())};
             }
             const std::pair<std::int32_t, std::int32_t> currentCoordinate{refId, pos};
@@ -602,30 +608,36 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             }
             lastMappedCoordinate = currentCoordinate;
 
-            ++mappedCount;
-            ReferenceIndex& refIdx{index.references_[refId]};
+            if (isUnmapped) {
+                // Placed but unmapped: counted as per-reference n_unmapped (not n_no_coor),
+                // and not added to a bin since it has no alignment span.
+                ++placedUnmappedCount;
+            } else {
+                ++mappedCount;
+                ReferenceIndex& refIdx{index.references_[refId]};
 
-            // Compute bin
-            const std::int32_t endPos{
-                CheckedInt32(static_cast<std::int64_t>(pos) + refLen, "alignment end")};
-            const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(pos, endPos)};
-            const std::uint16_t bin{Reg2Bin(pos, nonEmptyEnd)};
+                // Compute bin
+                const std::int32_t endPos{
+                    CheckedInt32(static_cast<std::int64_t>(pos) + refLen, "alignment end")};
+                const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(pos, endPos)};
+                const std::uint16_t bin{Reg2Bin(pos, nonEmptyEnd)};
 
-            // Add chunk to bin
-            refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
+                // Add chunk to bin
+                refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
 
-            // Update linear index
-            const std::int32_t begWindow = pos / BAI_LINEAR_INDEX_WINDOW;
-            const std::int32_t endWindow{
-                static_cast<std::int32_t>((nonEmptyEnd - 1) / BAI_LINEAR_INDEX_WINDOW)};
-            const std::size_t maxWindow = endWindow + 1;
-            if (maxWindow > std::size(refIdx.linearIndex)) {
-                refIdx.linearIndex.resize(maxWindow);
-            }
-            for (std::int32_t w{begWindow}; w <= endWindow; ++w) {
-                VirtualOffset& entry{refIdx.linearIndex[w]};
-                if (entry.Value() == 0 || recordVo < entry) {
-                    entry = recordVo;
+                // Update linear index
+                const std::int32_t begWindow = pos / BAI_LINEAR_INDEX_WINDOW;
+                const std::int32_t endWindow{
+                    static_cast<std::int32_t>((nonEmptyEnd - 1) / BAI_LINEAR_INDEX_WINDOW)};
+                const std::size_t maxWindow = endWindow + 1;
+                if (maxWindow > std::size(refIdx.linearIndex)) {
+                    refIdx.linearIndex.resize(maxWindow);
+                }
+                for (std::int32_t w{begWindow}; w <= endWindow; ++w) {
+                    VirtualOffset& entry{refIdx.linearIndex[w]};
+                    if (entry.Value() == 0 || recordVo < entry) {
+                        entry = recordVo;
+                    }
                 }
             }
         }
@@ -646,7 +658,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     }
 
     index.mappedCount_ = mappedCount;
-    index.unmappedCount_ = unmappedCount;
+    index.unmappedCount_ = placedUnmappedCount + noCoorCount;
+    index.noCoorCount_ = noCoorCount;
 
     return index;
 }
