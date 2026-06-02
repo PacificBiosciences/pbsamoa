@@ -307,6 +307,24 @@ TEST(RawRecord, NonPlaceholderCigarWithCgTagIsNotExpanded)
     EXPECT_TRUE(view.ParseTags().Contains(TagKey{'C', 'G'}));
 }
 
+TEST(RawRecord, MappedCigarQueryLengthMustMatchSeq)
+{
+    // Mapped record, l_seq=1, CIGAR "2M" (query length 2): htslib rejects the mismatch.
+    std::vector<std::byte> data(32, std::byte{0});
+    data[8] = std::byte{1};               // l_read_name = 1 (just the NUL)
+    WriteU16LE(std::data(data) + 12, 1);  // n_cigar_op = 1
+    WriteU16LE(std::data(data) + 14, 0);  // flag = 0 (mapped)
+    WriteU32LE(std::data(data) + 16, 1);  // l_seq = 1
+    data.push_back(std::byte{0});         // read name NUL
+    std::array<std::byte, 4> cigar{};
+    WriteU32LE(std::data(cigar), (2U << 4U) | 0U);  // 2M
+    data.insert(std::end(data), std::begin(cigar), std::end(cigar));
+    data.push_back(std::byte{0x10});  // packed seq, 1 base
+    data.push_back(std::byte{0xFF});  // qual
+
+    EXPECT_THROW(RawRecord(std::span<const std::byte>{data}), std::invalid_argument);
+}
+
 TEST(RawRecord, NonNullTerminatedNameThrows)
 {
     std::vector<std::byte> data{MakeLittleEndianRawRecordBytes()};

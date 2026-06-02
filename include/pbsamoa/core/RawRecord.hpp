@@ -125,6 +125,13 @@ inline RawRecord::RawRecord(std::span<const std::byte> data) : data_{data.begin(
         cigar_[0].RawValue() == ((SeqLength() << 4U) | std::to_underlying(CigarOpType::S))) {
         ExpandLongCigarFromCgTag();
     }
+
+    // A mapped record's CIGAR must consume exactly l_seq query bases; htslib rejects a
+    // mismatch (sam.c bam_read1). Validated against the (possibly CG-expanded) cigar_.
+    if (!cigar_.empty() && IsMapped() && (SeqLength() > 0) &&
+        (::PacBio::Samoa::QueryLength(cigar_) != static_cast<std::int64_t>(SeqLength()))) {
+        throw std::invalid_argument{"RawRecord: CIGAR query length does not match SEQ length"};
+    }
 }
 
 // --- fixed fields ---
