@@ -613,10 +613,14 @@ std::string SamHeader::ToText() const
 {
     std::string result;
 
-    // @HD line (only if version is set)
-    if (!std::empty(version_)) {
+    // @HD line: emit if any @HD field is set, not only VN, so a VN-less @HD carrying
+    // sort-order metadata round-trips like htslib (build_header_line, header.c:743-756).
+    if (!std::empty(version_) || !std::empty(sortOrder_) || !std::empty(groupOrder_) ||
+        !std::empty(subSort_)) {
         result += "@HD";
-        AppendSamField(result, "VN", version_);
+        if (!std::empty(version_)) {
+            AppendSamField(result, "VN", version_);
+        }
         if (!std::empty(sortOrder_)) {
             AppendSamField(result, "SO", sortOrder_);
         }

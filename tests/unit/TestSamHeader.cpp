@@ -144,6 +144,14 @@ TEST(SamHeader, ParseMultipleReferenceSequences)
     EXPECT_EQ(*tp, "circular");
 }
 
+TEST(SamHeader, HdLineWithoutVnRoundTrips)
+{
+    // htslib preserves a VN-less @HD; the sort-order metadata must not be dropped.
+    const SamHeader header = *SamHeader::FromText("@HD\tSO:coordinate\n");
+    EXPECT_NE(header.ToText().find("SO:coordinate"), std::string::npos);
+    EXPECT_NE(header.ToText().find("@HD"), std::string::npos);
+}
+
 TEST(SamHeader, DuplicateSqSnIsRejected)
 {
     // SAMv1 §1.3: @SQ SN names must be distinct; htslib treats a repeat as fatal.
