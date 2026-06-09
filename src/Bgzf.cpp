@@ -1202,6 +1202,9 @@ void BgzfPipelineState::ParseHeader()
         if (isize == 0U) {
             break;  // EOF marker
         }
+        if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
+            throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
+        }
 
         // Decompress
         std::size_t actualOut{0};
@@ -1443,6 +1446,9 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                     // fully consumed; skip it and keep reading. Real EOF is gcount()==0 above.
                     continue;
                 }
+                if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
+                    throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
+                }
                 const std::uint32_t crc32{ReadU32LE(std::data(compressed) + info->blockSize - 8U)};
 
                 // Append compressed payload to batch buffer (trailer dropped — carry crc32 along)
@@ -1526,9 +1532,13 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
     } catch (...) {
         {
             const std::lock_guard lock{errorMutex};
-            errorPtr = std::current_exception();
+            // Preserve a root-cause error already recorded by the I/O loop instead of
+            // overwriting it with a downstream decompression symptom.
+            if (!pipelineError.load(std::memory_order_relaxed)) {
+                errorPtr = std::current_exception();
+                pipelineError.store(true, std::memory_order_release);
+            }
         }
-        pipelineError.store(true, std::memory_order_release);
     }
 
     done.store(true, std::memory_order_release);
@@ -1669,6 +1679,9 @@ detail::DecompressedBatch BgzfPipelineState::DecompressBatchTask::operator()(
 
     std::size_t outOffset{0};
     for (const auto& entry : entries) {
+        if (entry.isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
+            throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
+        }
         std::size_t actualOut{0};
         const libdeflate_result result{libdeflate_deflate_decompress(
             (*decompressors)[threadIdx.Value()].get(), std::data(compressedData) + entry.offset,

@@ -23,7 +23,7 @@ void RawRecord::ExpandLongCigarFromCgTag()
         return;
     }
     const TagArray* array{std::get_if<TagArray>(value)};
-    if ((array == nullptr) || (array->ElementType() != 'I')) {
+    if ((array == nullptr) || ((array->ElementType() != 'I') && (array->ElementType() != 'i'))) {
         return;
     }
 

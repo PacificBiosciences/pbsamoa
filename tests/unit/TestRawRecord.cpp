@@ -9,6 +9,7 @@
 #include <array>
 #include <bit>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include <cstddef>
@@ -145,6 +146,23 @@ std::vector<std::byte> MakeLongCigarPlaceholderBytes(bool withCgTag, bool validP
         appendU32((2U << 4U) | 0U);  // 2M
     }
     return data;
+}
+
+// Like MakeLongCigarPlaceholderBytes(withCgTag=true) but lets the caller choose
+// the B-array subtype byte so we can exercise 'i' (signed int32) alongside 'I'.
+// The payload uint32 CIGAR ops are bit-identical for both subtypes.
+std::vector<std::byte> MakeLongCigarPlaceholderBytesWithSubtype(char subtype)
+{
+    std::vector<std::byte> data{MakeLongCigarPlaceholderBytes(/*withCgTag=*/true)};
+    // The subtype byte is the 4th byte of the CG tag: C G B <subtype>.
+    for (std::size_t i{0}; (i + 3) < std::size(data); ++i) {
+        if ((data[i] == std::byte{'C'}) && (data[i + 1] == std::byte{'G'}) &&
+            (data[i + 2] == std::byte{'B'})) {
+            data[i + 3] = static_cast<std::byte>(subtype);
+            return data;
+        }
+    }
+    throw std::logic_error{"CG tag not found in fixture"};
 }
 
 }  // namespace
@@ -305,6 +323,26 @@ TEST(RawRecord, NonPlaceholderCigarWithCgTagIsNotExpanded)
 
     EXPECT_EQ(std::size(view.CigarOps()), 2U);
     EXPECT_TRUE(view.ParseTags().Contains(TagKey{'C', 'G'}));
+}
+
+TEST(RawRecord, LongCigarCgTagSubtypeLowercaseIExpandsIdentically)
+{
+    // htslib bam_tag2cigar (sam.c:703) accepts CG:B,I *and* CG:B,i because the
+    // payload uint32 encoding is the same for both subtypes. pbsamoa must match.
+    const RawRecord viewUpper{
+        std::span<const std::byte>{MakeLongCigarPlaceholderBytesWithSubtype('I')}};
+    const RawRecord viewLower{
+        std::span<const std::byte>{MakeLongCigarPlaceholderBytesWithSubtype('i')}};
+
+    const CigarView cigarUpper{viewUpper.CigarOps()};
+    const CigarView cigarLower{viewLower.CigarOps()};
+
+    // Both must expand to the same 3-op CIGAR.
+    ASSERT_EQ(std::size(cigarUpper), 3U);
+    ASSERT_EQ(std::size(cigarLower), 3U);
+    for (std::size_t idx{0}; idx < 3U; ++idx) {
+        EXPECT_EQ(cigarUpper[idx].RawValue(), cigarLower[idx].RawValue()) << "op " << idx;
+    }
 }
 
 TEST(RawRecord, MappedCigarQueryLengthMustMatchSeq)

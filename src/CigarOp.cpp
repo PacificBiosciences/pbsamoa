@@ -97,6 +97,15 @@ void WriteCigarTo(CigarView cigar, std::string& out)
 
 std::vector<std::uint16_t> Reg2Bins(std::int32_t beg, std::int32_t end)
 {
+    // The binning scheme spans at most 2^29 bp; clamp the query end like htslib's reg2bins
+    // (hts.c) so an out-of-range end cannot generate bins outside the table.
+    constexpr std::int32_t MAX_BIN_COORD{1 << 29};
+    if (end > MAX_BIN_COORD) {
+        end = MAX_BIN_COORD;
+    }
+    if (beg >= end) {
+        return {};
+    }
     const std::int32_t inclusiveEnd{end - 1};
     std::vector<std::uint16_t> bins;
     bins.reserve(32);

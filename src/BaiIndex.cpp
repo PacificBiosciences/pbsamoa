@@ -404,7 +404,7 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
     if (linearIdx < std::size(ref.linearIndex)) {
         const VirtualOffset threshold{ref.linearIndex[linearIdx]};
         std::erase_if(candidates,
-                      [threshold](const Chunk& chunk) { return chunk.End < threshold; });
+                      [threshold](const Chunk& chunk) { return chunk.End <= threshold; });
     }
 
     if (std::empty(candidates)) {

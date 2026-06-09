@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <vector>
 
 #include <cstdint>
@@ -218,6 +219,29 @@ TEST(CigarParse, InvalidOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8Z")); }
 TEST(CigarParse, MissingOpCharReturnsError) { EXPECT_FALSE(ParseCigar("8")); }
 
 TEST(CigarParse, BadIntegerReturnsError) { EXPECT_FALSE(ParseCigar("M8")); }
+
+// Reg2Bins must clamp 'end' to 1<<29 so queries beyond the max binnable
+// coordinate return the same bin set as end==1<<29, matching htslib reg2bins.
+TEST(Reg2Bins, EndBeyondMaxCoordClampsTo1Shl29)
+{
+    constexpr std::int32_t MAX_COORD{1 << 29};
+    const auto binsAtMax{Reg2Bins(0, MAX_COORD)};
+    const auto binsOverflow{Reg2Bins(0, MAX_COORD + 1)};
+    const auto binsWayOver{Reg2Bins(0, std::numeric_limits<std::int32_t>::max())};
+    EXPECT_EQ(binsAtMax, binsOverflow);
+    EXPECT_EQ(binsAtMax, binsWayOver);
+}
+
+// Reg2Bins must return empty when beg >= end (after clamping), matching
+// htslib's early-return guard.
+TEST(Reg2Bins, BegAtOrAfterClampedEndReturnsEmpty)
+{
+    constexpr std::int32_t MAX_COORD{1 << 29};
+    // beg == end: half-open interval is empty
+    EXPECT_TRUE(std::empty(Reg2Bins(100, 100)));
+    // beg > end after clamp: e.g. beg == 1<<29, end == 1<<29 (clamped)
+    EXPECT_TRUE(std::empty(Reg2Bins(MAX_COORD, MAX_COORD + 1)));
+}
 
 }  // namespace Samoa
 }  // namespace PacBio
