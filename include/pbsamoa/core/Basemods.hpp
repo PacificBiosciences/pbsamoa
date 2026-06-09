@@ -55,8 +55,14 @@ struct BasemodClipWindow
 /// Uses the same prefix-sum algorithm as pbbam's ClipBasemodsTag. The trailing
 /// site count is `Skips.size() - FrontRemoved - Retained`; the ML quals for a
 /// record are ordered [front | retained | trailing] in the original ML array.
+///
+/// MM/ML coordinates are always in original (5'->3') read orientation, whereas the
+/// stored SEQ (and therefore clipOffset/clipLength) are in aligned orientation. For a
+/// reverse-strand read (\p reverse true) the canonical base is complemented and the
+/// clip window is mirrored onto the original orientation, matching htslib's seqi_rc walk.
 BasemodClipWindow ClipBasemodRecord(const BasemodRecord& record, std::string_view sequence,
-                                    std::size_t clipOffset, std::size_t clipLength);
+                                    std::size_t clipOffset, std::size_t clipLength,
+                                    bool reverse = false);
 
 }  // namespace Samoa
 }  // namespace PacBio

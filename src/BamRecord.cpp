@@ -359,7 +359,8 @@ BamRecord& BamRecord::Clip(ClipType type, std::int32_t start, std::int32_t end,
     }
 
     // Clip tags BEFORE modifying sequence (basemods reads old sequence)
-    clipper.ClipTags(tags_, clipResult.clipOffset, clipResult.clipLength, origSeqLen, sequence_);
+    clipper.ClipTags(tags_, clipResult.clipOffset, clipResult.clipLength, origSeqLen, sequence_,
+                     isReverse);
 
     // Clip sequence and qualities (in-place to avoid extra allocation)
     sequence_.erase(0, clipResult.clipOffset);

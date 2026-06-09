@@ -299,5 +299,41 @@ TEST(LosslessClipping, NoStorageWhenNothingClipped)
     EXPECT_FALSE(RestoreFromLossless(record));
 }
 
+// An ML array that does not cover every MM site cannot be sliced losslessly (undo would
+// lose probabilities), so the clip must reject rather than silently drop data — the same
+// contract that rejects uncaptured per-base tags.
+TEST(LosslessClipping, RejectsMlShorterThanMmSites)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+m?,0,1,1;"});  // three modification sites
+    tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200, 150}));  // only two probabilities
+    record.Tags(std::move(tags));
+
+    EXPECT_THROW(ClipToQueryLossless(record, 4, 16), std::runtime_error);
+}
+
+// MN:i records the SEQ length MM/ML were produced against; the clip rewrites it to the
+// clipped length and restore must return it to the full length (htslib rejects MN != l_qseq).
+TEST(LosslessClipping, RoundTripRestoresMnTag)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+m?,0,1,1;"});
+    tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200, 150, 100}));
+    tags.Set(TagKey{'M', 'N'}, std::int64_t{20});
+    record.Tags(std::move(tags));
+
+    ClipToQueryLossless(record, 4, 16);  // 20 -> 12
+    const TagValue* clippedMn{record.Tags().Get(TagKey{'M', 'N'})};
+    ASSERT_NE(clippedMn, nullptr);
+    EXPECT_EQ(std::get<std::int64_t>(*clippedMn), 12);
+
+    ASSERT_TRUE(RestoreFromLossless(record));
+    const TagValue* restoredMn{record.Tags().Get(TagKey{'M', 'N'})};
+    ASSERT_NE(restoredMn, nullptr);
+    EXPECT_EQ(std::get<std::int64_t>(*restoredMn), 20);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

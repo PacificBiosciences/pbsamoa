@@ -97,6 +97,11 @@ bool ReverseSubstringClipStrategy::Clip(TagValue& value, std::size_t clipOffset,
                                         std::size_t clipLength, std::size_t seqLength,
                                         const ClipContext& /*ctx*/) const
 {
+    // Guard against unsigned wrap when the clip window exceeds the sequence (mirrors the
+    // bounds check in PileupClipStrategy); a corrupt window removes the tag.
+    if ((clipOffset + clipLength) > seqLength) {
+        return false;
+    }
     const std::size_t reverseOffset{seqLength - (clipOffset + clipLength)};
     return ClipSubstring(value, reverseOffset, clipLength);
 }
@@ -143,7 +148,7 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
 
         for (const BasemodRecord& rec : records) {
             const BasemodClipWindow window{
-                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength)};
+                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength, ctx.isReverse)};
             clippedRecords.push_back(BasemodRecord{rec.Prefix, window.RetainedSkips});
         }
 
@@ -167,13 +172,24 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         // first type, then all for the second, etc.
         const std::vector<BasemodRecord> records{ParseBasemodString(ctx.basemodString)};
 
+        // ML must carry ModCodeCount(prefix) values per site across every record. A short
+        // or mismatched ML would make the slice below run past the buffer (OOB read), so
+        // validate the total up front and remove the tag rather than risk it.
+        std::size_t expectedValues{0};
+        for (const BasemodRecord& rec : records) {
+            expectedValues += std::size(rec.Skips) * ModCodeCount(rec.Prefix);
+        }
+        if (arr->Count() < expectedValues) {
+            return false;
+        }
+
         // Build the retained ML values per type, then concatenate.
         std::vector<std::byte> retainedBytes;
         std::size_t qvOffset{0};  // running offset into the original ML array
 
         for (const BasemodRecord& rec : records) {
             const BasemodClipWindow window{
-                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength)};
+                ClipBasemodRecord(rec, ctx.sequence, clipOffset, clipLength, ctx.isReverse)};
             // ML stores ModCodeCount values per site (interleaved); each retained site
             // therefore carries `stride` contiguous ML values.
             const std::size_t stride{ModCodeCount(rec.Prefix)};
@@ -319,7 +335,7 @@ void TagClipper::Register(std::initializer_list<TagKey> tags,
 }
 
 void TagClipper::ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clipLength,
-                          std::size_t seqLength, std::string_view sequence) const
+                          std::size_t seqLength, std::string_view sequence, bool isReverse) const
 {
     // Snapshot the pulse-call string before the loop so that all pulse
     // tags see the unmodified value regardless of iteration order.
@@ -329,7 +345,8 @@ void TagClipper::ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clip
     // can reconstruct the original modification layout.
     std::string basemodString{SnapshotStringTag(tags, TagKey{'M', 'M'})};
 
-    const ClipContext ctx{&tags, std::move(pulseCalls), sequence, std::move(basemodString)};
+    const ClipContext ctx{&tags, std::move(pulseCalls), sequence, std::move(basemodString),
+                          isReverse};
     for (const auto& [key, strategy] : registrations_) {
         const TagValue* existing{tags.Get(key)};
         if (!existing) {
@@ -341,6 +358,13 @@ void TagClipper::ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clip
         } else {
             tags.Remove(key);
         }
+    }
+
+    // MN:i records the SEQ length MM/ML were produced against; htslib rejects records
+    // whose MN != l_qseq (sam_mods.c). Keep it consistent with the clipped sequence.
+    static constexpr TagKey MN_TAG{'M', 'N'};
+    if (tags.Contains(MN_TAG)) {
+        tags.Set(MN_TAG, static_cast<std::int64_t>(clipLength));
     }
 }
 

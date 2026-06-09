@@ -181,6 +181,10 @@ constexpr std::array<TagKey, 22> UNSUPPORTED_CLIP_TAGS{{
 // maps, plus the per-mod prefix-lost-base count (pMM) needed to recover the first
 // retained skip on undo. Mirrors lima's format. MM/ML are per-mod-type maps keyed
 // by the modification prefix (e.g. "C+m?"); ML quals follow MM-record order.
+// Lossless clipping targets CCS/demultiplexed reads, which are unmapped (origQueryStart
+// is 0 and the strand flag is unset), so clipLeft is the SEQ-space offset and basemods are
+// walked in stored orientation. Reverse-strand handling lives in the lossy clip path
+// (ClipBasemodRecord's reverse flag), where the aligned SEQ is reverse-complemented.
 void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t clipLeft,
                      std::int32_t clipRight, JSON::Json& lead, JSON::Json& trail, JSON::Json& pMM)
 {
@@ -201,9 +205,14 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
         // "C+mh") therefore consume more ML entries than skip counts.
         totalMlValues += std::size(rec.Skips) * ModCodeCount(rec.Prefix);
     }
-    // Require ML to cover every MM site before slicing it; a short or malformed ML
-    // is treated as absent rather than risking an out-of-range read.
-    const bool hasMl{!std::empty(mlValues) && (std::size(mlValues) >= totalMlValues)};
+    // If ML is present it must cover every MM site. A short/mismatched ML cannot be
+    // sliced losslessly (undo would lose probabilities), so reject the clip rather than
+    // silently dropping data — consistent with the UNSUPPORTED_CLIP_TAGS contract.
+    if (!std::empty(mlValues) && (std::size(mlValues) < totalMlValues)) {
+        throw std::runtime_error{
+            "ClipToQueryLossless: ML array shorter than the MM modification sites it must cover"};
+    }
+    const bool hasMl{!std::empty(mlValues)};
     const std::size_t clipLength{static_cast<std::size_t>(clipRight - clipLeft)};
 
     JSON::Json leadMM = JSON::Json::object();
@@ -553,6 +562,12 @@ bool RestoreFromLossless(BamRecord& record)
         record.MutableTags().Set(TagKey{'M', 'M'}, WriteBasemodString(outRecords));
         if (!std::empty(outMl)) {
             record.MutableTags().Set(TagKey{'M', 'L'}, EncodeIntArray(mlElementType, outMl));
+        }
+        // MN tracks SEQ length for MM/ML; the clipped record carries the clipped length,
+        // so restore it to the rebuilt full-length sequence.
+        if (record.Tags().Contains(TagKey{'M', 'N'})) {
+            record.MutableTags().Set(TagKey{'M', 'N'},
+                                     static_cast<std::int64_t>(std::ssize(sequence)));
         }
     }
     for (const TagKey key : DEMUX_TAGS) {

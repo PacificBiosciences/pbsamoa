@@ -16,6 +16,25 @@ namespace PacBio {
 namespace Samoa {
 namespace {
 
+// Complement a canonical modification base (MM bases are A/C/G/T/U/N; N is handled as a
+// wildcard by the caller). Unknown bases pass through unchanged.
+char ComplementBase(char base)
+{
+    switch (base) {
+        case 'A':
+            return 'T';
+        case 'C':
+            return 'G';
+        case 'G':
+            return 'C';
+        case 'T':
+        case 'U':
+            return 'A';
+        default:
+            return base;
+    }
+}
+
 std::string_view TakeDelimitedSegment(std::string_view& text, char delimiter)
 {
     const std::size_t delimiterPos{text.find(delimiter)};
@@ -129,13 +148,19 @@ std::size_t ModCodeCount(std::string_view prefix)
 }
 
 BasemodClipWindow ClipBasemodRecord(const BasemodRecord& record, std::string_view sequence,
-                                    std::size_t clipOffset, std::size_t clipLength)
+                                    std::size_t clipOffset, std::size_t clipLength, bool reverse)
 {
     BasemodClipWindow window;
     if (std::empty(record.Prefix)) {
         return window;
     }
-    const char canonicalBase{record.Prefix[0]};
+    // MM coordinates are in original 5'->3' read orientation; a reverse-strand read's
+    // stored SEQ is reverse-complemented. Count the complement of the canonical base and
+    // mirror the clip window so the original-orientation prefix maps to the SEQ suffix
+    // (mirrors htslib's seqi_rc walk in sam_mods.c). 'N' is a wildcard, never complemented.
+    const char canonicalBase{(reverse && (record.Prefix[0] != 'N'))
+                                 ? ComplementBase(record.Prefix[0])
+                                 : record.Prefix[0]};
 
     // Count canonical bases before and within the clip window. The 'N' wildcard matches
     // every base (htslib freq[15] = l_qseq), not the literal character 'N'.
@@ -145,7 +170,9 @@ BasemodClipWindow ClipBasemodRecord(const BasemodRecord& record, std::string_vie
         }
         return static_cast<std::int32_t>(std::ranges::count(s, canonicalBase));
     }};
-    const std::int32_t basesBeforeClip{countBases(sequence.substr(0, clipOffset))};
+    const std::int32_t basesBeforeClip{reverse
+                                           ? countBases(sequence.substr(clipOffset + clipLength))
+                                           : countBases(sequence.substr(0, clipOffset))};
     const std::int32_t basesInClip{countBases(sequence.substr(clipOffset, clipLength))};
 
     // prefixSum[i] = total canonical bases consumed up to and including site i

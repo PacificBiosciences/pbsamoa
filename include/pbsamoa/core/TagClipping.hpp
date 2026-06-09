@@ -33,6 +33,12 @@ struct ClipContext
     /// clipping loop. Used by BasemodClipStrategy when processing the ML
     /// tag so it can reconstruct the pre-clip modification layout.
     std::string basemodString;
+
+    /// \brief True when the read is reverse-strand (FLAG 0x10). MM/ML
+    /// coordinates are in original read orientation while the stored SEQ
+    /// is reverse-complemented, so basemod clipping must mirror the window
+    /// and complement the canonical base.
+    bool isReverse{false};
 };
 
 /// \brief Abstract interface for a tag clipping strategy.
@@ -130,8 +136,11 @@ public:
     /// Tags not in the registry are left untouched.
     /// \param[in] sequence  original (pre-clip) sequence for basemods;
     ///                      empty by default (basemods clipping skipped)
+    /// \param[in] isReverse true if the read is reverse-strand (FLAG 0x10), so
+    ///                      MM/ML clipping mirrors the window and complements the base
     void ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clipLength,
-                  std::size_t seqLength, std::string_view sequence = {}) const;
+                  std::size_t seqLength, std::string_view sequence = {},
+                  bool isReverse = false) const;
 
     /// \brief Create a TagClipper with all PacBio-standard strategies registered.
     static TagClipper PacBioDefault();

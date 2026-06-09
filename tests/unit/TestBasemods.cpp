@@ -70,5 +70,41 @@ TEST(Basemods, NBaseModCountsAllBases)
     EXPECT_EQ(window.Retained, 1U);      // site at base 2 is retained
 }
 
+TEST(Basemods, ReverseStrandClipMirrorsWindowAndComplementsBase)
+{
+    // A reverse-strand read stores SEQ as the reverse-complement of the original 5'->3'
+    // read, while MM coordinates stay in original orientation. Original read "CCCAAA" has
+    // three modified C's (C+m,0,0,0); the stored SEQ is revcomp("CCCAAA") = "TTTGGG".
+    // Keeping SEQ[3:6] ("GGG") keeps exactly the original "CCC", so all three calls survive.
+    BasemodRecord rec;
+    rec.Prefix = "C+m";
+    rec.Skips = {0, 0, 0};
+
+    // Walking the stored SEQ as-if-forward finds no literal 'C' in "GGG" and wrongly drops
+    // every call — this is the pre-fix behaviour and why reverse handling is required.
+    const BasemodClipWindow fwd{
+        ClipBasemodRecord(rec, "TTTGGG", /*clipOffset=*/3, /*clipLength=*/3, /*reverse=*/false)};
+    EXPECT_EQ(fwd.Retained, 0U);
+
+    const BasemodClipWindow rev{
+        ClipBasemodRecord(rec, "TTTGGG", /*clipOffset=*/3, /*clipLength=*/3, /*reverse=*/true)};
+    EXPECT_EQ(rev.FrontRemoved, 0U);
+    EXPECT_EQ(rev.Retained, 3U);
+    EXPECT_EQ(rev.RetainedSkips, (std::vector<std::int32_t>{0, 0, 0}));
+}
+
+TEST(Basemods, ReverseStrandClipFrontRemovesTrailingOriginalCalls)
+{
+    // Same reverse read; keeping SEQ[0:3] ("TTT") keeps the original trailing "AAA", which
+    // carries no C, so all three C+m calls fall before the (mirrored) window and are removed.
+    BasemodRecord rec;
+    rec.Prefix = "C+m";
+    rec.Skips = {0, 0, 0};
+    const BasemodClipWindow rev{
+        ClipBasemodRecord(rec, "TTTGGG", /*clipOffset=*/0, /*clipLength=*/3, /*reverse=*/true)};
+    EXPECT_EQ(rev.FrontRemoved, 3U);
+    EXPECT_EQ(rev.Retained, 0U);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

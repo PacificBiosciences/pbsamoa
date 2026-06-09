@@ -740,5 +740,38 @@ TEST(TagClipping, PileupClip_SaSmSx_WithPacBioDefault)
     EXPECT_EQ(static_cast<std::uint8_t>(sxResult.Data()[0]), 6);
 }
 
+TEST(TagClipping, ReverseStrandMMRetainsOriginalOrientationCalls)
+{
+    // Reverse read: stored SEQ "TTTGGG" is revcomp of original "CCCAAA", whose three C+m
+    // calls all live in the retained SEQ[3:6] window. The isReverse flag must be honoured
+    // end-to-end through ClipTags or every call is wrongly dropped.
+    TagMap tags;
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+m,0,0,0;"});
+
+    const TagClipper clipper{TagClipper::PacBioDefault()};
+    clipper.ClipTags(tags, /*clipOffset=*/3, /*clipLength=*/3, /*seqLength=*/6, "TTTGGG",
+                     /*isReverse=*/true);
+
+    const TagValue* mm{tags.Get(TagKey{'M', 'M'})};
+    ASSERT_TRUE(mm);
+    EXPECT_EQ(std::get<std::string>(*mm), "C+m,0,0,0;");
+}
+
+TEST(TagClipping, ClipUpdatesMnTagToClippedLength)
+{
+    // MN:i records the SEQ length MM/ML were produced against; htslib rejects a record
+    // whose MN != l_qseq, so clipping must rewrite MN to the retained length.
+    TagMap tags;
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+m,0;"});
+    tags.Set(TagKey{'M', 'N'}, std::int64_t{10});
+
+    const TagClipper clipper{TagClipper::PacBioDefault()};
+    clipper.ClipTags(tags, /*clipOffset=*/2, /*clipLength=*/6, /*seqLength=*/10, "ACGTACGTAC");
+
+    const TagValue* mn{tags.Get(TagKey{'M', 'N'})};
+    ASSERT_TRUE(mn);
+    EXPECT_EQ(std::get<std::int64_t>(*mn), 6);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio
