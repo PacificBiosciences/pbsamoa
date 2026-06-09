@@ -38,6 +38,7 @@ struct DecodedFeature
     std::int32_t Length{0};
     bool IsSubstitutionCode{false};
     std::vector<std::byte> Data;
+    std::optional<std::uint8_t> Quality;  // 'B': QS byte placed at ReadPos-1
 };
 
 std::size_t Itf8EncodedLength(std::uint8_t b0)
@@ -1394,14 +1395,15 @@ struct CramReader::Impl
 
                 switch (feature.Code) {
                     case 'B':
+                        // Read base: one base (BA) plus one quality (QS); consumes an M.
                         if (auto* baseCodec = LookupCodec(ctx, CramDataSeries::BA)) {
                             feature.Data.push_back(
                                 baseCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                             feature.IsSubstitutionCode = false;
-                        } else if (auto* subCodec = LookupCodec(ctx, CramDataSeries::BS)) {
-                            feature.Data.push_back(
-                                subCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
-                            feature.IsSubstitutionCode = true;
+                        }
+                        if (auto* qsCodec = LookupCodec(ctx, CramDataSeries::QS)) {
+                            feature.Quality = static_cast<std::uint8_t>(
+                                qsCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
                         }
                         feature.Length = 1;
                         break;
@@ -1436,15 +1438,17 @@ struct CramReader::Impl
                         }
                         break;
                     case 'q':
-                        if (auto* codec = LookupCodec(ctx, CramDataSeries::QS)) {
-                            feature.Data.push_back(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
-                            feature.Length = 1;
-                        }
-                        break;
-                    case 'Q':
+                        // Several quality values: array from QQ.
                         if (auto* codec = LookupCodec(ctx, CramDataSeries::QQ)) {
                             feature.Data = codec->DecodeByteArray(ctx.CoreReader, ctx.ExtStore);
                             feature.Length = std::size(feature.Data);
+                        }
+                        break;
+                    case 'Q':
+                        // Quality score: single byte from QS.
+                        if (auto* codec = LookupCodec(ctx, CramDataSeries::QS)) {
+                            feature.Data.push_back(codec->DecodeByte(ctx.CoreReader, ctx.ExtStore));
+                            feature.Length = 1;
                         }
                         break;
                     case 'S':
@@ -1489,12 +1493,26 @@ struct CramReader::Impl
             } else if (readLength > 0) {
                 qualities.assign(readLength, 0xFF);
                 for (const auto& feature : features) {
-                    if ((feature.Code != 'q' && feature.Code != 'Q') || feature.ReadPos <= 0 ||
-                        std::empty(feature.Data)) {
+                    if (feature.ReadPos <= 0) {
                         continue;
                     }
-                    CopyBytesToVector(feature.Data, qualities,
-                                      static_cast<std::size_t>(feature.ReadPos - 1));
+                    const auto qualPos = static_cast<std::size_t>(feature.ReadPos - 1);
+                    if (feature.Code == 'q') {
+                        // Several quality values (QQ array): a run starting at ReadPos-1.
+                        if (!std::empty(feature.Data)) {
+                            CopyBytesToVector(feature.Data, qualities, qualPos);
+                        }
+                    } else if (feature.Code == 'Q') {
+                        // Quality score (single QS byte) placed at ReadPos-1.
+                        if (!std::empty(feature.Data) && qualPos < std::size(qualities)) {
+                            qualities[qualPos] = static_cast<std::uint8_t>(feature.Data.front());
+                        }
+                    } else if (feature.Code == 'B') {
+                        // Read base: QS byte captured alongside the base.
+                        if (feature.Quality.has_value() && qualPos < std::size(qualities)) {
+                            qualities[qualPos] = *feature.Quality;
+                        }
+                    }
                 }
             }
 
