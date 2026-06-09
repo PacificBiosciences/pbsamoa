@@ -185,6 +185,24 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
     BamRecord record;
 
+    // SAMv1 §1.4 col 1: QNAME must match [!-?A-~]{1,254}
+    // Allowed chars: 0x21-0x3F ('!'-'?') and 0x41-0x7E ('A'-'~'); '@' (0x40) is excluded.
+    {
+        const std::string_view qname{fields[0]};
+        if (std::empty(qname) || (std::size(qname) > 254)) {
+            throw std::runtime_error{
+                std::format("SamReader: line {}: QNAME '{}' violates spec [!-?A-~]{{1,254}}",
+                            lineNumber, qname)};
+        }
+        for (const char ch : qname) {
+            const auto uch{static_cast<unsigned char>(ch)};
+            if (!((uch >= 0x21U && uch <= 0x3FU) || (uch >= 0x41U && uch <= 0x7EU))) {
+                throw std::runtime_error{
+                    std::format("SamReader: line {}: QNAME '{}' contains invalid character",
+                                lineNumber, qname)};
+            }
+        }
+    }
     record.Name(std::string{fields[0]});
 
     record.Flag(ParseInteger<std::uint16_t>(fields[1], "FLAG"));

@@ -459,7 +459,14 @@ TagValue DecodeTagValueFromBamPayload(char type, std::span<const std::byte> payl
             return TagValue{ReadTextPayload(payload)};
         }
         case 'H': {
-            return TagValue{HexString{ReadTextPayload(payload)}};
+            // SAMv1 §4.2.4: 'H' is a byte array encoded as an even-length run of hex
+            // digits. Validate here so the BAM decode path matches the SAM-text path and
+            // never round-trips malformed hex back out as non-conformant SAM.
+            std::string hex{ReadTextPayload(payload)};
+            if (((std::size(hex) % 2) != 0) || !std::ranges::all_of(hex, IsHexDigit)) {
+                throw std::runtime_error{"Tags: type 'H' payload is not valid hex"};
+            }
+            return TagValue{HexString{std::move(hex)}};
         }
         case 'B': {
             if (std::size(payload) < 5) {
@@ -685,7 +692,13 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
                 break;
             }
             case 'H': {
-                result.Append(key, TagValue{HexString{ReadNulTerminatedText(data, offset)}});
+                // SAMv1 §4.2.4: 'H' must be an even-length run of hex digits (matches the
+                // SAM-text and single-value decode paths; reject malformed hex loudly).
+                std::string hex{ReadNulTerminatedText(data, offset)};
+                if (((std::size(hex) % 2) != 0) || !std::ranges::all_of(hex, IsHexDigit)) {
+                    throw std::runtime_error{"Tags: type 'H' payload is not valid hex"};
+                }
+                result.Append(key, TagValue{HexString{std::move(hex)}});
                 break;
             }
             case 'B': {
@@ -733,6 +746,17 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
         return std::nullopt;
     }
 
+    // SAMv1 §1.5: TAG must match [A-Za-z][A-Za-z0-9]
+    {
+        const auto c0{static_cast<unsigned char>(text[0])};
+        const auto c1{static_cast<unsigned char>(text[1])};
+        const bool firstOk{(c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z')};
+        const bool secondOk{(c1 >= 'A' && c1 <= 'Z') || (c1 >= 'a' && c1 <= 'z') ||
+                            (c1 >= '0' && c1 <= '9')};
+        if (!firstOk || !secondOk) {
+            return std::nullopt;
+        }
+    }
     const TagKey key{text[0], text[1]};
     const char type{text[3]};
     const std::string_view valueStr{text.substr(5)};
@@ -741,6 +765,13 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
         case 'A':
             if (std::size(valueStr) != 1) {
                 return std::nullopt;
+            }
+            // SAMv1 §1.5 type 'A': value must be a printable character [!-~]
+            {
+                const auto uch{static_cast<unsigned char>(valueStr[0])};
+                if (uch < 0x21U || uch > 0x7EU) {
+                    return std::nullopt;
+                }
             }
             return std::pair{key, TagValue{valueStr[0]}};
         case 'i': {
@@ -764,6 +795,13 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
             return std::pair{key, TagValue{v}};
         }
         case 'Z':
+            // SAMv1 §1.5 type 'Z': value must match [ !-~]* (space or printable)
+            for (const char ch : valueStr) {
+                const auto uch{static_cast<unsigned char>(ch)};
+                if (uch != 0x20U && (uch < 0x21U || uch > 0x7EU)) {
+                    return std::nullopt;
+                }
+            }
             return std::pair{key, TagValue{std::string{valueStr}}};
         case 'H':
             if ((std::size(valueStr) % 2) != 0) {

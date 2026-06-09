@@ -92,6 +92,9 @@ void FlushLine(std::string& buf, std::ofstream& stream)
 {
     buf += '\n';
     stream.write(std::data(buf), static_cast<std::streamsize>(std::size(buf)));
+    if (!stream) {
+        throw std::runtime_error{"SamWriter: failed to write record"};
+    }
 }
 
 }  // namespace
@@ -115,6 +118,10 @@ struct SamWriter::Impl
             throw std::runtime_error{std::format("SamWriter: cannot open {}", writePath.string())};
         }
         stream << header.ToText();
+        if (!stream) {
+            throw std::runtime_error{
+                std::format("SamWriter: failed to write header to {}", writePath.string())};
+        }
     }
 };
 

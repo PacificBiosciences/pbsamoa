@@ -207,6 +207,17 @@ TEST_F(SamReaderTempFile, HeaderlessSamWithMappedReadIsRejected)
     EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
+TEST_F(SamReaderTempFile, RejectsInvalidQName)
+{
+    // SAMv1 §1.4 col 1: QNAME must match [!-?A-~]{1,254}; '@' (0x40) is excluded.
+    const auto path = WriteTempSam("bad_qname.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read@1\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\t*\n");
+    SamReader reader{path};
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
+}
+
 TEST_F(SamReaderTempFile, EmptyFile)
 {
     const auto path = WriteTempSam("empty.sam", "");

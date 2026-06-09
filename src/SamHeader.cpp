@@ -166,7 +166,7 @@ std::expected<PacBio::Samoa::ReferenceSequence, std::string> ParseReferenceSeque
     if (std::empty(name)) {
         return std::unexpected{"Missing required SN field in @SQ line"};
     }
-    if (!length || (*length < 0)) {
+    if (!length || (*length < 1)) {
         return std::unexpected{"Missing required LN field in @SQ line"};
     }
 
@@ -420,6 +420,9 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
     // The spec (SAMv1 §1.3) requires @SQ SN names to be distinct; htslib treats a repeat
     // as a fatal parse error (header.c:236-240). Track seen names to enforce the same.
     std::unordered_set<std::string> seenRefNames;
+    std::unordered_set<std::string> seenRgIds;
+    std::unordered_set<std::string> seenPgIds;
+    bool seenHd{false};
     const std::vector<std::string_view> lines{Split(text, '\n')};
     for (const std::string_view line : lines) {
         if (std::empty(line)) {
@@ -432,6 +435,11 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
         const std::string_view recordType{fields[0]};
 
         if (recordType == "@HD") {
+            // SAMv1 §1.3: if present, there must be only one @HD line.
+            if (seenHd) {
+                return std::unexpected{"Multiple @HD lines in sam header"};
+            }
+            seenHd = true;
             for (const std::string_view field :
                  std::span<const std::string_view>{fields}.subspan(1)) {
                 const auto [tag, value] = ParseTagValue(field);
@@ -463,22 +471,31 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
             continue;
         }
         if (recordType == "@RG") {
-            if (auto result = AppendParsedRecord(
-                    header.readGroups_, ParseTaggedRecord<ReadGroup>(
-                                            fields, "ID", "Missing required ID field in @RG line"));
-                !result) {
-                return std::unexpected{std::move(result.error())};
+            // SAMv1 §1.3: each @RG ID must be unique.
+            auto parsed{ParseTaggedRecord<ReadGroup>(fields, "ID",
+                                                     "Missing required ID field in @RG line")};
+            if (!parsed) {
+                return std::unexpected{std::move(parsed.error())};
             }
+            if (!seenRgIds.insert(std::string{parsed->Id()}).second) {
+                return std::unexpected{"Duplicate @RG ID \"" + std::string{parsed->Id()} +
+                                       "\" in sam header"};
+            }
+            header.readGroups_.push_back(std::move(*parsed));
             continue;
         }
         if (recordType == "@PG") {
-            if (auto result =
-                    AppendParsedRecord(header.programRecords_,
-                                       ParseTaggedRecord<ProgramRecord>(
-                                           fields, "ID", "Missing required ID field in @PG line"));
-                !result) {
-                return std::unexpected{std::move(result.error())};
+            // SAMv1 §1.3: each @PG ID must be unique.
+            auto parsed{ParseTaggedRecord<ProgramRecord>(fields, "ID",
+                                                         "Missing required ID field in @PG line")};
+            if (!parsed) {
+                return std::unexpected{std::move(parsed.error())};
             }
+            if (!seenPgIds.insert(std::string{parsed->Id()}).second) {
+                return std::unexpected{"Duplicate @PG ID \"" + std::string{parsed->Id()} +
+                                       "\" in sam header"};
+            }
+            header.programRecords_.push_back(std::move(*parsed));
             continue;
         }
         if (recordType == "@CO") {

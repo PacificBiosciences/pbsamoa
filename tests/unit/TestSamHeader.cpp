@@ -17,6 +17,31 @@
 namespace PacBio {
 namespace Samoa {
 
+TEST(SamHeaderValidation, RejectsZeroReferenceLength)
+{
+    // SAMv1 §1.3: @SQ LN range is [1, 2^31-1]; LN:0 is out of range.
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:0\n").has_value());
+    EXPECT_TRUE(SamHeader::FromText("@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1\n").has_value());
+}
+
+TEST(SamHeaderValidation, RejectsDuplicateReadGroupId)
+{
+    // SAMv1 §1.3: each @RG ID must be unique.
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@RG\tID:rg1\n@RG\tID:rg1\n").has_value());
+}
+
+TEST(SamHeaderValidation, RejectsDuplicateProgramId)
+{
+    // SAMv1 §1.3: each @PG ID must be unique.
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@PG\tID:p1\n@PG\tID:p1\n").has_value());
+}
+
+TEST(SamHeaderValidation, RejectsMultipleHdLines)
+{
+    // SAMv1 §1.3: if present there must be only one @HD line.
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@HD\tVN:1.6\n").has_value());
+}
+
 TEST(ReferenceSequence, BasicConstruction)
 {
     const ReferenceSequence ref{"chr1", 248956422};

@@ -4,10 +4,12 @@
 
 #include <bit>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
@@ -359,6 +361,45 @@ TEST(TagBamParse, EmptyData)
 }
 
 // --- SAM Tag Parsing Tests ---
+
+TEST(TagSamParse, RejectsInvalidTagKey)
+{
+    // SAMv1 §1.5: TAG must match [A-Za-z][A-Za-z0-9].
+    EXPECT_FALSE(ParseTagFromSam("1X:i:5").has_value());  // first char must be a letter
+    EXPECT_FALSE(ParseTagFromSam("X-:i:5").has_value());  // second char must be alphanumeric
+}
+
+TEST(TagSamParse, RejectsNonPrintableTypeAValue)
+{
+    // SAMv1 §1.5: type 'A' must be a printable character [!-~]; space (0x20) is excluded.
+    EXPECT_FALSE(ParseTagFromSam("XA:A: ").has_value());
+    EXPECT_TRUE(ParseTagFromSam("XA:A:Q").has_value());
+}
+
+TEST(TagSamParse, RejectsTypeZWithEmbeddedTab)
+{
+    // SAMv1 §1.5: type 'Z' is [ !-~]*; an embedded tab would corrupt the SAM column layout.
+    EXPECT_FALSE(ParseTagFromSam(std::string{"XZ:Z:ab"} + '\t' + "cd").has_value());
+    EXPECT_TRUE(ParseTagFromSam("XZ:Z:ab cd").has_value());  // space is permitted
+}
+
+TEST(TagBamParse, RejectsMalformedHexHtag)
+{
+    // SAMv1 §4.2.4: 'H' is an even-length run of hex digits. The BAM decode path must
+    // reject malformed hex (matching the SAM-text path), not round-trip garbage.
+    // Aux layout: 2-byte tag key, 1-byte type 'H', then NUL-terminated hex text.
+    const auto auxBytes{[](std::string_view body) {
+        std::vector<std::byte> v;
+        for (const char c : body) {
+            v.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
+        }
+        v.push_back(std::byte{0});  // NUL terminator
+        return v;
+    }};
+    EXPECT_THROW(ParseTagsFromBam(auxBytes("XHHABC")), std::runtime_error);  // 3 digits: odd
+    EXPECT_THROW(ParseTagsFromBam(auxBytes("XHHAZ")), std::runtime_error);   // 'Z' not hex
+    EXPECT_NO_THROW(ParseTagsFromBam(auxBytes("XHHAB")));                    // valid: "AB"
+}
 
 TEST(TagSamParse, IntegerTag)
 {
