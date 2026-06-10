@@ -566,8 +566,7 @@ bool RestoreFromLossless(BamRecord& record)
         // MN tracks SEQ length for MM/ML; the clipped record carries the clipped length,
         // so restore it to the rebuilt full-length sequence.
         if (record.Tags().Contains(TagKey{'M', 'N'})) {
-            record.MutableTags().Set(TagKey{'M', 'N'},
-                                     static_cast<std::int64_t>(std::ssize(sequence)));
+            record.MutableTags().Set(TagKey{'M', 'N'}, std::ssize(sequence));
         }
     }
     for (const TagKey key : DEMUX_TAGS) {
