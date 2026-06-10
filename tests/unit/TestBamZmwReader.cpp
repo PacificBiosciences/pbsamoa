@@ -292,14 +292,23 @@ TEST_F(BamZmwReaderTest, ProducerStallsWhenQueueIsFull)
     WriteBamWithZmws({{42, 1}, {99, 1}, {7, 1}});
     BamZmwReader reader{MakeReader(), BamZmwReaderConfig{.PrefetchCapacityZmws = 1}};
 
-    // Drain all groups — with capacity=1 and 3 ZMWs, the producer must have
-    // stalled at least once waiting for the consumer to free a queue slot.
+    // With capacity=1 and no consumption yet, the producer fills the single
+    // queue slot and then blocks trying to push the second ZMW group, which
+    // records a stall. Poll the metric instead of draining in a tight loop:
+    // draining lets the consumer keep pace with the producer, so on some
+    // schedules the queue is never observed full and no stall is recorded.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while ((reader.GetMetrics().ProducerStalls == 0u) &&
+           (std::chrono::steady_clock::now() < deadline)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+
+    EXPECT_GT(reader.GetMetrics().ProducerStalls, 0u);
+
+    // Drain so the producer finishes cleanly before teardown.
     std::vector<BamRecord> group;
     while (reader.GetNext(group)) {
     }
-
-    const ZmwReaderMetrics m = reader.GetMetrics();
-    EXPECT_GT(m.ProducerStalls, 0u);
 }
 
 TEST_F(BamZmwReaderTest, NumZmwsDelegatesCorrectly)
