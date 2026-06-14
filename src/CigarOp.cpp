@@ -120,5 +120,64 @@ std::vector<std::uint16_t> Reg2Bins(std::int32_t beg, std::int32_t end)
     return bins;
 }
 
+CigarStats ComputeCigarStats(CigarView cigar)
+{
+    // Raw counts, matching pbcopper Data::CigarOpsCalculator. MatchBases counts
+    // both = and M; X is mismatch; indels accumulate both bases and event counts.
+    std::int32_t matchBases{0};
+    std::int32_t mismatchBases{0};
+    std::int32_t insertionBases{0};
+    std::int32_t deletionBases{0};
+    std::int32_t insertionEvents{0};
+    std::int32_t deletionEvents{0};
+
+    for (const CigarOp& op : cigar) {
+        const std::int32_t len{static_cast<std::int32_t>(op.Length())};
+        switch (op.Type()) {
+            case CigarOpType::EQ:
+            case CigarOpType::M:
+                matchBases += len;
+                break;
+            case CigarOpType::X:
+                mismatchBases += len;
+                break;
+            case CigarOpType::I:
+                insertionBases += len;
+                ++insertionEvents;
+                break;
+            case CigarOpType::D:
+                deletionBases += len;
+                ++deletionEvents;
+                break;
+            case CigarOpType::N:
+            case CigarOpType::S:
+            case CigarOpType::H:
+            case CigarOpType::P:
+                break;
+        }
+    }
+
+    CigarStats stats;
+    stats.Mismatches = mismatchBases;
+    stats.Insertions = insertionBases;
+    stats.Deletions = deletionBases;
+    stats.InsertionEvents = insertionEvents;
+    stats.DeletionEvents = deletionEvents;
+    stats.NumAlignedBases = matchBases + insertionBases + mismatchBases;
+    stats.Span = stats.NumAlignedBases;
+
+    const std::int32_t denomIdentity{matchBases + mismatchBases + deletionBases + insertionBases};
+    if (denomIdentity > 0) {
+        stats.Identity = (100.0 * matchBases) / denomIdentity;
+    }
+
+    const std::int32_t denomGapComp{matchBases + mismatchBases + deletionEvents + insertionEvents};
+    if (denomGapComp > 0) {
+        stats.IdentityGapComp = (100.0 * matchBases) / denomGapComp;
+    }
+
+    return stats;
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

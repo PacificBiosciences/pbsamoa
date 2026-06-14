@@ -64,6 +64,33 @@ constexpr std::int64_t ReferenceLength(CigarView cigar);
 /// \brief Query-consuming length of a CIGAR string.
 constexpr std::int64_t QueryLength(CigarView cigar);
 
+/// \brief Number of sequence mismatches (sum of X-op lengths).
+constexpr std::int32_t CountMismatches(CigarView cigar);
+
+/// \brief Per-alignment CIGAR statistics, matching pbcopper CigarOpsCalculator.
+///
+/// Definitions (identical to pbcopper Data::CigarOpsCalculator):
+///   NumAlignedBases = MatchBases + InsertionBases + MismatchBases
+///   Span            = NumAlignedBases  (aligned query span, clips excluded)
+///   Identity        = 100 * Match / (Match + Mismatch + Deletion + Insertion)
+///   IdentityGapComp = 100 * Match / (Match + Mismatch + DelEvents + InsEvents)
+/// where MatchBases counts both = and M ops.
+struct CigarStats
+{
+    std::int32_t NumAlignedBases{0};
+    std::int32_t Span{0};
+    std::int32_t Mismatches{0};
+    std::int32_t Insertions{0};
+    std::int32_t Deletions{0};
+    std::int32_t InsertionEvents{0};
+    std::int32_t DeletionEvents{0};
+    double Identity{0.0};
+    double IdentityGapComp{0.0};
+};
+
+/// \brief Compute alignment statistics from a CIGAR. Matches pbcopper exactly.
+CigarStats ComputeCigarStats(CigarView cigar);
+
 /// \brief Parse CIGAR from SAM text (e.g., "8M2I4M1D3M"). "*" returns empty.
 std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view text);
 
@@ -182,6 +209,17 @@ constexpr std::int64_t QueryLength(CigarView cigar)
         }
     }
     return len;
+}
+
+constexpr std::int32_t CountMismatches(CigarView cigar)
+{
+    std::int32_t count{0};
+    for (const CigarOp& op : cigar) {
+        if (op.Type() == CigarOpType::X) {
+            count += static_cast<std::int32_t>(op.Length());
+        }
+    }
+    return count;
 }
 
 constexpr std::uint16_t Reg2Bin(std::int32_t beg, std::int32_t end)

@@ -370,5 +370,26 @@ TEST(RawRecord, NonNullTerminatedNameThrows)
     EXPECT_THROW(RawRecord(std::span<const std::byte>{data}), std::invalid_argument);
 }
 
+// IsSecondary (0x100) and IsSupplementary (0x800) must be distinguishable —
+// IsPrimary alone collapses both, but primary-relabel logic needs them apart.
+TEST(RawRecord, IsSecondaryAndIsSupplementaryReflectFlag)
+{
+    BamRecord secondary;
+    secondary.Name("r").Flag(0x100).Sequence("A").Qualities({30});
+    const std::vector<std::byte> secData{secondary.SerializeToBam()};
+    const RawRecord secView{std::span<const std::byte>{secData}};
+    EXPECT_TRUE(secView.IsSecondary());
+    EXPECT_FALSE(secView.IsSupplementary());
+    EXPECT_FALSE(secView.IsPrimary());
+
+    BamRecord supplementary;
+    supplementary.Name("r").Flag(0x800).Sequence("A").Qualities({30});
+    const std::vector<std::byte> supData{supplementary.SerializeToBam()};
+    const RawRecord supView{std::span<const std::byte>{supData}};
+    EXPECT_TRUE(supView.IsSupplementary());
+    EXPECT_FALSE(supView.IsSecondary());
+    EXPECT_FALSE(supView.IsPrimary());
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

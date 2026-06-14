@@ -243,5 +243,56 @@ TEST(Reg2Bins, BegAtOrAfterClampedEndReturnsEmpty)
     EXPECT_TRUE(std::empty(Reg2Bins(MAX_COORD, MAX_COORD + 1)));
 }
 
+// ComputeCigarStats must match pbcopper CigarOpsCalculator definitions exactly,
+// so an aligner emitting de/mc/identity tags via pbsamoa matches pbmm2 output.
+TEST(CigarStats, MatchesPbcopperCalculatorDefinitions)
+{
+    // 50= 2X 3I 50= 4D 50=  ->  match=150, mismatch=2, ins=3 (1 event), del=4 (1 event)
+    const auto cigar{*ParseCigar("50=2X3I50=4D50=")};
+    const CigarStats stats{ComputeCigarStats(cigar)};
+    EXPECT_EQ(stats.Mismatches, 2);
+    EXPECT_EQ(stats.Insertions, 3);
+    EXPECT_EQ(stats.Deletions, 4);
+    EXPECT_EQ(stats.InsertionEvents, 1);
+    EXPECT_EQ(stats.DeletionEvents, 1);
+    // NumAlignedBases = match + insertions + mismatch = 150 + 3 + 2
+    EXPECT_EQ(stats.NumAlignedBases, 155);
+    EXPECT_EQ(stats.Span, 155);
+    // Identity = 100 * match / (match + mismatch + del + ins)
+    EXPECT_NEAR(stats.Identity, 100.0 * 150.0 / 159.0, 1e-9);
+    // IdentityGapComp = 100 * match / (match + mismatch + delEvents + insEvents)
+    EXPECT_NEAR(stats.IdentityGapComp, 100.0 * 150.0 / 154.0, 1e-9);
+}
+
+TEST(CigarStats, TreatsMOpAsMatch)
+{
+    const auto cigar{*ParseCigar("10M")};
+    const CigarStats stats{ComputeCigarStats(cigar)};
+    EXPECT_EQ(stats.NumAlignedBases, 10);
+    EXPECT_DOUBLE_EQ(stats.Identity, 100.0);
+}
+
+TEST(CigarStats, ExcludesClipsAndRefSkips)
+{
+    const auto cigar{*ParseCigar("5S10=3N10=5H")};
+    const CigarStats stats{ComputeCigarStats(cigar)};
+    EXPECT_EQ(stats.NumAlignedBases, 20);
+    EXPECT_DOUBLE_EQ(stats.Identity, 100.0);
+}
+
+TEST(CigarStats, EmptyCigarYieldsZeroIdentity)
+{
+    const CigarStats stats{ComputeCigarStats(CigarView{})};
+    EXPECT_EQ(stats.NumAlignedBases, 0);
+    EXPECT_DOUBLE_EQ(stats.Identity, 0.0);
+    EXPECT_DOUBLE_EQ(stats.IdentityGapComp, 0.0);
+}
+
+TEST(CountMismatches, SumsXOps)
+{
+    const auto cigar{*ParseCigar("10=2X5=3X")};
+    EXPECT_EQ(CountMismatches(cigar), 5);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

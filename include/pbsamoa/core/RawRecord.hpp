@@ -58,6 +58,8 @@ public:
     bool IsMapped() const;
     bool IsReverseStrand() const;
     bool IsPrimary() const;
+    bool IsSecondary() const;
+    bool IsSupplementary() const;
     std::int64_t ReferenceLength() const;
     std::int64_t QueryLength() const;
 
@@ -207,6 +209,10 @@ inline bool RawRecord::IsMapped() const { return (Flag() & 0x4) == 0; }
 inline bool RawRecord::IsReverseStrand() const { return (Flag() & 0x10) != 0; }
 
 inline bool RawRecord::IsPrimary() const { return (Flag() & 0x900) == 0; }
+
+inline bool RawRecord::IsSecondary() const { return (Flag() & 0x100) != 0; }
+
+inline bool RawRecord::IsSupplementary() const { return (Flag() & 0x800) != 0; }
 
 inline std::int64_t RawRecord::ReferenceLength() const
 {

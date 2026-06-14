@@ -8,14 +8,17 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <format>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include <cassert>
 #include <cstring>
 
 namespace PacBio {
@@ -27,6 +30,8 @@ constexpr TagKey QS_TAG{'q', 's'};
 constexpr TagKey QE_TAG{'q', 'e'};
 constexpr std::uint16_t BAM_UNMAPPED_FLAG{0x4};
 constexpr std::uint16_t BAM_REVERSE_STRAND_FLAG{0x10};
+constexpr std::uint16_t BAM_SECONDARY_FLAG{0x100};
+constexpr std::uint16_t BAM_SUPPLEMENTARY_FLAG{0x800};
 constexpr std::uint16_t BAM_NON_PRIMARY_FLAGS{0x900};
 constexpr std::uint16_t BAM_UNMAPPED_BIN{4680};
 
@@ -194,7 +199,95 @@ bool BamRecord::IsReverseStrand() const { return (flag_ & BAM_REVERSE_STRAND_FLA
 
 bool BamRecord::IsPrimary() const { return (flag_ & BAM_NON_PRIMARY_FLAGS) == 0; }
 
+bool BamRecord::IsSecondary() const { return (flag_ & BAM_SECONDARY_FLAG) != 0; }
+
+bool BamRecord::IsSupplementary() const { return (flag_ & BAM_SUPPLEMENTARY_FLAG) != 0; }
+
 std::int32_t BamRecord::ReferenceEnd() const { return pos_ + ReferenceLength(cigar_); }
+
+std::int32_t BamRecord::AlignedStart() const
+{
+    // Mirrors pbcopper Data::MappedRead::AlignedStart: accumulate leading
+    // soft-clip lengths onto the query start. The CIGAR is reference-oriented,
+    // so forward-strand reads clip from the front and reverse-strand reads from
+    // the back (polymerase coordinates). A hard-clip on an interior edge means
+    // the original query interval is not fully recoverable, signalled by -1.
+    const std::int32_t seqLength{static_cast<std::int32_t>(std::size(sequence_))};
+    std::int32_t startOffset{QueryStart()};
+    const auto walk = [&startOffset, seqLength](auto it, const auto end) {
+        for (; it != end; ++it) {
+            const CigarOpType type{it->Type()};
+            if (type == CigarOpType::H) {
+                if ((startOffset != 0) && (startOffset != seqLength)) {
+                    startOffset = -1;
+                    break;
+                }
+            } else if (type == CigarOpType::S) {
+                startOffset += static_cast<std::int32_t>(it->Length());
+            } else {
+                break;
+            }
+        }
+    };
+    if (!IsReverseStrand()) {
+        walk(cigar_.begin(), cigar_.end());
+    } else {
+        walk(cigar_.rbegin(), cigar_.rend());
+    }
+    return startOffset;
+}
+
+std::int32_t BamRecord::AlignedEnd() const
+{
+    // Mirrors pbcopper Data::MappedRead::AlignedEnd: subtract trailing soft-clip
+    // lengths off the query end (forward reads clip from the back, reverse reads
+    // from the front).
+    const std::int32_t seqLength{static_cast<std::int32_t>(std::size(sequence_))};
+    std::int32_t endOffset{QueryEnd()};
+    const auto walk = [&endOffset, seqLength](auto it, const auto end) {
+        for (; it != end; ++it) {
+            const CigarOpType type{it->Type()};
+            if (type == CigarOpType::H) {
+                if ((endOffset != 0) && (endOffset != seqLength)) {
+                    endOffset = -1;
+                    break;
+                }
+            } else if (type == CigarOpType::S) {
+                endOffset -= static_cast<std::int32_t>(it->Length());
+            } else {
+                break;
+            }
+        }
+    };
+    if (!IsReverseStrand()) {
+        walk(cigar_.rbegin(), cigar_.rend());
+    } else {
+        walk(cigar_.begin(), cigar_.end());
+    }
+    return endOffset;
+}
+
+BamRecord& BamRecord::Map(std::int32_t refId, std::int32_t pos, bool reverse,
+                          std::vector<CigarOp> cigar, std::uint8_t mapQ)
+{
+    // Precondition: SEQ/QUAL are currently stored in forward orientation, so the
+    // reverse-strand reverse-complement below is applied at most once.
+    assert(!IsReverseStrand());
+
+    flag_ &= static_cast<std::uint16_t>(~BAM_UNMAPPED_FLAG);
+    flag_ &= static_cast<std::uint16_t>(~BAM_REVERSE_STRAND_FLAG);
+    if (reverse) {
+        flag_ |= BAM_REVERSE_STRAND_FLAG;
+        ReverseComplementInPlace(sequence_);
+        std::ranges::reverse(qualities_);
+    }
+
+    refId_ = refId;
+    pos_ = pos;
+    mapQ_ = mapQ;
+    cigar_ = std::move(cigar);
+    return *this;
+}
 
 // --- serialization ---
 
@@ -469,28 +562,35 @@ std::optional<std::int32_t> OptionalIntTag(const TagMap& tags, TagKey key)
     return std::nullopt;
 }
 
-std::string_view QueryIntervalText(std::string_view fullName)
+// Parse the trailing "start_end" query interval from a PacBio read name.
+// Returns nullopt when the name carries no recoverable interval — e.g.
+// full-length CCS/HiFi/IsoSeq names ending in "ccs", or any name without a
+// slash — so QueryStart/QueryEnd can fall back to the whole-read interval
+// instead of throwing.
+std::optional<std::pair<std::int32_t, std::int32_t>> TryParseQueryInterval(
+    std::string_view fullName)
 {
     const std::size_t lastSlash{fullName.rfind('/')};
     if (lastSlash == std::string_view::npos) {
-        throw std::runtime_error{"Malformed PacBio BAM read name: " + std::string{fullName}};
+        return std::nullopt;
     }
-    return fullName.substr(lastSlash + 1);
-}
-
-std::pair<std::int32_t, std::int32_t> ParseQueryInterval(std::string_view fullName)
-{
-    const std::string_view interval{QueryIntervalText(fullName)};
+    const std::string_view interval{fullName.substr(lastSlash + 1)};
     const std::size_t underscore{interval.find('_')};
     if (underscore == std::string_view::npos) {
-        throw std::runtime_error{"Malformed PacBio BAM query interval: " + std::string{interval}};
+        return std::nullopt;
     }
     const std::string_view startText{interval.substr(0, underscore)};
     const std::string_view endText{interval.substr(underscore + 1)};
-    return {
-        std::stoi(std::string{startText}),
-        std::stoi(std::string{endText}),
-    };
+    std::int32_t start{0};
+    std::int32_t end{0};
+    const std::from_chars_result startResult{
+        std::from_chars(std::data(startText), std::data(startText) + std::size(startText), start)};
+    const std::from_chars_result endResult{
+        std::from_chars(std::data(endText), std::data(endText) + std::size(endText), end)};
+    if ((startResult.ec != std::errc{}) || (endResult.ec != std::errc{})) {
+        return std::nullopt;
+    }
+    return std::make_pair(start, end);
 }
 
 std::vector<std::uint8_t> ToUInt8Vector(const TagArray& array)
@@ -584,7 +684,11 @@ std::int32_t BamRecord::QueryStart() const
     if (const auto* tag{tags_.Get(QS_TAG)}; tag) {
         return TagToInt32(*tag);
     }
-    return ParseQueryInterval(name_).first;
+    if (const auto interval{TryParseQueryInterval(name_)}; interval) {
+        return interval->first;
+    }
+    // Full-length reads (CCS/HiFi/IsoSeq) carry no interval: query starts at 0.
+    return 0;
 }
 
 std::int32_t BamRecord::QueryEnd() const
@@ -592,7 +696,11 @@ std::int32_t BamRecord::QueryEnd() const
     if (const auto* tag{tags_.Get(QE_TAG)}; tag) {
         return TagToInt32(*tag);
     }
-    return ParseQueryInterval(name_).second;
+    if (const auto interval{TryParseQueryInterval(name_)}; interval) {
+        return interval->second;
+    }
+    // Full-length reads carry no interval: query ends at the full read length.
+    return static_cast<std::int32_t>(std::size(sequence_));
 }
 
 std::string BamRecord::ReadGroupId() const

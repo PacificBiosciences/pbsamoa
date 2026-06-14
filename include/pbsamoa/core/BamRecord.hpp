@@ -71,7 +71,36 @@ public:
     bool IsMapped() const;
     bool IsReverseStrand() const;
     bool IsPrimary() const;
+    bool IsSecondary() const;
+    bool IsSupplementary() const;
     std::int32_t ReferenceEnd() const;
+
+    /// \brief First query position consumed by aligned ops, in polymerase
+    /// coordinates (QueryStart + strand-appropriate leading soft-clip). Returns
+    /// -1 if a hard-clip indicates the query interval is not fully recoverable.
+    std::int32_t AlignedStart() const;
+
+    /// \brief One-past-last query position consumed by aligned ops, in polymerase
+    /// coordinates (QueryEnd - strand-appropriate trailing soft-clip). Returns -1
+    /// if a hard-clip indicates the query interval is not fully recoverable.
+    std::int32_t AlignedEnd() const;
+
+    /// \brief Turn an unmapped record into a mapped one.
+    ///
+    /// Clears the unmapped bit, sets reference id/position/mapq/CIGAR, and sets
+    /// the reverse-strand bit per \p reverse. On the reverse strand the SEQ is
+    /// reverse-complemented and QUAL is reversed in place, matching the BAM
+    /// convention that aligned records store SEQ/QUAL in alignment orientation.
+    /// Per-base tags (ip, pw, ML, …) are left in native orientation, matching
+    /// pbbam. Precondition: the record currently stores forward-strand SEQ/QUAL
+    /// (i.e. it is not already reverse-mapped).
+    /// \param[in] refId    reference sequence index
+    /// \param[in] pos      0-based reference start position
+    /// \param[in] reverse  true if the alignment is on the reverse strand
+    /// \param[in] cigar    alignment CIGAR (reference orientation)
+    /// \param[in] mapQ     mapping quality
+    BamRecord& Map(std::int32_t refId, std::int32_t pos, bool reverse, std::vector<CigarOp> cigar,
+                   std::uint8_t mapQ);
 
     /// \brief Serialize to BAM binary layout (excludes block_size prefix).
     std::vector<std::byte> SerializeToBam() const;

@@ -1,9 +1,12 @@
 #include <pbsamoa/core/BamRecord.hpp>
+#include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
+#include <vector>
 
 #include <cstdint>
 
@@ -180,6 +183,102 @@ TEST(PacBioBamRecord, WallEndAbsent)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};
     EXPECT_FALSE(record.WallEnd());
+}
+
+// Full-length CCS/HiFi/IsoSeq read names end in a non-interval segment ("ccs")
+// and carry no qs/qe tag. QueryStart/QueryEnd must not throw — they return the
+// whole-read interval [0, seqLen), matching pbbam semantics.
+TEST(PacBioBamRecord, QueryStartCcsNameNoIntervalReturnsZero)
+{
+    auto record{MakePacBioRecord("movie1/12345/ccs")};
+    record.Sequence("ACGTACGT");
+    EXPECT_EQ(record.QueryStart(), 0);
+}
+
+TEST(PacBioBamRecord, QueryEndCcsNameNoIntervalReturnsSeqLength)
+{
+    auto record{MakePacBioRecord("movie1/12345/ccs")};
+    record.Sequence("ACGTACGT");
+    EXPECT_EQ(record.QueryEnd(), 8);
+}
+
+TEST(PacBioBamRecord, IsSecondaryReflectsFlag)
+{
+    BamRecord record;
+    record.Flag(0x100);
+    EXPECT_TRUE(record.IsSecondary());
+    EXPECT_FALSE(record.IsSupplementary());
+    EXPECT_FALSE(record.IsPrimary());
+}
+
+TEST(PacBioBamRecord, IsSupplementaryReflectsFlag)
+{
+    BamRecord record;
+    record.Flag(0x800);
+    EXPECT_TRUE(record.IsSupplementary());
+    EXPECT_FALSE(record.IsSecondary());
+    EXPECT_FALSE(record.IsPrimary());
+}
+
+// Forward strand: AlignedStart adds the leading soft-clip to QueryStart;
+// AlignedEnd subtracts the trailing soft-clip from QueryEnd.
+TEST(PacBioBamRecord, AlignedStartEndForwardStrandSoftClips)
+{
+    BamRecord record;
+    record.Name("movie/1/0_20");  // QueryStart=0, QueryEnd=20 from name
+    record.Sequence(std::string(20, 'A'));
+    record.Flag(0x0);  // mapped, forward
+    record.Cigar(*ParseCigar("3S10M7S"));
+    EXPECT_EQ(record.AlignedStart(), 3);
+    EXPECT_EQ(record.AlignedEnd(), 13);
+}
+
+// Reverse strand: the CIGAR is reference-oriented, so soft-clips are consumed
+// from the opposite query end (polymerase coordinates).
+TEST(PacBioBamRecord, AlignedStartEndReverseStrandClipsFromOppositeEnd)
+{
+    BamRecord record;
+    record.Name("movie/1/0_20");
+    record.Sequence(std::string(20, 'A'));
+    record.Flag(0x10);  // mapped, reverse
+    record.Cigar(*ParseCigar("3S10M7S"));
+    EXPECT_EQ(record.AlignedStart(), 7);
+    EXPECT_EQ(record.AlignedEnd(), 17);
+}
+
+// Map on a forward alignment sets alignment fields and leaves SEQ/QUAL intact.
+TEST(PacBioBamRecord, MapForwardSetsFieldsAndKeepsSequence)
+{
+    BamRecord record;
+    record.Name("movie/1/0_8");
+    record.Flag(0x4);  // unmapped
+    record.Sequence("ACGTACGT");
+    record.Qualities({1, 2, 3, 4, 5, 6, 7, 8});
+    record.Map(2, 100, false, *ParseCigar("8M"), 60);
+    EXPECT_TRUE(record.IsMapped());
+    EXPECT_FALSE(record.IsReverseStrand());
+    EXPECT_EQ(record.RefId(), 2);
+    EXPECT_EQ(record.Pos(), 100);
+    EXPECT_EQ(record.MapQ(), 60u);
+    EXPECT_EQ(record.Sequence(), "ACGTACGT");
+    EXPECT_EQ(CigarToString(record.Cigar()), "8M");
+}
+
+// Map on a reverse alignment reverse-complements SEQ and reverses QUAL, matching
+// the BAM convention (SEQ/QUAL stored in alignment orientation).
+TEST(PacBioBamRecord, MapReverseReverseComplementsSeqAndReversesQual)
+{
+    BamRecord record;
+    record.Name("movie/1/0_8");
+    record.Flag(0x4);
+    record.Sequence("AAACGGTT");
+    record.Qualities({1, 2, 3, 4, 5, 6, 7, 8});
+    record.Map(0, 50, true, *ParseCigar("8M"), 30);
+    EXPECT_TRUE(record.IsMapped());
+    EXPECT_TRUE(record.IsReverseStrand());
+    EXPECT_EQ(record.Sequence(), "AACCGTTT");
+    const std::vector<std::uint8_t> expectedQual{8, 7, 6, 5, 4, 3, 2, 1};
+    EXPECT_TRUE(std::ranges::equal(record.Qualities(), expectedQual));
 }
 
 }  // namespace Samoa
