@@ -15,6 +15,8 @@ test_exe = executable(
         'TestBamRecord.cpp',
         'TestBamRecordClipping.cpp',
         'TestBamRecordReader.cpp',
+        'TestBamMerge.cpp',
+        'TestBamSort.cpp',
         'TestBamWriter.cpp',
         'TestBamZmwReader.cpp',
         'TestBasemods.cpp',

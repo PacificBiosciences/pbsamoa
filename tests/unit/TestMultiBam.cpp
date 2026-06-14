@@ -1,5 +1,7 @@
 #include "TestTempDir.hpp"
 
+#include "TestBamIo.hpp"
+
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/GenomicInterval.hpp>
@@ -69,15 +71,6 @@ BamRecord MakeRecord(std::string name, std::int32_t pos)
     return record;
 }
 
-void WriteBam(const std::filesystem::path& path, const SamHeader& header,
-              std::vector<BamRecord> records)
-{
-    BamWriter writer{path, header};
-    for (auto& record : records) {
-        writer.Write(record);
-    }
-}
-
 }  // namespace
 
 class MultiBamTest : public ::testing::Test
@@ -101,9 +94,10 @@ protected:
 
 TEST_F(MultiBamTest, BamCollectionMergesCompatibleHeaders)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1", "pg1", {"first"}), {MakeRecord("f1_r1", 10)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2", "pg2", {"first", "second"}),
-             {MakeRecord("f2_r1", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1", "pg1", {"first"}),
+                    {MakeRecord("f1_r1", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2", "pg2", {"first", "second"}),
+                    {MakeRecord("f2_r1", 20)});
 
     const BamCollection collection{std::vector<std::filesystem::path>{bam1_, bam2_}};
     const SamHeader& header{collection.Header()};
@@ -126,8 +120,10 @@ TEST_F(MultiBamTest, BamCollectionMergesCompatibleHeaders)
 
 TEST_F(MultiBamTest, BamCollectionRejectsConflictingReferenceDictionary)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1", "pg1", {}, 1000), {MakeRecord("f1_r1", 10)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2", "pg2", {}, 2000), {MakeRecord("f2_r1", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1", "pg1", {}, 1000),
+                    {MakeRecord("f1_r1", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2", "pg2", {}, 2000),
+                    {MakeRecord("f2_r1", 20)});
 
     EXPECT_THROW((BamCollection{std::vector<std::filesystem::path>{bam1_, bam2_}}),
                  std::runtime_error);
@@ -135,8 +131,8 @@ TEST_F(MultiBamTest, BamCollectionRejectsConflictingReferenceDictionary)
 
 TEST_F(MultiBamTest, BamCollectionRejectsConflictingReadGroups)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("f1_r1", 10)});
-    WriteBam(bam2_, MakeHeader("rg1", "sample2"), {MakeRecord("f2_r1", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("f1_r1", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg1", "sample2"), {MakeRecord("f2_r1", 20)});
 
     EXPECT_THROW((BamCollection{std::vector<std::filesystem::path>{bam1_, bam2_}}),
                  std::runtime_error);
@@ -144,9 +140,9 @@ TEST_F(MultiBamTest, BamCollectionRejectsConflictingReadGroups)
 
 TEST_F(MultiBamTest, BamRawReaderSupportsSequentialMultiBamInput)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"),
-             {MakeRecord("f1_r1", 10), MakeRecord("f1_r2", 30)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("f2_r1", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"),
+                    {MakeRecord("f1_r1", 10), MakeRecord("f1_r2", 30)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("f2_r1", 20)});
 
     BamRawReader reader{std::vector<std::filesystem::path>{bam1_, bam2_}};
     std::vector<std::string> names;
@@ -162,8 +158,8 @@ TEST_F(MultiBamTest, BamRawReaderSupportsSequentialMultiBamInput)
 
 TEST_F(MultiBamTest, BamRawReaderRejectsChunkingForTrueMultiBamInput)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("movie/42/0_100", 10)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("movie/99/0_100", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("movie/42/0_100", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("movie/99/0_100", 20)});
 
     EXPECT_THROW((BamRawReader{std::vector<std::filesystem::path>{bam1_, bam2_},
                                BamRawReaderConfig{.ChunkNum = 1, .TotalChunks = 1}}),
@@ -172,10 +168,10 @@ TEST_F(MultiBamTest, BamRawReaderRejectsChunkingForTrueMultiBamInput)
 
 TEST_F(MultiBamTest, BamRecordReaderSupportsSequentialAndQueriedMultiBamInput)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"),
-             {MakeRecord("f1_r1", 10), MakeRecord("f1_r2", 30)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2"),
-             {MakeRecord("f2_r1", 20), MakeRecord("f2_r2", 40)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"),
+                    {MakeRecord("f1_r1", 10), MakeRecord("f1_r2", 30)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2"),
+                    {MakeRecord("f2_r1", 20), MakeRecord("f2_r2", 40)});
     BamFile{bam1_}.CreateStandardIndex();
     BamFile{bam2_}.CreateStandardIndex();
 
@@ -199,8 +195,8 @@ TEST_F(MultiBamTest, BamRecordReaderSupportsSequentialAndQueriedMultiBamInput)
 
 TEST_F(MultiBamTest, BamRecordReaderMultiBamQueryThrowsOnMissingIndex)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("f1_r1", 10)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("f2_r1", 20)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("f1_r1", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2"), {MakeRecord("f2_r1", 20)});
     BamFile{bam1_}.CreateStandardIndex();
 
     BamRecordReader reader{std::vector<std::filesystem::path>{bam1_, bam2_},
@@ -210,9 +206,9 @@ TEST_F(MultiBamTest, BamRecordReaderMultiBamQueryThrowsOnMissingIndex)
 
 TEST_F(MultiBamTest, BamZmwReaderSupportsMultiBamInput)
 {
-    WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("movie/42/0_100", 10)});
-    WriteBam(bam2_, MakeHeader("rg2", "sample2"),
-             {MakeRecord("movie/42/100_200", 20), MakeRecord("movie/99/0_100", 30)});
+    tests::WriteBam(bam1_, MakeHeader("rg1", "sample1"), {MakeRecord("movie/42/0_100", 10)});
+    tests::WriteBam(bam2_, MakeHeader("rg2", "sample2"),
+                    {MakeRecord("movie/42/100_200", 20), MakeRecord("movie/99/0_100", 30)});
 
     BamZmwReader reader{std::vector<std::filesystem::path>{bam1_, bam2_},
                         BamZmwReaderConfig{

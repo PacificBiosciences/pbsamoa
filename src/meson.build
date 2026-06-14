@@ -33,6 +33,7 @@ lib = library(
         'BamRawReader.cpp',
         'BamRecord.cpp',
         'BamRecordReader.cpp',
+        'BamSort.cpp',
         'BamWriter.cpp',
         'BamZmwReader.cpp',
         'Basemods.cpp',

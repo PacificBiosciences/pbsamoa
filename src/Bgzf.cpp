@@ -15,10 +15,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -436,7 +438,7 @@ struct BgzfReader::Impl
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 
-    void OpenSyncFile(const std::filesystem::path& path);
+    void OpenSyncFile(const std::filesystem::path& path, bool seekable);
     std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
     void ParseHeaderSync();
     bool RefillRecordBuffer();
@@ -1798,16 +1800,35 @@ BgzfMetrics BgzfPipelineState::GetMetrics() const
     return m;
 }
 
+namespace {
+
+/// True for regular files, which are seekable. FIFOs, pipes, character devices
+/// and sockets are not: they can only be read sequentially. That rules out the
+/// parallel pipeline (it reopens the input and seeks to dispatch blocks to
+/// workers) and the trailing EOF-marker probe. Sequential streaming sort
+/// (`SortBam` over a FIFO) relies on this fallback to synchronous parsing.
+bool IsInputSeekable(const std::filesystem::path& path)
+{
+    std::error_code ec{};
+    return std::filesystem::is_regular_file(path, ec);
+}
+
+}  // namespace
+
 BgzfReader::Impl::Impl(const std::filesystem::path& path) : mode{BgzfReaderMode::BLOCK_ONLY}
 {
-    OpenSyncFile(path);
+    OpenSyncFile(path, IsInputSeekable(path));
 }
 
 BgzfReader::Impl::Impl(const std::filesystem::path& path, std::size_t numWorkers)
 {
-    if (numWorkers == 0) {
+    // The parallel pipeline reopens the input and seeks to dispatch blocks to
+    // worker threads, which a non-seekable stream (FIFO/pipe) cannot satisfy, so
+    // fall back to synchronous, sequential parsing for such input.
+    const bool seekable{IsInputSeekable(path)};
+    if ((numWorkers == 0) || !seekable) {
         mode = BgzfReaderMode::SYNC_BAM;
-        OpenSyncFile(path);
+        OpenSyncFile(path, seekable);
         ParseHeaderSync();
         return;
     }
@@ -1817,7 +1838,7 @@ BgzfReader::Impl::Impl(const std::filesystem::path& path, std::size_t numWorkers
     pipeline->ParseHeader();
 }
 
-void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
+void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path, bool seekable)
 {
     syncFile.open(path, std::ios::binary);
     if (!syncFile.is_open()) {
@@ -1829,6 +1850,13 @@ void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path)
     syncDecompressor = detail::DecompressorPtr{libdeflate_alloc_decompressor()};
     if (!syncDecompressor) {
         throw std::runtime_error{"Failed to create libdeflate decompressor"};
+    }
+
+    // A non-seekable stream (FIFO/pipe) cannot be probed for the trailing EOF
+    // marker nor rewound; it is already positioned at the start, so read it
+    // sequentially from here and leave the marker unverified.
+    if (!seekable) {
+        return;
     }
 
     syncFile.seekg(-static_cast<std::streamoff>(std::size(BGZF_EOF_MARKER)), std::ios::end);
