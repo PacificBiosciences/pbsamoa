@@ -465,6 +465,58 @@ TEST_F(BamRawReaderWhitelistTest, ChunkingWithManyChunksStillCoversAllRecords)
     EXPECT_EQ(total, 6u);
 }
 
+TEST_F(BamRawReaderWhitelistTest, ChunkedReadWithPipelineLandsOnCorrectRecords)
+{
+    // 3 ZMWs (10, 20, 30), 2 records each, packed into a single BGZF block, so
+    // chunk boundaries fall mid-block. With a parallel BGZF pipeline the reader
+    // must still honour the within-block start offset; otherwise the chunk seeks
+    // to the block boundary and returns earlier records than requested.
+    for (std::int32_t chunkNum{1}; chunkNum <= 3; ++chunkNum) {
+        BamRawReader reader{
+            tmpBamPath_,
+            BamRawReaderConfig{.BgzfWorkers = 4, .ChunkNum = chunkNum, .TotalChunks = 3}};
+
+        std::vector<std::string> names;
+        for (const auto& rec : reader.Records()) {
+            names.emplace_back(rec.Name());
+        }
+
+        const std::string marker{std::format("/{}/", chunkNum * 10)};
+        ASSERT_EQ(std::size(names), 2u) << "chunk " << chunkNum;
+        for (const auto& name : names) {
+            EXPECT_NE(name.find(marker), std::string::npos)
+                << "chunk " << chunkNum << " returned unexpected record: " << name;
+        }
+    }
+}
+
+TEST_F(BamRawReaderWhitelistTest, ChunkedPipelineUnionEqualsWholeFile)
+{
+    // The union of all chunks must equal the whole-file read exactly — no
+    // duplicated or dropped records — even with the parallel BGZF pipeline.
+    std::vector<std::string> whole;
+    {
+        BamRawReader reader{tmpBamPath_, BamRawReaderConfig{.BgzfWorkers = 4}};
+        for (const auto& rec : reader.Records()) {
+            whole.emplace_back(rec.Name());
+        }
+    }
+
+    std::vector<std::string> unioned;
+    for (std::int32_t chunkNum{1}; chunkNum <= 3; ++chunkNum) {
+        BamRawReader reader{
+            tmpBamPath_,
+            BamRawReaderConfig{.BgzfWorkers = 4, .ChunkNum = chunkNum, .TotalChunks = 3}};
+        for (const auto& rec : reader.Records()) {
+            unioned.emplace_back(rec.Name());
+        }
+    }
+
+    std::ranges::sort(whole);
+    std::ranges::sort(unioned);
+    EXPECT_EQ(unioned, whole);
+}
+
 TEST(BamRawReader, WhitelistAndChunkingMutuallyExclusive)
 {
     const auto path = tests::DataDir / "spec_example.bam";

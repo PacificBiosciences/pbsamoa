@@ -303,10 +303,20 @@ struct DecompressedBatchConsumer
     PipelineCounters& counters;
     std::mutex& readyMutex;
     std::condition_variable& readyCv;
+    std::size_t& skipBytes;
 
     void operator()(detail::DecompressedBatch batch) const
     {
         accumulator.insert(accumulator.end(), batch.data.begin(), batch.data.end());
+        // Drop the leading bytes requested by a mid-block seek so parsing starts
+        // at the target record rather than the block boundary (parity with the
+        // sync reader's recordBufPos). Carried across batches if the first one is
+        // shorter than the requested offset.
+        if (skipBytes > 0) {
+            const std::size_t drop{std::min(skipBytes, std::size(accumulator) - pos)};
+            pos += drop;
+            skipBytes -= drop;
+        }
         ParseBufferedRecords(accumulator, pos, outputQueue, stopToken, counters, readyMutex,
                              readyCv);
     }
@@ -339,6 +349,10 @@ struct BgzfPipelineState
     std::vector<std::byte> initialBytes;
     bool headerParsed{false};
     std::uint64_t headerEndFileOffset{0};
+
+    // Leading uncompressed bytes to drop from the first batch after a mid-block
+    // seek so parsing resumes at the requested record (see Seek/ConsumerLoop).
+    std::size_t seekSkipBytes{0};
 
     // Pipeline (created after ParseHeader when numWorkers > 0)
     std::unique_ptr<Parallel::ThreadPool<detail::DecompressedBatch>> pool;
@@ -1516,6 +1530,9 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
     try {
         std::vector<std::byte> accumulator{std::move(initialBytes)};
         std::size_t pos{0};
+        // After a mid-block seek initialBytes is empty and the first batch begins
+        // at the seeked block, so the leading bytes are dropped there, not here.
+        std::size_t skipBytes{seekSkipBytes};
 
         // Process any records already present from initialBytes (header block
         // may contain record data when header + records fit in one BGZF block).
@@ -1523,7 +1540,7 @@ void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
                              readyCv);
 
         const DecompressedBatchConsumer consumeBatch{
-            accumulator, pos, *outputQueue, stopToken, counters, readyMutex, readyCv};
+            accumulator, pos, *outputQueue, stopToken, counters, readyMutex, readyCv, skipBytes};
         while (pool->ConsumeWith(consumeBatch)) {
             if (stopToken.stop_requested()) {
                 break;
@@ -1719,13 +1736,16 @@ void BgzfPipelineState::Seek(VirtualOffset offset)
 
     // Reset sync file position
     syncFile.clear();
-    // Within-block offset intentionally discarded; callers (BamRawReader::Query)
-    // scan past unwanted records within the target block.
     syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
     syncBlockOffset = offset.BlockOffset();
 
-    // Update pipeline start offset
+    // Update pipeline start offset. The within-block offset cannot be honoured by
+    // seeking (BGZF blocks are read whole), so record it for ConsumerLoop to drop
+    // the leading bytes of the first decompressed batch — landing on the exact
+    // record. Count-limited callers (chunking) rely on this; position-filtered
+    // ones (Query) would otherwise scan past, but exact landing is correct too.
     headerEndFileOffset = offset.BlockOffset();
+    seekSkipBytes = offset.WithinBlockOffset();
     initialBytes.clear();
 
     // Reset pipeline state — safe without lock: pipeline threads joined by StopPipeline()
