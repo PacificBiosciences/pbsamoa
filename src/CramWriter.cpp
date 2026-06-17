@@ -7,6 +7,7 @@
 
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
+#include "CramStructs.hpp"
 #include "WriterUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
@@ -30,6 +31,10 @@
 
 namespace PacBio {
 namespace Samoa {
+
+// Defined in CramStructs.cpp; fills Landmarks, Length, and NumBlocks from the container.
+CramContainerHeader ComputeContainerLandmarks(const CramContainer& container,
+                                              std::int64_t compressionHeaderBlockSize);
 
 namespace CramWriterInternal {
 
@@ -364,34 +369,6 @@ void CompressDataBlock(CramBlock& block, CramBlockMethod method, bool useThreadL
         SelectGzipCompressor(useThreadLocalCompressor, gzipCompressor, compressionLevel);
     CompressCramBlock(block, method, compressor, compressionLevel);
 }
-
-struct CompressSliceBlocksWorker
-{
-    std::vector<CramBlock>& Blocks;
-    const std::vector<CramBlockMethod>& Methods;
-    std::atomic<std::int32_t>& NextBlock;
-    std::int32_t TotalBlocks;
-    bool UseThreadLocalCompressor;
-    LibdeflateCompressorPtr& GzipCompressor;
-    std::optional<int> CompressionLevel;
-    std::uint64_t TotalQualityBytes;
-    std::span<const std::uint32_t> QualityRecordLengths;
-    std::span<const std::uint32_t> QualityRecordFlags;
-
-    void operator()(std::int32_t) const
-    {
-        while (true) {
-            const std::int32_t blockIndex = NextBlock.fetch_add(1, std::memory_order_relaxed);
-            if (blockIndex >= TotalBlocks) {
-                break;
-            }
-            CompressDataBlock(Blocks[static_cast<std::size_t>(blockIndex)],
-                              Methods[static_cast<std::size_t>(blockIndex)],
-                              UseThreadLocalCompressor, GzipCompressor, CompressionLevel,
-                              TotalQualityBytes, QualityRecordLengths, QualityRecordFlags);
-        }
-    }
-};
 
 std::int32_t QueryCopyLength(std::int32_t readLength, std::int32_t requested,
                              std::int32_t seqOffset)
@@ -763,7 +740,7 @@ struct CramWriter::Impl
         // Build header block data: int32 length + text
         std::vector<std::byte> blockData;
         const auto textLen = static_cast<std::int32_t>(std::size(headerText));
-        WriteI32LE(blockData, textLen);
+        AppendLE(blockData, textLen);
         const auto* textPtr = reinterpret_cast<const std::byte*>(headerText.data());
         blockData.insert(std::end(blockData), textPtr, textPtr + textLen);
 
@@ -1080,10 +1057,17 @@ struct CramWriter::Impl
                 static_cast<std::int32_t>(std::ranges::min(workers, std::size(dataBlocks)));
             Parallel::Dispatch(
                 compressionPool,
-                CompressSliceBlocksWorker{dataBlocks, dataBlockMethods, nextBlock, totalBlocks,
+                MakeWorkStealingTask(
+                    &nextBlock, totalBlocks,
+                    [&dataBlocks, &dataBlockMethods, useThreadLocalCompressor,
+                     &gzipCompressor = gzipCompressor, compressionLevel = config.CompressionLevel,
+                     totalQualityBytes, qualityRecordLengths, qualityRecordFlags](std::int32_t i) {
+                        CompressDataBlock(dataBlocks[static_cast<std::size_t>(i)],
+                                          dataBlockMethods[static_cast<std::size_t>(i)],
                                           useThreadLocalCompressor, gzipCompressor,
-                                          config.CompressionLevel, totalQualityBytes,
-                                          qualityRecordLengths, qualityRecordFlags},
+                                          compressionLevel, totalQualityBytes, qualityRecordLengths,
+                                          qualityRecordFlags);
+                    }),
                 taskCount);
         } else {
             for (std::int32_t i = 0; i < static_cast<std::int32_t>(std::size(dataBlocks)); ++i) {
@@ -1140,34 +1124,6 @@ struct CramWriter::Impl
         nextContainerOffset += bytesWritten;
     }
 
-    struct EncodePendingSlicesWorker
-    {
-        Impl* Writer;
-        std::vector<std::vector<BamRecord>>* PendingSlices;
-        std::vector<CramSlice>* Slices;
-        const ContainerEncodingPlan* EncodingPlanState;
-        const ContainerStats* ContainerStatsState;
-        std::vector<std::int64_t>* SliceRecordCounters;
-        std::atomic<std::size_t>* NextSlice;
-        std::size_t SliceCount;
-
-        void operator()(std::int32_t) const
-        {
-            while (true) {
-                const std::size_t sliceIndex = NextSlice->fetch_add(1, std::memory_order_relaxed);
-                if (sliceIndex >= SliceCount) {
-                    break;
-                }
-                (*Slices)[sliceIndex] = Writer->EncodeSlice(
-                    (*PendingSlices)[sliceIndex],
-                    EncodingPlanState->SliceData[sliceIndex].RecordTags,
-                    EncodingPlanState->DataSeriesMethods, ContainerStatsState->RefSeqId,
-                    (*SliceRecordCounters)[sliceIndex],
-                    /*useThreadLocalGzip=*/true, /*allowBlockParallel=*/false);
-            }
-        }
-    };
-
     void FlushContainer()
     {
         if (std::empty(pendingSlices)) {
@@ -1189,13 +1145,23 @@ struct CramWriter::Impl
             compressionPool && config.CompressionWorkers > 1 && std::size(pendingSlices) > 1;
         if (useParallelSlices) {
             std::atomic<std::size_t> nextSlice{0};
+            const std::size_t sliceCount = std::size(pendingSlices);
             const auto taskCount = static_cast<std::int32_t>(
                 std::ranges::min(config.CompressionWorkers, std::size(pendingSlices)));
-            const EncodePendingSlicesWorker worker{
-                this,          &pendingSlices,          &slices,
-                &encodingPlan, &containerStats,         &sliceRecordCounters,
-                &nextSlice,    std::size(pendingSlices)};
-            Parallel::Dispatch(compressionPool, worker, taskCount);
+            Parallel::Dispatch(
+                compressionPool,
+                MakeWorkStealingTask(
+                    &nextSlice, sliceCount,
+                    [this, &slices, &encodingPlan, &containerStats,
+                     &sliceRecordCounters](std::size_t sliceIndex) {
+                        slices[sliceIndex] =
+                            EncodeSlice(pendingSlices[sliceIndex],
+                                        encodingPlan.SliceData[sliceIndex].RecordTags,
+                                        encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
+                                        sliceRecordCounters[sliceIndex],
+                                        /*useThreadLocalGzip=*/true, /*allowBlockParallel=*/false);
+                    }),
+                taskCount);
         } else {
             for (std::size_t sliceIndex = 0; sliceIndex < std::size(pendingSlices); ++sliceIndex) {
                 slices[sliceIndex] = EncodeSlice(

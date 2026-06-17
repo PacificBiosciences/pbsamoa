@@ -1,5 +1,6 @@
 #include "ZmwUtils.hpp"
 
+#include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
 #include <charconv>
@@ -53,25 +54,6 @@ std::int32_t ParseZmwFromName(std::string_view name)
         return 0;
     }
     return ParseOrZero<std::int32_t>(zmwField);
-}
-
-std::string_view MovieZmwPrefix(std::string_view name)
-{
-    const std::size_t firstSlash{name.find('/')};
-    if (firstSlash == std::string_view::npos) {
-        return name;
-    }
-
-    const std::size_t secondSlash{name.find('/', firstSlash + 1)};
-    if (secondSlash == std::string_view::npos) {
-        return name;
-    }
-    return name.substr(0, secondSlash);
-}
-
-std::string_view ReadGroupBaseId(std::string_view readGroupId)
-{
-    return readGroupId.substr(0, readGroupId.find('/'));
 }
 
 std::int32_t ParseReadGroupId(std::string_view readGroupId)

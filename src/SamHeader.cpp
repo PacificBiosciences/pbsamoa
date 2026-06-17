@@ -190,22 +190,6 @@ std::expected<void, std::string> AppendParsedRecord(std::vector<Record>& records
 
 namespace PacBio {
 namespace Samoa {
-namespace detail {
-
-const std::string* FindTag(std::span<const std::pair<std::string, std::string>> tags,
-                           std::string_view key)
-{
-    return FindValue(tags, key);
-}
-
-void UpsertTag(std::vector<std::pair<std::string, std::string>>& tags, std::string key,
-               std::string value)
-{
-    UpsertValue(tags, std::move(key), std::move(value));
-}
-
-}  // namespace detail
-
 // --- ReferenceSequence ---
 
 ReferenceSequence::ReferenceSequence(std::string name, std::int32_t length)
@@ -219,12 +203,12 @@ std::int32_t ReferenceSequence::Length() const { return length_; }
 
 const std::string* ReferenceSequence::GetTag(std::string_view key) const
 {
-    return detail::FindTag(customTags_, key);
+    return FindValue(customTags_, key);
 }
 
 void ReferenceSequence::SetTag(std::string key, std::string value)
 {
-    detail::UpsertTag(customTags_, std::move(key), std::move(value));
+    UpsertValue(customTags_, std::move(key), std::move(value));
 }
 
 std::span<const std::pair<std::string, std::string>> ReferenceSequence::CustomTags() const
@@ -240,7 +224,7 @@ std::string_view ReadGroup::Id() const { return id_; }
 
 const std::string* ReadGroup::GetTag(std::string_view key) const
 {
-    return detail::FindTag(customTags_, key);
+    return FindValue(customTags_, key);
 }
 
 void ReadGroup::SetTag(std::string key, std::string value)
@@ -248,7 +232,7 @@ void ReadGroup::SetTag(std::string key, std::string value)
     if (key == "DS") {
         InvalidateDsCache();
     }
-    detail::UpsertTag(customTags_, std::move(key), std::move(value));
+    UpsertValue(customTags_, std::move(key), std::move(value));
 }
 
 std::span<const std::pair<std::string, std::string>> ReadGroup::CustomTags() const
@@ -387,7 +371,10 @@ std::string MakeReadGroupId(std::string_view movieName, std::string_view readTyp
     return MakeReadGroupId(movieName, readType, strand) + "/" + std::string{barcodeSuffix};
 }
 
-// ReadGroupBaseId is defined in ZmwUtils.cpp (same namespace, same signature).
+std::string_view ReadGroupBaseId(std::string_view readGroupId)
+{
+    return readGroupId.substr(0, readGroupId.find('/'));
+}
 
 // --- ProgramRecord ---
 
@@ -397,12 +384,12 @@ std::string_view ProgramRecord::Id() const { return id_; }
 
 const std::string* ProgramRecord::GetTag(std::string_view key) const
 {
-    return detail::FindTag(customTags_, key);
+    return FindValue(customTags_, key);
 }
 
 void ProgramRecord::SetTag(std::string key, std::string value)
 {
-    detail::UpsertTag(customTags_, std::move(key), std::move(value));
+    UpsertValue(customTags_, std::move(key), std::move(value));
 }
 
 std::span<const std::pair<std::string, std::string>> ProgramRecord::CustomTags() const
@@ -612,26 +599,26 @@ std::vector<std::byte> SamHeader::ToBamHeaderBlock() const
     // Header text
     const std::string text{ToText()};
     const std::uint32_t textLen{static_cast<std::uint32_t>(std::size(text))};
-    WriteU32LE(result, textLen);
+    AppendLE(result, textLen);
     for (char c : text) {
         result.push_back(static_cast<std::byte>(c));
     }
 
     // Reference dictionary
     const std::uint32_t numRefs{static_cast<std::uint32_t>(std::size(references_))};
-    WriteU32LE(result, numRefs);
+    AppendLE(result, numRefs);
 
     for (const ReferenceSequence& ref : references_) {
         // l_name includes NUL terminator
         const std::uint32_t lName{static_cast<std::uint32_t>(std::size(ref.Name()) + 1)};
-        WriteU32LE(result, lName);
+        AppendLE(result, lName);
 
         for (char c : ref.Name()) {
             result.push_back(static_cast<std::byte>(c));
         }
         result.push_back(std::byte{0});  // NUL terminator
 
-        WriteI32LE(result, ref.Length());
+        AppendLE(result, ref.Length());
     }
 
     return result;

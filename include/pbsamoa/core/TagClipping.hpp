@@ -3,8 +3,7 @@
 
 #include <pbsamoa/core/Tags.hpp>
 
-#include <memory>
-#include <span>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -130,7 +129,7 @@ class TagClipper
 {
 public:
     /// \brief Register a strategy for a set of tags.
-    void Register(std::initializer_list<TagKey> tags, std::shared_ptr<TagClipStrategy> strategy);
+    void Register(std::initializer_list<TagKey> tags, const TagClipStrategy& strategy);
 
     /// \brief Clip all registered tags in the TagMap.
     /// Tags not in the registry are left untouched.
@@ -149,7 +148,7 @@ private:
     struct Registration
     {
         TagKey key;
-        std::shared_ptr<TagClipStrategy> strategy;
+        std::reference_wrapper<const TagClipStrategy> strategy;
     };
 
     std::vector<Registration> registrations_;

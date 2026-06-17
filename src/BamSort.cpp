@@ -21,6 +21,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -159,8 +160,6 @@ Item MakeItem(RawRecord record, const SortContext& ctx)
     };
 }
 
-int CompareU64(std::uint64_t a, std::uint64_t b) { return (a < b) ? -1 : (a > b) ? 1 : 0; }
-
 bool TagAsNumber(const TagValue& value, double& out)
 {
     if (const auto* p{std::get_if<std::int64_t>(&value)}) {
@@ -219,7 +218,7 @@ int RecordCompare(SortOrder order, const Item& a, const Item& b)
 {
     switch (order) {
         case SortOrder::COORDINATE:
-            return CompareU64(a.CoordKey, b.CoordKey);
+            return (a.CoordKey < b.CoordKey) ? -1 : (a.CoordKey > b.CoordKey) ? 1 : 0;
         case SortOrder::QUERY_NAME: {
             if (const int c{detail::StrNumCmp(a.Record.Name(), b.Record.Name())}; c != 0) {
                 return c;
@@ -239,7 +238,9 @@ int RecordCompare(SortOrder order, const Item& a, const Item& b)
                     return c;
                 }
             }
-            return CompareU64(a.CoordKey, b.CoordKey);  // fallback on equal/both-missing
+            return (a.CoordKey < b.CoordKey)   ? -1
+                   : (a.CoordKey > b.CoordKey) ? 1
+                                               : 0;  // fallback on equal/both-missing
         }
     }
     return 0;
@@ -292,23 +293,33 @@ private:
 /// A single merge input: either a spilled run file or the in-memory final run.
 struct MergeSource
 {
-    std::unique_ptr<BamRawReader> Reader;  // engaged => file-backed
-    std::vector<Item> Memory;              // used iff Reader == nullptr
-    std::size_t MemoryPos{0};
+    struct MemoryState
+    {
+        std::vector<Item> Items;
+        std::size_t Pos{0};
+    };
+
+    std::variant<std::unique_ptr<BamRawReader>, MemoryState> Source;
 
     std::optional<Item> Next(const SortContext& ctx)
     {
-        if (Reader) {
-            std::optional<RawRecord> record{Reader->ReadRecord()};
-            if (!record) {
-                return std::nullopt;
-            }
-            return MakeItem(std::move(*record), ctx);
-        }
-        if (MemoryPos < std::size(Memory)) {
-            return std::move(Memory[MemoryPos++]);
-        }
-        return std::nullopt;
+        return std::visit(
+            [&ctx](auto& s) -> std::optional<Item> {
+                if constexpr (std::is_same_v<std::decay_t<decltype(s)>,
+                                             std::unique_ptr<BamRawReader>>) {
+                    std::optional<RawRecord> record{s->ReadRecord()};
+                    if (!record) {
+                        return std::nullopt;
+                    }
+                    return MakeItem(std::move(*record), ctx);
+                } else {
+                    if (s.Pos < std::size(s.Items)) {
+                        return std::move(s.Items[s.Pos++]);
+                    }
+                    return std::nullopt;
+                }
+            },
+            Source);
     }
 };
 
@@ -322,7 +333,7 @@ std::string SortOrderText(SortOrder order)
         case SortOrder::TAG:
             return "unknown";
     }
-    return "unknown";
+    std::unreachable();
 }
 
 /// Append a chained @PG describing this tool invocation (PP = current last @PG).
@@ -341,15 +352,6 @@ void AppendProgramRecord(SamHeader& header, std::string id,
     header.AddProgramRecord(std::move(program));
 }
 
-SamHeader BuildOutputHeader(const SamHeader& input, const SortConfig& config)
-{
-    SamHeader header{input};
-    header.SetSortOrder(SortOrderText(config.Order));
-    header.SetGroupOrder("");  // drop any stale group-order
-    AppendProgramRecord(header, "pbsamoa.sort", config.CommandLine);
-    return header;
-}
-
 /// k-way merge of sorted sources (spilled run files plus an optional already-sorted
 /// in-memory run) into \p outPath. Returns the number of records written.
 std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
@@ -360,14 +362,12 @@ std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
     std::vector<MergeSource> sources{};
     sources.reserve(std::size(runPaths) + 1);
     for (const std::filesystem::path& path : runPaths) {
-        MergeSource source{};
-        source.Reader = std::make_unique<BamRawReader>(path, BamRawReaderConfig{.BgzfWorkers = 0});
-        sources.push_back(std::move(source));
+        sources.push_back(MergeSource{
+            std::make_unique<BamRawReader>(path, BamRawReaderConfig{.BgzfWorkers = 0}),
+        });
     }
-    {
-        MergeSource source{};
-        source.Memory = std::move(memoryRun);
-        sources.push_back(std::move(source));
+    if (!memoryRun.empty()) {
+        sources.push_back(MergeSource{MergeSource::MemoryState{std::move(memoryRun)}});
     }
 
     struct HeapEntry
@@ -575,7 +575,10 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
             ++numRecords;
         }
 
-        outHeader = BuildOutputHeader(inputHeader, config);
+        outHeader = inputHeader;
+        outHeader.SetSortOrder(SortOrderText(config.Order));
+        outHeader.SetGroupOrder("");  // drop any stale group-order
+        AppendProgramRecord(outHeader, "pbsamoa.sort", config.CommandLine);
     }  // input reader closed here; its BGZF worker threads are released
 
     // The remaining `run` is the final (unspilled) run for both paths below.

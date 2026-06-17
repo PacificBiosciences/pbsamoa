@@ -1,7 +1,7 @@
 #include <pbsamoa/io/SamWriter.hpp>
 
 #include "BinaryUtils.hpp"
-#include "WriterUtils.hpp"
+#include "SamFieldUtils.hpp"
 
 #include <format>
 #include <fstream>
@@ -29,10 +29,13 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // RNAME
-    if (refId < 0) {
-        buf += '*';
-    } else {
-        buf.append(header.ReferenceName(refId));
+    {
+        const std::string_view sentinel{RnameSentinel(refId)};
+        if (!sentinel.empty()) {
+            buf.append(sentinel);
+        } else {
+            buf.append(header.ReferenceName(refId));
+        }
     }
     buf += '\t';
 
@@ -53,12 +56,13 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // RNEXT
-    if (nextRefId < 0) {
-        buf += '*';
-    } else if (nextRefId == refId) {
-        buf += '=';
-    } else {
-        buf.append(header.ReferenceName(nextRefId));
+    {
+        const std::string_view sentinel{RnextSentinel(refId, nextRefId)};
+        if (!sentinel.empty()) {
+            buf.append(sentinel);
+        } else {
+            buf.append(header.ReferenceName(nextRefId));
+        }
     }
     buf += '\t';
 

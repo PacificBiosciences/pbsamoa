@@ -4,10 +4,8 @@
 
 #include <pbsamoa/io/BamSort.hpp>
 
-#include <array>
 #include <filesystem>
 #include <format>
-#include <optional>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -70,16 +68,6 @@ ByteLimit ParseMemory(std::string_view text)
     return ByteLimit{value * multiplier};
 }
 
-std::string BuildCommandLine(int argc, char** argv)
-{
-    std::string commandLine{"pbsamoa sort"};
-    for (int i{0}; i < argc; ++i) {
-        commandLine += ' ';
-        commandLine += argv[i];
-    }
-    return commandLine;
-}
-
 }  // namespace
 
 int Runner(int argc, char** argv)
@@ -91,40 +79,16 @@ int Runner(int argc, char** argv)
     for (int i{0}; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--order") {
-            const std::string_view value{Tools::RequireOptionValue(argc, argv, i, "--order")};
-            if (value == "coordinate") {
-                config.Order = SortOrder::COORDINATE;
-            } else if (value == "queryname") {
-                config.Order = SortOrder::QUERY_NAME;
-            } else if (value == "tag") {
-                config.Order = SortOrder::TAG;
-            } else {
-                throw std::runtime_error{std::format("invalid --order: {}", value)};
-            }
+            config.Order = Tools::ParseSortOrder(argc, argv, i);
         } else if (arg == "--tag") {
-            const std::string_view value{Tools::RequireOptionValue(argc, argv, i, "--tag")};
-            if (std::size(value) != 2) {
-                throw std::runtime_error{
-                    std::format("--tag must be exactly 2 characters: {}", value)};
-            }
-            config.Tag = {value[0], value[1]};
+            config.Tag = Tools::ParseSortTag(argc, argv, i);
             tagProvided = true;
         } else if (arg == "--memory") {
             config.MaxMemory = ParseMemory(Tools::RequireOptionValue(argc, argv, i, "--memory"));
         } else if (arg == "--threads") {
-            const std::int32_t threads{Tools::ParseIntegerOrThrow<std::int32_t>(
-                Tools::RequireOptionValue(argc, argv, i, "--threads"), "--threads")};
-            if (threads < 0) {
-                throw std::runtime_error{"--threads must be >= 0"};
-            }
-            config.NumThreads = static_cast<std::size_t>(threads);
+            config.NumThreads = Tools::ParseThreadsOption(argc, argv, i);
         } else if (arg == "--compression") {
-            const int level{Tools::ParseIntegerOrThrow<int>(
-                Tools::RequireOptionValue(argc, argv, i, "--compression"), "--compression")};
-            if ((level < 1) || (level > 12)) {
-                throw std::runtime_error{"--compression must be in [1, 12]"};
-            }
-            config.CompressionLevel = level;
+            config.CompressionLevel = Tools::ParseCompressionLevelOption(argc, argv, i);
         } else if (arg == "--temp-dir") {
             config.TempDir =
                 std::filesystem::path{Tools::RequireOptionValue(argc, argv, i, "--temp-dir")};
@@ -143,7 +107,7 @@ int Runner(int argc, char** argv)
         throw std::runtime_error{"--order tag requires --tag XX"};
     }
 
-    config.CommandLine = BuildCommandLine(argc, argv);
+    config.CommandLine = Tools::BuildCommandLine("sort", argc, argv);
 
     const SortStats stats{SortBam(std::filesystem::path{positional[0]},
                                   std::filesystem::path{positional[1]}, config)};

@@ -52,12 +52,6 @@ BamRecord MakeFullRecord()
 
 }  // namespace
 
-TEST(PacBioBamRecord, FullName)
-{
-    const auto record{MakePacBioRecord("movie1/12345/100_2000")};
-    EXPECT_EQ(record.FullName(), "movie1/12345/100_2000");
-}
-
 TEST(PacBioBamRecord, MovieName)
 {
     const auto record{MakePacBioRecord("movie1/12345/100_2000")};

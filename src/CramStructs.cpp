@@ -1,7 +1,6 @@
 #include <pbsamoa/cram/CramStructs.hpp>
 
 #include "BinaryUtils.hpp"
-#include "CramInternal.hpp"
 
 #include <pbsamoa/cram/CramCompression.hpp>
 
@@ -474,7 +473,7 @@ std::vector<std::byte> SerializeContainerHeader(const CramContainerHeader& heade
     std::vector<std::byte> out;
     out.reserve(64);
 
-    WriteI32LE(out, header.Length);
+    AppendLE(out, header.Length);
     WriteItf8(out, header.RefSeqId);
     WriteItf8(out, header.StartPos);
     WriteItf8(out, header.AlignmentSpan);
@@ -490,7 +489,7 @@ std::vector<std::byte> SerializeContainerHeader(const CramContainerHeader& heade
 
     // CRC32 of everything so far
     const auto crc = ComputeCrc32(out);
-    WriteU32LE(out, crc);
+    AppendLE(out, crc);
 
     return out;
 }
@@ -567,7 +566,7 @@ std::vector<std::byte> SerializeBlock(const CramBlock& block)
 
     // CRC32 of everything in this block
     const auto crc = ComputeCrc32(out);
-    WriteU32LE(out, crc);
+    AppendLE(out, crc);
 
     return out;
 }
@@ -681,6 +680,18 @@ void SerializeEncodingDescriptor(std::vector<std::byte>& out, const CramEncoding
     WriteItf8(out, std::to_underlying(desc.CodecId));
     WriteItf8(out, static_cast<std::int32_t>(std::size(desc.Parameters)));
     out.insert(std::end(out), std::begin(desc.Parameters), std::end(desc.Parameters));
+}
+
+CramBlock MakeSliceHeaderBlock(std::vector<std::byte> sliceHdrData)
+{
+    CramBlock block;
+    block.Method = CramBlockMethod::RAW;
+    block.ContentType = CramBlockContentType::SLICE_HEADER;
+    block.ContentId = 0;
+    block.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
+    block.CompressedSize = block.RawSize;
+    block.Data = std::move(sliceHdrData);
+    return block;
 }
 
 }  // namespace
@@ -887,14 +898,7 @@ std::vector<std::byte> SerializeCompressionHeader(const CramCompressionHeader& h
 
 std::vector<std::byte> SerializeSlice(const CramSlice& slice)
 {
-    const auto sliceHdrData = SerializeSliceHeader(slice.Header);
-    CramBlock sliceHdrBlock;
-    sliceHdrBlock.Method = CramBlockMethod::RAW;
-    sliceHdrBlock.ContentType = CramBlockContentType::SLICE_HEADER;
-    sliceHdrBlock.ContentId = 0;
-    sliceHdrBlock.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
-    sliceHdrBlock.CompressedSize = sliceHdrBlock.RawSize;
-    sliceHdrBlock.Data = sliceHdrData;
+    const auto sliceHdrBlock = MakeSliceHeaderBlock(SerializeSliceHeader(slice.Header));
 
     std::vector<std::byte> out;
     out.reserve(SerializedSliceSize(slice));
@@ -915,14 +919,7 @@ std::vector<std::byte> SerializeSlice(const CramSlice& slice)
 
 std::size_t SerializedSliceSize(const CramSlice& slice)
 {
-    const auto sliceHdrData = SerializeSliceHeader(slice.Header);
-    CramBlock sliceHdrBlock;
-    sliceHdrBlock.Method = CramBlockMethod::RAW;
-    sliceHdrBlock.ContentType = CramBlockContentType::SLICE_HEADER;
-    sliceHdrBlock.ContentId = 0;
-    sliceHdrBlock.RawSize = static_cast<std::int32_t>(std::size(sliceHdrData));
-    sliceHdrBlock.CompressedSize = sliceHdrBlock.RawSize;
-    sliceHdrBlock.Data = std::move(sliceHdrData);
+    const auto sliceHdrBlock = MakeSliceHeaderBlock(SerializeSliceHeader(slice.Header));
 
     std::size_t total = SerializedBlockSize(sliceHdrBlock);
     total += SerializedBlockSize(slice.CoreBlock);
@@ -932,23 +929,14 @@ std::size_t SerializedSliceSize(const CramSlice& slice)
     return total;
 }
 
-std::vector<std::byte> SerializeContainer(const CramContainer& container)
+CramContainerHeader ComputeContainerLandmarks(const CramContainer& container,
+                                              std::int64_t compressionHeaderBlockSize)
 {
-    const auto compHdrData = SerializeCompressionHeader(container.CompressionHeader);
-    CramBlock compHdrBlock;
-    compHdrBlock.Method = CramBlockMethod::RAW;
-    compHdrBlock.ContentType = CramBlockContentType::COMPRESSION_HEADER;
-    compHdrBlock.ContentId = 0;
-    compHdrBlock.RawSize = static_cast<std::int32_t>(std::size(compHdrData));
-    compHdrBlock.CompressedSize = compHdrBlock.RawSize;
-    compHdrBlock.Data = compHdrData;
-    const auto compHdrBytes = SerializeBlock(compHdrBlock);
-
     CramContainerHeader containerHeader = container.Header;
     containerHeader.Landmarks.clear();
     containerHeader.Landmarks.reserve(std::size(container.Slices));
 
-    std::int64_t payloadSize = static_cast<std::int64_t>(std::size(compHdrBytes));
+    std::int64_t payloadSize = compressionHeaderBlockSize;
     for (const auto& slice : container.Slices) {
         containerHeader.Landmarks.push_back(static_cast<std::int32_t>(payloadSize));
         const auto sliceSize = static_cast<std::int64_t>(SerializedSliceSize(slice));
@@ -963,10 +951,27 @@ std::vector<std::byte> SerializeContainer(const CramContainer& container)
                            "counting external blocks");
     }
     containerHeader.NumBlocks = static_cast<std::int32_t>(totalBlocks);
+    return containerHeader;
+}
+
+std::vector<std::byte> SerializeContainer(const CramContainer& container)
+{
+    const auto compHdrData = SerializeCompressionHeader(container.CompressionHeader);
+    CramBlock compHdrBlock;
+    compHdrBlock.Method = CramBlockMethod::RAW;
+    compHdrBlock.ContentType = CramBlockContentType::COMPRESSION_HEADER;
+    compHdrBlock.ContentId = 0;
+    compHdrBlock.RawSize = static_cast<std::int32_t>(std::size(compHdrData));
+    compHdrBlock.CompressedSize = compHdrBlock.RawSize;
+    compHdrBlock.Data = compHdrData;
+    const auto compHdrBytes = SerializeBlock(compHdrBlock);
+
+    const auto containerHeader =
+        ComputeContainerLandmarks(container, static_cast<std::int64_t>(std::size(compHdrBytes)));
 
     const auto containerHeaderBytes = SerializeContainerHeader(containerHeader);
     std::vector<std::byte> out;
-    out.reserve(std::size(containerHeaderBytes) + static_cast<std::size_t>(payloadSize));
+    out.reserve(std::size(containerHeaderBytes) + static_cast<std::size_t>(containerHeader.Length));
     out.insert(std::end(out), std::begin(containerHeaderBytes), std::end(containerHeaderBytes));
     out.insert(std::end(out), std::begin(compHdrBytes), std::end(compHdrBytes));
     for (const auto& slice : container.Slices) {

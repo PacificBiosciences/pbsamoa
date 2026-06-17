@@ -6,7 +6,8 @@
 
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
-#include "CramMd5.hpp"
+#include "CramStructs.hpp"
+#include "Md5.hpp"
 #include "ReaderUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
@@ -253,25 +254,6 @@ void AppendBytes(std::vector<std::byte>& destination, std::span<const std::byte>
     destination.insert(std::end(destination), std::begin(source), std::end(source));
 }
 
-struct DecompressBlocksWorker
-{
-    std::vector<CramBlock>* Blocks;
-    std::atomic<std::int32_t>* NextBlock;
-    std::int32_t TotalBlocks;
-
-    void operator()(std::int32_t) const
-    {
-        while (true) {
-            const std::int32_t blockIndex = NextBlock->fetch_add(1, std::memory_order_relaxed);
-            if (blockIndex >= TotalBlocks) {
-                break;
-            }
-            auto& block = (*Blocks)[static_cast<std::size_t>(blockIndex)];
-            DecompressCramBlock(block, ThreadLocalGzipDecompressor());
-        }
-    }
-};
-
 std::int32_t DecodeEncodedItf8(std::span<const std::byte> encoded)
 {
     std::size_t bytesRead = 0;
@@ -287,6 +269,33 @@ void DecodeSubstitutionMatrixRow(std::array<std::array<char, 4>, 5>& matrix, std
     }
 }
 
+// Handles tag type 'A' (char): BYTE_ARRAY codec path uses DecodeByte, not DecodeInt.
+std::vector<std::byte> DecodeByteTagPayload(char type, CramCodec& codec, CramBitReader& coreReader,
+                                            CramExternalBlockStore& extStore)
+{
+    if (codec.DecodeKind() == CramCodecDecodeKind::BYTE_ARRAY) {
+        return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 1);
+    }
+    std::vector<std::byte> payload;
+    payload.push_back(codec.DecodeByte(coreReader, extStore));
+    return payload;
+}
+
+// Handles the 7 numeric tag types (c C s S i I f): scalar path uses DecodeInt.
+template <typename T>
+std::vector<std::byte> DecodeIntTagPayload(char type, std::size_t width, CramCodec& codec,
+                                           CramBitReader& coreReader,
+                                           CramExternalBlockStore& extStore)
+{
+    if (codec.DecodeKind() == CramCodecDecodeKind::BYTE_ARRAY) {
+        return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, width);
+    }
+    std::vector<std::byte> payload;
+    const T value = codec.DecodeInt(coreReader, extStore);
+    AppendLittleEndian(payload, value);
+    return payload;
+}
+
 std::vector<std::byte> DecodeTagPayload(char type, CramCodec& codec, CramBitReader& coreReader,
                                         CramExternalBlockStore& extStore)
 {
@@ -294,74 +303,27 @@ std::vector<std::byte> DecodeTagPayload(char type, CramCodec& codec, CramBitRead
     std::vector<std::byte> payload;
 
     switch (type) {
-        case 'A': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 1);
-            }
-            payload.push_back(codec.DecodeByte(coreReader, extStore));
-            return payload;
-        }
-        case 'c': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 1);
-            }
-            payload.push_back(static_cast<std::byte>(
-                static_cast<std::int8_t>(codec.DecodeInt(coreReader, extStore))));
-            return payload;
-        }
-        case 'C': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 1);
-            }
-            payload.push_back(static_cast<std::byte>(
-                static_cast<std::uint8_t>(codec.DecodeInt(coreReader, extStore))));
-            return payload;
-        }
-        case 's': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 2);
-            }
-            const std::int16_t value = codec.DecodeInt(coreReader, extStore);
-            AppendLittleEndian(payload, value);
-            return payload;
-        }
-        case 'S': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 2);
-            }
-            const std::uint16_t value = codec.DecodeInt(coreReader, extStore);
-            AppendLittleEndian(payload, value);
-            return payload;
-        }
-        case 'i': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 4);
-            }
-            const auto value = codec.DecodeInt(coreReader, extStore);
-            AppendLittleEndian(payload, value);
-            return payload;
-        }
-        case 'I': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore, 4);
-            }
-            const std::uint32_t value = codec.DecodeInt(coreReader, extStore);
-            AppendLittleEndian(payload, value);
-            return payload;
-        }
-        case 'f': {
-            if (decodeKind == CramCodecDecodeKind::BYTE_ARRAY) {
-                return DecodeRequiredFixedWidthPayload(type, codec, coreReader, extStore,
-                                                       sizeof(float));
-            }
-            const std::uint32_t bits = codec.DecodeInt(coreReader, extStore);
-            AppendLittleEndian(payload, bits);
-            return payload;
-        }
+        case 'A':
+            return DecodeByteTagPayload(type, codec, coreReader, extStore);
+        case 'c':
+            return DecodeIntTagPayload<std::int8_t>(type, 1, codec, coreReader, extStore);
+        case 'C':
+            return DecodeIntTagPayload<std::uint8_t>(type, 1, codec, coreReader, extStore);
+        case 's':
+            return DecodeIntTagPayload<std::int16_t>(type, 2, codec, coreReader, extStore);
+        case 'S':
+            return DecodeIntTagPayload<std::uint16_t>(type, 2, codec, coreReader, extStore);
+        case 'i':
+            return DecodeIntTagPayload<std::int32_t>(type, 4, codec, coreReader, extStore);
+        case 'I':
+            return DecodeIntTagPayload<std::uint32_t>(type, 4, codec, coreReader, extStore);
+        case 'f':
+            return DecodeIntTagPayload<std::uint32_t>(type, sizeof(float), codec, coreReader,
+                                                      extStore);
         case 'Z':
         case 'H':
             payload = DecodeRequiredByteArrayPayload(type, codec, coreReader, extStore);
-            if (std::empty(payload) || payload.back() != std::byte{0}) {
+            if (std::empty(payload) || (payload.back() != std::byte{0})) {
                 payload.push_back(std::byte{0});
             }
             return payload;
@@ -547,13 +509,14 @@ void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenc
     const auto referenceWindow =
         ResolveSliceReferenceWindow(sliceHeader, embeddedReference, externalReferenceById, header);
     const auto normalizedReference = UppercaseBases(referenceWindow);
-    const auto observedMd5 = ComputeMd5(normalizedReference);
+    const auto observedMd5 = detail::ComputeMd5(normalizedReference);
     if (observedMd5 != sliceHeader.RefMd5) {
-        throw std::runtime_error{std::format(
-            "CramReader: reference MD5 mismatch for reference {} span "
-            "{} (expected {}, observed "
-            "{})",
-            referenceLabel, spanLabel, Md5ToHex(sliceHeader.RefMd5), Md5ToHex(observedMd5))};
+        throw std::runtime_error{
+            std::format("CramReader: reference MD5 mismatch for reference {} span "
+                        "{} (expected {}, observed "
+                        "{})",
+                        referenceLabel, spanLabel, detail::Md5DigestToHex(sliceHeader.RefMd5),
+                        detail::Md5DigestToHex(observedMd5))};
     }
 }
 
@@ -1204,10 +1167,16 @@ struct CramReader::Impl
         }
 
         std::atomic<std::int32_t> nextBlock{0};
-        const std::int32_t totalBlocks = std::size(blocks);
+        const std::int32_t totalBlocks = static_cast<std::int32_t>(std::size(blocks));
         const std::int32_t taskCount = std::ranges::min(workers, std::size(blocks));
-        const DecompressBlocksWorker worker{&blocks, &nextBlock, totalBlocks};
-        Parallel::Dispatch(decompressionPool, worker, taskCount);
+        Parallel::Dispatch(
+            decompressionPool,
+            MakeWorkStealingTask(&nextBlock, totalBlocks,
+                                 [&blocks](std::int32_t i) {
+                                     auto& block = blocks[static_cast<std::size_t>(i)];
+                                     DecompressCramBlock(block, ThreadLocalGzipDecompressor());
+                                 }),
+            taskCount);
     }
 
     std::vector<BamRecord> LoadIndexedSliceRecords(const SliceQueryCandidate& candidate)

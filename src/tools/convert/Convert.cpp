@@ -139,24 +139,6 @@ std::expected<std::pair<CramDataSeries, CramBlockMethod>, std::string> ParseSeri
     return std::pair{*parsedSeries, *parsedMethod};
 }
 
-bool AssignBoundedOption(char* const* argv, int& argIndex, std::string_view name,
-                         std::int32_t minValue, std::string_view constraint, std::int32_t& target)
-{
-    const std::string_view valueArg{Tools::NextArgumentView(argv, argIndex)};
-    const auto parsed{Tools::ParseInteger<std::int32_t>(valueArg, name)};
-    if (!parsed) {
-        std::println(stderr, "Error: {}", parsed.error());
-        return false;
-    }
-    if (*parsed < minValue) {
-        std::println(stderr, "Error: {} must be {}", name, constraint);
-        return false;
-    }
-
-    target = *parsed;
-    return true;
-}
-
 void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
                          const std::filesystem::path& outputPath, const CramWriterConfig& config,
                          std::size_t bgzfWorkers)
@@ -219,25 +201,34 @@ int Runner(int argc, char** argv)
             return EXIT_SUCCESS;
         }
 
-        if ((arg == "--records-per-slice") && Tools::HasFollowingArgument(i, argc)) {
-            if (!AssignBoundedOption(argv, i, "records-per-slice", 1, "> 0",
-                                     config.RecordsPerSlice)) {
-                return EXIT_FAILURE;
+        if (arg == "--records-per-slice") {
+            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
+                Tools::RequireOptionValue(argc, argv, i, "--records-per-slice"),
+                "records-per-slice")};
+            if (v < 1) {
+                throw std::runtime_error{"records-per-slice must be > 0"};
             }
+            config.RecordsPerSlice = v;
             continue;
         }
 
-        if ((arg == "--bgzf-threads") && Tools::HasFollowingArgument(i, argc)) {
-            if (!AssignBoundedOption(argv, i, "bgzf-threads", 0, ">= 0", bgzfThreadsOpt)) {
-                return EXIT_FAILURE;
+        if (arg == "--bgzf-threads") {
+            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
+                Tools::RequireOptionValue(argc, argv, i, "--bgzf-threads"), "bgzf-threads")};
+            if (v < 0) {
+                throw std::runtime_error{"bgzf-threads must be >= 0"};
             }
+            bgzfThreadsOpt = v;
             continue;
         }
 
-        if ((arg == "--decode-threads") && Tools::HasFollowingArgument(i, argc)) {
-            if (!AssignBoundedOption(argv, i, "decode-threads", 0, ">= 0", decodeThreadsOpt)) {
-                return EXIT_FAILURE;
+        if (arg == "--decode-threads") {
+            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
+                Tools::RequireOptionValue(argc, argv, i, "--decode-threads"), "decode-threads")};
+            if (v < 0) {
+                throw std::runtime_error{"decode-threads must be >= 0"};
             }
+            decodeThreadsOpt = v;
             continue;
         }
 
@@ -246,11 +237,14 @@ int Runner(int argc, char** argv)
             continue;
         }
 
-        if ((arg == "--compression-threads") && Tools::HasFollowingArgument(i, argc)) {
-            if (!AssignBoundedOption(argv, i, "compression-threads", 0, ">= 0",
-                                     compressionThreadsOpt)) {
-                return EXIT_FAILURE;
+        if (arg == "--compression-threads") {
+            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
+                Tools::RequireOptionValue(argc, argv, i, "--compression-threads"),
+                "compression-threads")};
+            if (v < 0) {
+                throw std::runtime_error{"compression-threads must be >= 0"};
             }
+            compressionThreadsOpt = v;
             continue;
         }
 

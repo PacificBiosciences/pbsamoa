@@ -3,6 +3,7 @@
 #include "RecordParser.hpp"
 
 #include "../../PathUtils.hpp"
+#include "../CliUtils.hpp"
 #include "../ParseUtils.hpp"
 
 #include <pbsamoa/core/Bgzf.hpp>
@@ -71,15 +72,12 @@ CliArgs ParseArgs(int argc, char** argv)
         } else if (arg == "--quiet") {
             result.Quiet = true;
         } else if (arg == "--threads") {
-            if ((i + 1) >= argc) {
-                throw std::runtime_error{"zmi-index: --threads requires an argument"};
-            }
-            result.Threads =
-                ::PacBio::Samoa::Tools::ParseIntegerOrThrow<std::int32_t>(argv[i + 1], "--threads");
+            result.Threads = ::PacBio::Samoa::Tools::ParseIntegerOrThrow<std::int32_t>(
+                ::PacBio::Samoa::Tools::RequireOptionValue(argc, argv, i, "--threads"),
+                "--threads");
             if (result.Threads < 1) {
                 throw std::runtime_error{"zmi-index: --threads must be >= 1"};
             }
-            ++i;
         } else if (arg.starts_with("--")) {
             throw std::runtime_error{"zmi-index: unknown flag '" + std::string{arg} + "'"};
         } else if (std::empty(result.InputPath)) {

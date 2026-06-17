@@ -84,18 +84,6 @@ BamRecord MakeUnmappedRecord(std::string name)
 
 }  // namespace
 
-TEST(Chunk, ConstructAndOverlaps)
-{
-    const Chunk a{VirtualOffset{0, 0}, VirtualOffset{100, 0}};
-    const Chunk b{VirtualOffset{50, 0}, VirtualOffset{150, 0}};
-    const Chunk c{VirtualOffset{200, 0}, VirtualOffset{300, 0}};
-
-    EXPECT_TRUE(a.Overlaps(b));
-    EXPECT_TRUE(b.Overlaps(a));
-    EXPECT_FALSE(a.Overlaps(c));
-    EXPECT_FALSE(c.Overlaps(a));
-}
-
 TEST(BaiIndex, DefaultConstructed)
 {
     const BaiIndex index;

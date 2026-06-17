@@ -7,7 +7,6 @@
 #include <pbsamoa/core/TagClipping.hpp>
 
 #include <algorithm>
-#include <bit>
 #include <charconv>
 #include <format>
 #include <iterator>
@@ -34,25 +33,6 @@ constexpr std::uint16_t BAM_SECONDARY_FLAG{0x100};
 constexpr std::uint16_t BAM_SUPPLEMENTARY_FLAG{0x800};
 constexpr std::uint16_t BAM_NON_PRIMARY_FLAGS{0x900};
 constexpr std::uint16_t BAM_UNMAPPED_BIN{4680};
-
-void WriteU16LEAt(std::byte* dst, std::uint16_t v)
-{
-    dst[0] = static_cast<std::byte>(v & 0xFFU);
-    dst[1] = static_cast<std::byte>((v >> 8U) & 0xFFU);
-}
-
-void WriteU32LEAt(std::byte* dst, std::uint32_t v)
-{
-    dst[0] = static_cast<std::byte>(v & 0xFFU);
-    dst[1] = static_cast<std::byte>((v >> 8U) & 0xFFU);
-    dst[2] = static_cast<std::byte>((v >> 16U) & 0xFFU);
-    dst[3] = static_cast<std::byte>((v >> 24U) & 0xFFU);
-}
-
-void WriteI32LEAt(std::byte* dst, std::int32_t v)
-{
-    WriteU32LEAt(dst, std::bit_cast<std::uint32_t>(v));
-}
 
 std::int32_t IntTagOr(const TagMap& tags, TagKey key, std::int32_t fallback)
 {
@@ -344,17 +324,17 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     std::byte* p{std::data(result)};
 
     // Fixed fields (32 bytes)
-    WriteI32LEAt(p + 0, refId_);
-    WriteI32LEAt(p + 4, pos_);
+    WriteLE(p + 0, refId_);
+    WriteLE(p + 4, pos_);
     p[8] = static_cast<std::byte>(nameLen);
     p[9] = static_cast<std::byte>(mapQ_);
-    WriteU16LEAt(p + 10, bin);
-    WriteU16LEAt(p + 12, nCigarOp);
-    WriteU16LEAt(p + 14, flag_);
-    WriteU32LEAt(p + 16, seqLen);
-    WriteI32LEAt(p + 20, nextRefId_);
-    WriteI32LEAt(p + 24, nextPos_);
-    WriteI32LEAt(p + 28, tlen_);
+    WriteLE(p + 10, bin);
+    WriteLE(p + 12, nCigarOp);
+    WriteLE(p + 14, flag_);
+    WriteLE(p + 16, seqLen);
+    WriteLE(p + 20, nextRefId_);
+    WriteLE(p + 24, nextPos_);
+    WriteLE(p + 28, tlen_);
 
     std::size_t offset{32};
 
@@ -367,14 +347,14 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
     // CIGAR (array of uint32). A long CIGAR writes the 2-op 'kSmN' placeholder here; the
     // real ops follow in a CG tag appended after the regular tags.
     if (longCigar) {
-        WriteU32LEAt(p + offset, (seqLen << 4U) | std::to_underlying(CigarOpType::S));
+        WriteLE(p + offset, (seqLen << 4U) | std::to_underlying(CigarOpType::S));
         offset += 4;
-        WriteU32LEAt(p + offset, (static_cast<std::uint32_t>(cigRefLen) << 4U) |
-                                     std::to_underlying(CigarOpType::N));
+        WriteLE(p + offset,
+                (static_cast<std::uint32_t>(cigRefLen) << 4U) | std::to_underlying(CigarOpType::N));
         offset += 4;
     } else {
         for (const CigarOp& op : cigar_) {
-            WriteU32LEAt(p + offset, op.RawValue());
+            WriteLE(p + offset, op.RawValue());
             offset += 4;
         }
     }
@@ -407,10 +387,10 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
         p[offset + 1] = std::byte{'G'};
         p[offset + 2] = std::byte{'B'};
         p[offset + 3] = std::byte{'I'};
-        WriteU32LEAt(p + offset + 4, static_cast<std::uint32_t>(realOpCount));
+        WriteLE(p + offset + 4, static_cast<std::uint32_t>(realOpCount));
         offset += 8;
         for (const CigarOp& op : cigar_) {
-            WriteU32LEAt(p + offset, op.RawValue());
+            WriteLE(p + offset, op.RawValue());
             offset += 4;
         }
     }
@@ -676,7 +656,13 @@ std::int32_t BamRecord::HoleNumber() const
     }
     const std::size_t secondSlash{name.find('/', firstSlash + 1)};
     const std::string_view holeField{name.substr(firstSlash + 1, secondSlash - (firstSlash + 1))};
-    return std::stoi(std::string{holeField});
+    std::int32_t holeNumber{};
+    const auto& [ptr, ec]{std::from_chars(std::data(holeField),
+                                          std::data(holeField) + std::size(holeField), holeNumber)};
+    if ((ec != std::errc{}) || (ptr != std::data(holeField) + std::size(holeField))) {
+        throw std::runtime_error{"Malformed PacBio BAM read name: " + name_};
+    }
+    return holeNumber;
 }
 
 std::int32_t BamRecord::QueryStart() const

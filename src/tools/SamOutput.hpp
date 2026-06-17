@@ -2,7 +2,7 @@
 #define PBSAMOA_TOOLS_SAMOUTPUT_HPP
 
 #include "../BinaryUtils.hpp"
-#include "../WriterUtils.hpp"
+#include "../SamFieldUtils.hpp"
 
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
@@ -10,7 +10,6 @@
 #include <pbsamoa/core/Sequence.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
-#include <algorithm>
 #include <print>
 #include <span>
 #include <string>
@@ -22,8 +21,9 @@ namespace Samoa {
 
 inline void WriteReferenceName(const SamHeader& header, std::int32_t refId)
 {
-    if (refId < 0) {
-        std::print("*");
+    const std::string_view sentinel{RnameSentinel(refId)};
+    if (!sentinel.empty()) {
+        std::print("{}", sentinel);
         return;
     }
     std::print("{}", header.ReferenceName(refId));
@@ -32,12 +32,9 @@ inline void WriteReferenceName(const SamHeader& header, std::int32_t refId)
 inline void WriteNextReferenceName(const SamHeader& header, std::int32_t refId,
                                    std::int32_t nextRefId)
 {
-    if (nextRefId < 0) {
-        std::print("*");
-        return;
-    }
-    if (nextRefId == refId) {
-        std::print("=");
+    const std::string_view sentinel{RnextSentinel(refId, nextRefId)};
+    if (!sentinel.empty()) {
+        std::print("{}", sentinel);
         return;
     }
     std::print("{}", header.ReferenceName(nextRefId));

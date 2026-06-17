@@ -114,7 +114,7 @@ TEST(TagClipping, ReverseSubstringClip_UInt8Array)
 TEST(TagClipping, TagClipper_ClipsRegisteredTags)
 {
     TagClipper clipper;
-    auto strategy{std::make_shared<SubstringClipStrategy>()};
+    static const SubstringClipStrategy strategy;
     clipper.Register({TagKey{'i', 'p'}, TagKey{'p', 'w'}}, strategy);
 
     TagMap tags;
@@ -141,8 +141,10 @@ TEST(TagClipping, TagClipper_ClipsRegisteredTags)
 TEST(TagClipping, TagClipper_MixedStrategies)
 {
     TagClipper clipper;
-    clipper.Register({TagKey{'i', 'p'}}, std::make_shared<SubstringClipStrategy>());
-    clipper.Register({TagKey{'r', 'i'}}, std::make_shared<ReverseSubstringClipStrategy>());
+    static const SubstringClipStrategy substringStrategy;
+    clipper.Register({TagKey{'i', 'p'}}, substringStrategy);
+    static const ReverseSubstringClipStrategy reverseSubstringStrategy;
+    clipper.Register({TagKey{'r', 'i'}}, reverseSubstringStrategy);
 
     TagMap tags;
     tags.Set(TagKey{'i', 'p'}, MakeUInt8Array({10, 20, 30, 40, 50}));
@@ -167,7 +169,8 @@ TEST(TagClipping, TagClipper_MixedStrategies)
 TEST(TagClipping, TagClipper_RemovesTagOnClipFailure)
 {
     TagClipper clipper;
-    clipper.Register({TagKey{'b', 'a'}}, std::make_shared<SubstringClipStrategy>());
+    static const SubstringClipStrategy baStrategy;
+    clipper.Register({TagKey{'b', 'a'}}, baStrategy);
 
     TagMap tags;
     // int64 is unsupported by SubstringClipStrategy => Clip returns false => tag removed
@@ -235,7 +238,8 @@ TEST(TagClipping, PulseClip_BasicMapping)
     tags.Set(TagKey{'p', 't'}, std::string{"123456"});
 
     TagClipper clipper;
-    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 't'}}, std::make_shared<PulseClipStrategy>());
+    static const PulseClipStrategy pulseStrategy1;
+    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 't'}}, pulseStrategy1);
 
     clipper.ClipTags(tags, 1, 1, 3);
 
@@ -258,7 +262,8 @@ TEST(TagClipping, PulseClip_KeepMultipleBases)
     tags.Set(TagKey{'p', 't'}, std::string{"XYZWUV"});
 
     TagClipper clipper;
-    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 't'}}, std::make_shared<PulseClipStrategy>());
+    static const PulseClipStrategy pulseStrategy2;
+    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 't'}}, pulseStrategy2);
 
     clipper.ClipTags(tags, 0, 2, 3);
 
@@ -275,7 +280,8 @@ TEST(TagClipping, PulseClip_AllBases)
     tags.Set(TagKey{'p', 'c'}, std::string{"AaCgTt"});
 
     TagClipper clipper;
-    clipper.Register({TagKey{'p', 'c'}}, std::make_shared<PulseClipStrategy>());
+    static const PulseClipStrategy pulseStrategy3;
+    clipper.Register({TagKey{'p', 'c'}}, pulseStrategy3);
 
     clipper.ClipTags(tags, 0, 3, 3);
 
@@ -299,7 +305,8 @@ TEST(TagClipping, PulseClip_UInt16Array)
     tags.Set(TagKey{'p', 'a'}, std::move(pa));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 'a'}}, std::make_shared<PulseClipStrategy>());
+    static const PulseClipStrategy pulseStrategy4;
+    clipper.Register({TagKey{'p', 'c'}, TagKey{'p', 'a'}}, pulseStrategy4);
 
     clipper.ClipTags(tags, 1, 2, 3);
 
@@ -333,7 +340,8 @@ TEST(TagClipping, BasemodClip_SimpleClip)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200, 100}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 3, 5, 8, "AACAACAA");
 
@@ -364,7 +372,8 @@ TEST(TagClipping, BasemodClip_NoModsInWindow)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 3, 5, 8, "AACAATAA");
 
@@ -394,7 +403,8 @@ TEST(TagClipping, BasemodClip_AllModsRetained)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200, 100}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 0, 4, 4, "CCCC");
 
@@ -424,7 +434,8 @@ TEST(TagClipping, BasemodClip_WithQuestionMark)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({220, 180}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 3, 3, 9, "AACCGATCC");
 
@@ -453,7 +464,8 @@ TEST(TagClipping, BasemodClip_MultipleModTypes)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200, 100, 150, 250}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 4, 4, 8, "ACGTACGT");
 
@@ -472,7 +484,8 @@ TEST(TagClipping, BasemodClip_EmptySequence_RemovesTags)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({200}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     // No sequence provided (empty string_view)
     clipper.ClipTags(tags, 0, 4, 4);
@@ -499,7 +512,8 @@ TEST(TagClipping, BasemodClip_TrimFrontAndBack)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({10, 20, 30, 40, 50}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 1, 3, 5, "CCCCC");
 
@@ -529,7 +543,8 @@ TEST(TagClipping, BasemodClip_SkipAdjustment)
     tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({255}));
 
     TagClipper clipper;
-    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, std::make_shared<BasemodClipStrategy>());
+    static const BasemodClipStrategy basemodStrategy;
+    clipper.Register({TagKey{'M', 'M'}, TagKey{'M', 'L'}}, basemodStrategy);
 
     clipper.ClipTags(tags, 4, 5, 9, "ATCATCATC");
 

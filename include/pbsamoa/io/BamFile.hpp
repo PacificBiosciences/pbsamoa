@@ -28,9 +28,7 @@ public:
     std::filesystem::path StandardIndexFilename() const;
     bool StandardIndexIsNewer() const;
 
-    bool HasReference(std::string_view name) const;
     const SamHeader& Header() const;
-    std::int32_t ReferenceId(std::string_view name) const;
     std::string ReferenceName(std::int32_t id) const;
     std::uint32_t ReferenceLength(std::string_view name) const;
     std::uint32_t ReferenceLength(std::int32_t id) const;

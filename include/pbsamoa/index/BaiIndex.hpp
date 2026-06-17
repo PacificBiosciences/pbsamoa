@@ -17,9 +17,6 @@ struct Chunk
 {
     VirtualOffset Begin;
     VirtualOffset End;
-
-    /// \brief Check whether two chunks overlap in virtual offset space.
-    bool Overlaps(const Chunk& other) const;
 };
 
 /// \brief Per-reference BAI index data: bins and linear index.

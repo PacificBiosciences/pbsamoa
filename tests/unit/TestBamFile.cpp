@@ -9,7 +9,6 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
-#include <format>
 
 namespace PacBio {
 namespace Samoa {
@@ -49,12 +48,12 @@ TEST(BamFile, LoadsHeaderAndReferenceMetadata)
               std::size(header.ReferenceSequences()));
 
     const auto& ref = header.ReferenceSequences().front();
-    EXPECT_TRUE(file.HasReference(ref.Name()));
-    EXPECT_EQ(file.ReferenceId(ref.Name()), 0);
+    EXPECT_TRUE(file.Header().ReferenceId(ref.Name()) >= 0);
+    EXPECT_EQ(file.Header().ReferenceId(ref.Name()), 0);
     EXPECT_EQ(file.ReferenceName(0), ref.Name());
     EXPECT_EQ(file.ReferenceLength(ref.Name()), static_cast<std::uint32_t>(ref.Length()));
     EXPECT_EQ(file.ReferenceLength(0), static_cast<std::uint32_t>(ref.Length()));
-    EXPECT_FALSE(file.HasReference("does_not_exist"));
+    EXPECT_FALSE(file.Header().ReferenceId("does_not_exist") >= 0);
     EXPECT_EQ(file.ReferenceName(99), "");
     EXPECT_EQ(file.ReferenceLength(99), 0u);
 }

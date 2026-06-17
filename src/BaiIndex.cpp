@@ -100,7 +100,7 @@ std::int32_t CheckedInt32(T value, std::string_view fieldName)
 }
 
 /// \brief Merge overlapping/adjacent chunks sorted by Begin.
-std::vector<Chunk> MergeChunks(std::vector<Chunk>& chunks)
+std::vector<Chunk> MergeChunks(std::vector<Chunk> chunks)
 {
     if (std::empty(chunks)) {
         return {};
@@ -208,13 +208,6 @@ bool EnsureAccumulatedBytes(BgzfReader& bgzf, std::vector<std::byte>& blockBuf,
 }
 
 }  // namespace
-
-// --- Chunk ---
-
-bool Chunk::Overlaps(const Chunk& other) const
-{
-    return (Begin <= other.End) && (other.Begin <= End);
-}
 
 // --- BaiIndex accessors ---
 
@@ -374,10 +367,7 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
     }
 
     const std::int32_t normalizedBeg{std::max<std::int32_t>(beg, 0)};
-    const std::int32_t normalizedEnd{std::max<std::int32_t>(end, 0)};
-    if (normalizedEnd <= normalizedBeg) {
-        return {};
-    }
+    const std::int32_t normalizedEnd{end};
 
     const ReferenceIndex& ref{references_[refId]};
 

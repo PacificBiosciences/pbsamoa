@@ -71,9 +71,6 @@ constexpr std::uint32_t GZIP_TRAILER_SIZE{8};
 // Shared BGZF header size (used by reader and pipeline)
 constexpr std::streamsize BGZF_HEADER_SIZE{18};
 
-// Reader constants
-constexpr std::size_t MAX_BGZF_BLOCK_SIZE{65536U + 256U};
-
 // Writer constants
 constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536U};
 constexpr std::size_t MAX_UNCOMPRESSED_SIZE{0xFF00U};  // 65280
@@ -206,6 +203,29 @@ bool IsBgzfEofMarker(std::span<const std::byte> data)
     return std::ranges::equal(data.first(std::size(BGZF_EOF_MARKER)), BGZF_EOF_MARKER);
 }
 
+/// \brief Helper: measure elapsed nanoseconds for a scope.
+struct ScopedTimer
+{
+    std::atomic<std::uint64_t>& target;
+    std::chrono::steady_clock::time_point start;
+
+    explicit ScopedTimer(std::atomic<std::uint64_t>& t)
+        : target{t}, start{std::chrono::steady_clock::now()}
+    {
+    }
+
+    ~ScopedTimer()
+    {
+        const auto elapsed{std::chrono::steady_clock::now() - start};
+        target.fetch_add(static_cast<std::uint64_t>(
+                             std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                         std::memory_order_relaxed);
+    }
+
+    ScopedTimer(const ScopedTimer&) = delete;
+    ScopedTimer& operator=(const ScopedTimer&) = delete;
+};
+
 /// \brief Always-on atomic counters for BGZF reader pipeline introspection.
 struct PipelineCounters
 {
@@ -241,7 +261,7 @@ void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
                           const std::stop_token& stopToken, PipelineCounters& counters,
                           std::mutex& readyMutex, std::condition_variable& readyCv)
 {
-    const auto parseStart{std::chrono::steady_clock::now()};
+    const ScopedTimer timer{counters.recordParseNs};
     bool pushed{false};
 
     while (pos + RECORD_BLOCK_SIZE_FIELD <= std::size(accumulator)) {
@@ -263,11 +283,6 @@ void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
         // Push to SPSC — spin while queue is full (reader drains on another core).
         while (!outputQueue.try_push(std::move(view))) {
             if (stopToken.stop_requested()) {
-                counters.recordParseNs.fetch_add(
-                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                   std::chrono::steady_clock::now() - parseStart)
-                                                   .count()),
-                    std::memory_order_relaxed);
                 return;
             }
             counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
@@ -284,12 +299,6 @@ void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
                           std::begin(accumulator) + static_cast<std::ptrdiff_t>(pos));
         pos = 0;
     }
-
-    counters.recordParseNs.fetch_add(
-        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now() - parseStart)
-                                       .count()),
-        std::memory_order_relaxed);
 
     if (pushed) {
         NotifyReader(readyMutex, readyCv);
@@ -819,7 +828,7 @@ struct BgzfWriter::Impl
 
     void WriteFrame(const detail::CompressedBatch::Block& block)
     {
-        const auto t0{std::chrono::steady_clock::now()};
+        const ScopedTimer timer{counters.ioWriteNs};
 
         const std::uint16_t xlen{6U};
         const std::uint32_t blockSize{10U + 2U + xlen +
@@ -854,16 +863,9 @@ struct BgzfWriter::Impl
         file.write(reinterpret_cast<const char*>(std::data(block.cdata)),
                    static_cast<std::streamsize>(std::size(block.cdata)));
 
-        const std::array<std::uint8_t, 8> trailer{
-            static_cast<std::uint8_t>(block.crc32 & 0xFFU),
-            static_cast<std::uint8_t>((block.crc32 >> 8U) & 0xFFU),
-            static_cast<std::uint8_t>((block.crc32 >> 16U) & 0xFFU),
-            static_cast<std::uint8_t>((block.crc32 >> 24U) & 0xFFU),
-            static_cast<std::uint8_t>(block.isize & 0xFFU),
-            static_cast<std::uint8_t>((block.isize >> 8U) & 0xFFU),
-            static_cast<std::uint8_t>((block.isize >> 16U) & 0xFFU),
-            static_cast<std::uint8_t>((block.isize >> 24U) & 0xFFU),
-        };
+        std::array<std::byte, 8> trailer{};
+        WriteLE<std::uint32_t>(std::data(trailer), block.crc32);
+        WriteLE<std::uint32_t>(std::data(trailer) + 4U, block.isize);
         file.write(reinterpret_cast<const char*>(std::data(trailer)),
                    static_cast<std::streamsize>(std::size(trailer)));
 
@@ -872,11 +874,6 @@ struct BgzfWriter::Impl
         }
 
         compressedOffset += blockSize;
-        const auto t1{std::chrono::steady_clock::now()};
-        counters.ioWriteNs.fetch_add(
-            static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
-            std::memory_order_relaxed);
     }
 
     void FireCallbacks(const detail::CompressedBatch::Block& block, std::uint64_t blockFileOffset)
@@ -890,17 +887,12 @@ struct BgzfWriter::Impl
             return;
         }
 
-        const auto t0{std::chrono::steady_clock::now()};
+        const ScopedTimer timer{counters.callbackNs};
         for (const auto& cb : block.callbacks) {
             const VirtualOffset offset{blockFileOffset, cb.withinBlockOffset};
             callback(static_cast<std::int64_t>(offset.Value()),
                      std::span<const std::byte>{cb.rawData});
         }
-        const auto t1{std::chrono::steady_clock::now()};
-        counters.callbackNs.fetch_add(
-            static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
-            std::memory_order_relaxed);
     }
 
     void WriteCompressedBatch(detail::CompressedBatch batch)
@@ -947,19 +939,15 @@ detail::CompressedBatch BgzfWriter::Impl::CompressBatchTask::operator()(
     std::vector<std::uint8_t> compressedBuffer(BGZF_MAX_BLOCK_SIZE);
 
     for (auto& block : blocks) {
-        const auto compressStart{std::chrono::steady_clock::now()};
-        const std::size_t compressedSize{
-            libdeflate_deflate_compress(compressor, std::data(block.data), std::size(block.data),
-                                        std::data(compressedBuffer), std::size(compressedBuffer))};
+        const std::size_t compressedSize{[&] {
+            const ScopedTimer timer{counters->compressNs};
+            return libdeflate_deflate_compress(compressor, std::data(block.data),
+                                               std::size(block.data), std::data(compressedBuffer),
+                                               std::size(compressedBuffer));
+        }()};
         if (compressedSize == 0U) {
             throw std::runtime_error{"libdeflate_deflate_compress failed"};
         }
-
-        counters->compressNs.fetch_add(
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now() - compressStart)
-                                           .count()),
-            std::memory_order_relaxed);
 
         const std::uint32_t crc32{
             libdeflate_crc32(0, std::data(block.data), std::size(block.data))};
@@ -1130,29 +1118,6 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 // BgzfReader parallel state
 // =============================================================================
 
-/// \brief Helper: measure elapsed nanoseconds for a scope.
-struct ScopedTimer
-{
-    std::atomic<std::uint64_t>& target;
-    std::chrono::steady_clock::time_point start;
-
-    explicit ScopedTimer(std::atomic<std::uint64_t>& t)
-        : target{t}, start{std::chrono::steady_clock::now()}
-    {
-    }
-
-    ~ScopedTimer()
-    {
-        const auto elapsed{std::chrono::steady_clock::now() - start};
-        target.fetch_add(static_cast<std::uint64_t>(
-                             std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
-                         std::memory_order_relaxed);
-    }
-
-    ScopedTimer(const ScopedTimer&) = delete;
-    ScopedTimer& operator=(const ScopedTimer&) = delete;
-};
-
 BgzfPipelineState::BgzfPipelineState(const std::filesystem::path& path, std::size_t workers)
     : filePath{path}, numWorkers{workers}
 {
@@ -1184,67 +1149,43 @@ BgzfPipelineState::BgzfPipelineState(const std::filesystem::path& path, std::siz
 
 BgzfPipelineState::~BgzfPipelineState() { StopPipeline(); }
 
-void BgzfPipelineState::ParseHeader()
+namespace {
+
+struct HeaderAccumResult
 {
-    // Read BGZF blocks synchronously until we have the complete BAM header
+    SamHeader header;
+    std::vector<std::byte> leftover;
+    bool eofReached{false};  ///< true when EOF was reached before a complete header block boundary
+};
+
+/// \brief Accumulate decompressed BGZF blocks until the BAM header is complete.
+///
+/// \param[in] readBlock  Callable: (std::span<std::byte> buf) -> std::optional<std::size_t>.
+///   Returns bytes written (0 = EOF, nullopt = error).
+template <std::invocable<std::span<std::byte>> ReadBlock>
+[[nodiscard]] HeaderAccumResult AccumulateBamHeader(ReadBlock readBlock)
+{
     std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
     std::size_t headerLen{0};
     std::vector<std::byte> blockBuf(MAX_DECOMPRESSED_BLOCK_SIZE);
 
     while (true) {
-        syncBlockOffset = static_cast<std::uint64_t>(syncFile.tellg());
-        syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed)), BGZF_HEADER_SIZE);
-        if (syncFile.gcount() == 0) {
-            break;  // EOF
+        const std::optional<std::size_t> bytesRead{readBlock(std::span<std::byte>{blockBuf})};
+
+        if (!bytesRead) {
+            throw std::runtime_error{"Failed to read BGZF block while parsing BAM header"};
         }
-        if (syncFile.gcount() < BGZF_HEADER_SIZE) {
-            throw std::runtime_error{"Truncated BGZF block while parsing BAM header"};
+        if (*bytesRead == 0) {
+            break;
         }
 
-        const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
-            std::span<const std::byte>{syncCompressed}.first(BGZF_HEADER_SIZE))};
-        if (!info) {
-            throw std::runtime_error{"Invalid BGZF header while parsing BAM header"};
+        if (headerLen + *bytesRead > std::size(headerBuf)) {
+            headerBuf.resize(headerLen + *bytesRead + MAX_DECOMPRESSED_BLOCK_SIZE);
         }
 
-        const std::size_t remaining{info->blockSize - static_cast<std::size_t>(BGZF_HEADER_SIZE)};
-        syncFile.read(reinterpret_cast<char*>(std::data(syncCompressed) + BGZF_HEADER_SIZE),
-                      static_cast<std::streamsize>(remaining));
-        if (static_cast<std::size_t>(syncFile.gcount()) < remaining) {
-            throw std::runtime_error{"Truncated BGZF block while parsing BAM header"};
-        }
+        std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
+        headerLen += *bytesRead;
 
-        const std::uint32_t isize{ReadU32LE(std::data(syncCompressed) + info->blockSize - 4U)};
-        if (isize == 0U) {
-            break;  // EOF marker
-        }
-        if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
-            throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
-        }
-
-        // Decompress
-        std::size_t actualOut{0};
-        const libdeflate_result result{libdeflate_deflate_decompress(
-            syncDecompressor.get(), std::data(syncCompressed) + info->compressedDataOffset,
-            info->compressedDataSize, std::data(blockBuf), isize, &actualOut)};
-        if (result != LIBDEFLATE_SUCCESS) {
-            throw std::runtime_error{"BGZF decompression failed while parsing BAM header"};
-        }
-
-        const std::uint32_t expectedCrc{
-            ReadU32LE(std::data(syncCompressed) + info->blockSize - 8U)};
-        if (!BgzfCrcValid(expectedCrc, std::data(blockBuf), actualOut)) {
-            throw std::runtime_error{"BGZF CRC32 mismatch while parsing BAM header"};
-        }
-
-        // Append to header buffer
-        if (headerLen + actualOut > std::size(headerBuf)) {
-            headerBuf.resize(headerLen + actualOut + MAX_DECOMPRESSED_BLOCK_SIZE);
-        }
-        std::ranges::copy_n(std::data(blockBuf), actualOut, std::data(headerBuf) + headerLen);
-        headerLen += actualOut;
-
-        // Check if we have the complete header
         const std::size_t hdrSize{
             ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
         if (hdrSize > 0) {
@@ -1253,23 +1194,14 @@ void BgzfPipelineState::ParseHeader()
             if (!headerResult) {
                 throw std::runtime_error{std::move(headerResult.error())};
             }
-            header = std::move(*headerResult);
 
-            // Save leftover bytes after header
-            const std::size_t leftover{headerLen - hdrSize};
-            if (leftover > 0) {
-                initialBytes.assign(std::data(headerBuf) + hdrSize,
-                                    std::data(headerBuf) + headerLen);
+            const std::size_t leftoverSize{headerLen - hdrSize};
+            std::vector<std::byte> leftover(leftoverSize);
+            if (leftoverSize > 0) {
+                std::ranges::copy_n(std::data(headerBuf) + hdrSize, leftoverSize,
+                                    std::data(leftover));
             }
-
-            headerEndFileOffset = static_cast<std::uint64_t>(syncFile.tellg());
-            headerParsed = true;
-
-            // Start pipeline if parallel mode
-            if (numWorkers > 0) {
-                StartPipeline();
-            }
-            return;
+            return HeaderAccumResult{std::move(*headerResult), std::move(leftover)};
         }
     }
 
@@ -1279,16 +1211,34 @@ void BgzfPipelineState::ParseHeader()
     }
     const std::size_t hdrSize{
         ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
-    if (hdrSize > 0) {
-        auto headerResult{SamHeader::FromBamHeaderBlock(
-            std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-        if (!headerResult) {
-            throw std::runtime_error{std::move(headerResult.error())};
-        }
-        header = std::move(*headerResult);
-        headerParsed = true;
-    } else {
+    if (hdrSize == 0) {
         throw std::runtime_error{"Incomplete BAM header"};
+    }
+    auto headerResult{
+        SamHeader::FromBamHeaderBlock(std::span<const std::byte>{std::data(headerBuf), hdrSize})};
+    if (!headerResult) {
+        throw std::runtime_error{std::move(headerResult.error())};
+    }
+    return HeaderAccumResult{std::move(*headerResult), {}, true};
+}
+
+}  // namespace
+
+void BgzfPipelineState::ParseHeader()
+{
+    auto [hdr, leftover, eofReached]{
+        AccumulateBamHeader([this](std::span<std::byte> buf) { return ReadBlockSync(buf); })};
+
+    header = std::move(hdr);
+    if (!std::empty(leftover)) {
+        initialBytes = std::move(leftover);
+    }
+    headerEndFileOffset = static_cast<std::uint64_t>(syncFile.tellg());
+    headerParsed = true;
+
+    // Start pipeline if parallel mode (only meaningful when more data follows)
+    if ((numWorkers > 0) && !eofReached) {
+        StartPipeline();
     }
 }
 
@@ -1402,75 +1352,70 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
             for (std::size_t b{0}; b < BLOCKS_PER_BATCH && !stopToken.stop_requested(); ++b) {
                 const std::uint64_t blockOffset = file.tellg();
 
-                // Time file reads
-                const auto readStart{std::chrono::steady_clock::now()};
+                std::uint32_t isize{};
+                std::uint32_t crc32{};
+                std::size_t cdataOffset{};
+                std::size_t cdataSize{};
+                std::size_t blockSize{};
+                bool eofOrEmpty{false};
+                bool isEof{false};
+                {
+                    // Time file reads only — ends before buffer work below.
+                    const ScopedTimer readTimer{counters.ioReadNs};
 
-                // Read BGZF header
-                file.read(reinterpret_cast<char*>(std::data(compressed)), BGZF_HEADER_SIZE);
-                if (file.gcount() == 0) {
-                    counters.ioReadNs.fetch_add(
-                        static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - readStart)
-                                .count()),
-                        std::memory_order_relaxed);
-                    break;  // EOF
+                    // Read BGZF header
+                    file.read(reinterpret_cast<char*>(std::data(compressed)), BGZF_HEADER_SIZE);
+                    if (file.gcount() == 0) {
+                        eofOrEmpty = true;
+                        isEof = true;
+                    } else if (file.gcount() < BGZF_HEADER_SIZE) {
+                        // Truncated header mid-stream is corruption, not a clean EOF (which is
+                        // gcount()==0 above). Propagate as an error like htslib.
+                        throw std::runtime_error{"Truncated BGZF block header in record region"};
+                    } else {
+                        const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
+                            std::span<const std::byte>{compressed}.first(BGZF_HEADER_SIZE))};
+                        if (!info) {
+                            throw std::runtime_error{"Invalid BGZF block header in record region"};
+                        }
+
+                        // Read rest of block
+                        const std::size_t remaining{info->blockSize -
+                                                    static_cast<std::size_t>(BGZF_HEADER_SIZE)};
+                        file.read(reinterpret_cast<char*>(std::data(compressed) + BGZF_HEADER_SIZE),
+                                  static_cast<std::streamsize>(remaining));
+
+                        if (static_cast<std::size_t>(file.gcount()) < remaining) {
+                            throw std::runtime_error{"Truncated BGZF block in record region"};
+                        }
+
+                        isize = ReadU32LE(std::data(compressed) + info->blockSize - 4U);
+                        if (isize == 0U) {
+                            // Empty block (EOF marker or appended-file boundary). The block has
+                            // been fully consumed; skip it and keep reading. Real EOF is
+                            // gcount()==0 above.
+                            eofOrEmpty = true;
+                        } else {
+                            if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
+                                throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
+                            }
+                            crc32 = ReadU32LE(std::data(compressed) + info->blockSize - 8U);
+                            cdataOffset = info->compressedDataOffset;
+                            cdataSize = info->compressedDataSize;
+                            blockSize = info->blockSize;
+                        }
+                    }
                 }
-                if (file.gcount() < BGZF_HEADER_SIZE) {
-                    counters.ioReadNs.fetch_add(
-                        static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - readStart)
-                                .count()),
-                        std::memory_order_relaxed);
-                    // Truncated header mid-stream is corruption, not a clean EOF (which is
-                    // gcount()==0 above). Propagate as an error like htslib.
-                    throw std::runtime_error{"Truncated BGZF block header in record region"};
+
+                if (isEof) {
+                    break;
                 }
-
-                const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
-                    std::span<const std::byte>{compressed}.first(BGZF_HEADER_SIZE))};
-                if (!info) {
-                    counters.ioReadNs.fetch_add(
-                        static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - readStart)
-                                .count()),
-                        std::memory_order_relaxed);
-                    throw std::runtime_error{"Invalid BGZF block header in record region"};
-                }
-
-                // Read rest of block
-                const std::size_t remaining{info->blockSize -
-                                            static_cast<std::size_t>(BGZF_HEADER_SIZE)};
-                file.read(reinterpret_cast<char*>(std::data(compressed) + BGZF_HEADER_SIZE),
-                          static_cast<std::streamsize>(remaining));
-
-                counters.ioReadNs.fetch_add(
-                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                   std::chrono::steady_clock::now() - readStart)
-                                                   .count()),
-                    std::memory_order_relaxed);
-
-                if (static_cast<std::size_t>(file.gcount()) < remaining) {
-                    throw std::runtime_error{"Truncated BGZF block in record region"};
-                }
-
-                const std::uint32_t isize{ReadU32LE(std::data(compressed) + info->blockSize - 4U)};
-                if (isize == 0U) {
-                    // Empty block (EOF marker or appended-file boundary). The block has been
-                    // fully consumed; skip it and keep reading. Real EOF is gcount()==0 above.
+                if (eofOrEmpty) {
                     continue;
                 }
-                if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
-                    throw std::runtime_error{"BGZF ISIZE exceeds maximum block size"};
-                }
-                const std::uint32_t crc32{ReadU32LE(std::data(compressed) + info->blockSize - 8U)};
 
                 // Append compressed payload to batch buffer (trailer dropped — carry crc32 along)
                 const std::size_t batchOffset{std::size(batchBuffer)};
-                const std::size_t cdataOffset{info->compressedDataOffset};
-                const std::size_t cdataSize{info->compressedDataSize};
                 batchBuffer.insert(std::end(batchBuffer), std::data(compressed) + cdataOffset,
                                    std::data(compressed) + cdataOffset + cdataSize);
                 batchEntries.push_back(detail::CompressedEntry{
@@ -1480,7 +1425,7 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
                     .crc32 = crc32,
                     .fileOffset = blockOffset,
                 });
-                batchCompressedBytes += info->blockSize;
+                batchCompressedBytes += blockSize;
             }
 
             if (std::empty(batchEntries)) {
@@ -1845,7 +1790,7 @@ void BgzfReader::Impl::OpenSyncFile(const std::filesystem::path& path, bool seek
         throw std::runtime_error{"Cannot open file: " + path.string()};
     }
 
-    compressedBuf.resize(MAX_BGZF_BLOCK_SIZE);
+    compressedBuf.resize(MAX_COMPRESSED_BLOCK_SIZE);
 
     syncDecompressor = detail::DecompressorPtr{libdeflate_alloc_decompressor()};
     if (!syncDecompressor) {
@@ -1933,71 +1878,19 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> 
 
 void BgzfReader::Impl::ParseHeaderSync()
 {
-    std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
-    std::size_t headerLen{0};
-    std::vector<std::byte> blockBuf(MAX_DECOMPRESSED_BLOCK_SIZE);
+    auto [hdr, leftover, eofReached]{
+        AccumulateBamHeader([this](std::span<std::byte> buf) { return ReadBlockSync(buf); })};
 
-    while (true) {
-        const std::optional<std::size_t> bytesRead{ReadBlockSync(std::span<std::byte>{blockBuf})};
+    syncHeader = std::move(hdr);
 
-        if (!bytesRead) {
-            throw std::runtime_error{"Failed to read BGZF block while parsing BAM header"};
-        }
-        if (*bytesRead == 0) {
-            break;
-        }
-
-        if (headerLen + *bytesRead > std::size(headerBuf)) {
-            headerBuf.resize(headerLen + *bytesRead + MAX_DECOMPRESSED_BLOCK_SIZE);
-        }
-
-        std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
-        headerLen += *bytesRead;
-
-        const std::size_t hdrSize{
-            ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
-        if (hdrSize > 0) {
-            auto headerResult{SamHeader::FromBamHeaderBlock(
-                std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-            if (!headerResult) {
-                throw std::runtime_error{std::move(headerResult.error())};
-            }
-            syncHeader = std::move(*headerResult);
-
-            const std::size_t remaining{headerLen - hdrSize};
-            recordBuf.resize(std::ranges::max(remaining, MAX_DECOMPRESSED_BLOCK_SIZE));
-            if (remaining > 0) {
-                std::ranges::copy_n(std::data(headerBuf) + hdrSize, remaining,
-                                    std::data(recordBuf));
-            }
-            recordBufSize = remaining;
-            recordBufPos = 0;
-            syncEof = false;
-            return;
-        }
+    const std::size_t remaining{std::size(leftover)};
+    recordBuf.resize(std::ranges::max(remaining, MAX_DECOMPRESSED_BLOCK_SIZE));
+    if (remaining > 0) {
+        std::ranges::copy_n(std::data(leftover), remaining, std::data(recordBuf));
     }
-
-    if (headerLen == 0) {
-        throw std::runtime_error{"Empty BAM file: no BGZF blocks"};
-    }
-
-    const std::size_t hdrSize{
-        ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
-    if (hdrSize > 0) {
-        auto headerResult{SamHeader::FromBamHeaderBlock(
-            std::span<const std::byte>{std::data(headerBuf), hdrSize})};
-        if (!headerResult) {
-            throw std::runtime_error{std::move(headerResult.error())};
-        }
-        syncHeader = std::move(*headerResult);
-        recordBuf.resize(MAX_DECOMPRESSED_BLOCK_SIZE);
-        recordBufSize = 0;
-        recordBufPos = 0;
-        syncEof = true;
-        return;
-    }
-
-    throw std::runtime_error{"Incomplete BAM header"};
+    recordBufSize = remaining;
+    recordBufPos = 0;
+    syncEof = eofReached;
 }
 
 bool BgzfReader::Impl::RefillRecordBuffer()

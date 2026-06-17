@@ -391,5 +391,56 @@ TEST(RawRecord, IsSecondaryAndIsSupplementaryReflectFlag)
     EXPECT_FALSE(supView.IsPrimary());
 }
 
+// Build a long-CIGAR placeholder record that also carries two extra BAM aux tags:
+// NM:c:5 (to be kept) and RG:Z:foo (to be filtered out).
+// Used to verify ToOwnedFiltered's single-pass behaviour with CG expansion.
+std::vector<std::byte> MakeLongCigarPlaceholderBytesWithExtraTags()
+{
+    std::vector<std::byte> data{MakeLongCigarPlaceholderBytes(/*withCgTag=*/true)};
+    // Append NM:c:5
+    data.push_back(std::byte{'N'});
+    data.push_back(std::byte{'M'});
+    data.push_back(std::byte{'c'});
+    data.push_back(std::byte{5});
+    // Append RG:Z:foo\0
+    data.push_back(std::byte{'R'});
+    data.push_back(std::byte{'G'});
+    data.push_back(std::byte{'Z'});
+    data.push_back(std::byte{'f'});
+    data.push_back(std::byte{'o'});
+    data.push_back(std::byte{'o'});
+    data.push_back(std::byte{0});
+    return data;
+}
+
+// ToOwnedFiltered with CG expansion: filtered-out tags must not be materialised,
+// CG must be absent (cigar absorbed it), matching tags survive, cigar is correct.
+TEST(RawRecord, ToOwnedFilteredWithCgExpansionDropsCorrectTags)
+{
+    const std::vector<std::byte> data{MakeLongCigarPlaceholderBytesWithExtraTags()};
+    const RawRecord view{std::span<const std::byte>{data}};
+
+    // Keep only NM; CG (expanded) and RG (not in keep-list) must be absent.
+    const BamRecord owned{view.ToOwned(KeepTags{TagKey{'N', 'M'}})};
+
+    // (a) CG tag absent — its contents were absorbed into the expanded cigar.
+    EXPECT_FALSE(owned.Tags().Contains(TagKey{'C', 'G'}));
+
+    // (b) RG (non-matching) dropped.
+    EXPECT_FALSE(owned.Tags().Contains(TagKey{'R', 'G'}));
+
+    // (c) NM (matching) survives with the correct value.
+    ASSERT_TRUE(owned.Tags().Contains(TagKey{'N', 'M'}));
+    const TagValue* nm{owned.Tags().Get(TagKey{'N', 'M'})};
+    ASSERT_NE(nm, nullptr);
+    EXPECT_EQ(std::get<std::int64_t>(*nm), 5);
+
+    // (d) Cigar is the 3-op CIGAR from the CG tag (1M 1I 2M), not the placeholder.
+    ASSERT_EQ(std::size(owned.Cigar()), 3U);
+    EXPECT_EQ(owned.Cigar()[0].RawValue(), (1U << 4U) | 0U);  // 1M
+    EXPECT_EQ(owned.Cigar()[1].RawValue(), (1U << 4U) | 1U);  // 1I
+    EXPECT_EQ(owned.Cigar()[2].RawValue(), (2U << 4U) | 0U);  // 2M
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

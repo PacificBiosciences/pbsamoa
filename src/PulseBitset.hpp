@@ -17,7 +17,7 @@ namespace Samoa {
 ///
 /// Uppercase characters represent basecalled pulses (bit set),
 /// lowercase characters represent squashed pulses (bit clear).
-/// Provides hardware-accelerated FindNext/FindNthBase via
+/// Provides hardware-accelerated FindNthBase via
 /// std::countr_zero and std::popcount.
 class PulseBitset
 {
@@ -47,60 +47,6 @@ public:
 
     /// \brief Number of basecalled pulses (set bits).
     std::size_t Count() const { return count_; }
-
-    /// \brief Test whether the pulse at pos is basecalled.
-    bool IsSet(std::size_t pos) const
-    {
-        if (pos >= size_) {
-            return false;
-        }
-        const std::size_t blockIdx{pos / BITS_PER_BLOCK};
-        const std::size_t bitIdx{pos % BITS_PER_BLOCK};
-        return (blocks_[blockIdx] & (std::uint64_t{1} << bitIdx)) != 0;
-    }
-
-    /// \brief Find the index of the first basecalled pulse.
-    /// \returns Pulse index, or NPOS if none.
-    std::size_t FindFirst() const
-    {
-        const std::size_t blockCount{std::size(blocks_)};
-        for (std::size_t blockIndex{0}; blockIndex < blockCount; ++blockIndex) {
-            if (blocks_[blockIndex] != 0) {
-                return blockIndex * BITS_PER_BLOCK +
-                       static_cast<std::size_t>(std::countr_zero(blocks_[blockIndex]));
-            }
-        }
-        return NPOS;
-    }
-
-    /// \brief Find the next basecalled pulse after pos.
-    /// \returns Pulse index, or NPOS if none.
-    std::size_t FindNext(std::size_t pos) const
-    {
-        const std::size_t nextPos{pos + 1};
-        if (nextPos >= size_) {
-            return NPOS;
-        }
-        const std::size_t blockCount{std::size(blocks_)};
-        std::size_t blockIdx{nextPos / BITS_PER_BLOCK};
-        const std::size_t bitIdx{nextPos % BITS_PER_BLOCK};
-
-        // Mask off bits below start within the first block
-        const std::uint64_t masked{blocks_[blockIdx] >> bitIdx};
-        if (masked != 0) {
-            return blockIdx * BITS_PER_BLOCK + bitIdx +
-                   static_cast<std::size_t>(std::countr_zero(masked));
-        }
-
-        // Scan remaining blocks
-        for (++blockIdx; blockIdx < blockCount; ++blockIdx) {
-            if (blocks_[blockIdx] != 0) {
-                return blockIdx * BITS_PER_BLOCK +
-                       static_cast<std::size_t>(std::countr_zero(blocks_[blockIdx]));
-            }
-        }
-        return NPOS;
-    }
 
     /// \brief Find the pulse index of the Nth basecalled pulse (0-indexed).
     /// \returns Pulse index, or NPOS if fewer than n+1 basecalled pulses.

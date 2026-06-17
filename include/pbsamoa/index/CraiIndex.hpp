@@ -5,7 +5,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
@@ -32,18 +31,14 @@ public:
     /// \throws std::runtime_error on parse or I/O errors
     static CraiIndex FromFile(const std::filesystem::path& path);
 
-    /// \brief Return all CRAI entries in parse order.
-    const std::vector<CraiEntry>& Entries() const;
-
     /// \brief Return entries for a specific reference sequence.
     /// Includes unmapped rows when refId is -1.
-    std::vector<CraiEntry> EntriesForReference(std::int32_t refId) const;
+    [[nodiscard]] std::vector<CraiEntry> EntriesForReference(std::int32_t refId) const;
 
 private:
     void AddEntry(CraiEntry entry);
 
-    std::vector<CraiEntry> entries_;
-    std::unordered_map<std::int32_t, std::vector<std::size_t>> referenceEntries_;
+    std::unordered_map<std::int32_t, std::vector<CraiEntry>> entries_;
 };
 
 }  // namespace Samoa

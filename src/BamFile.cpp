@@ -68,11 +68,7 @@ std::filesystem::path BamFile::StandardIndexFilename() const
 
 bool BamFile::StandardIndexIsNewer() const { return !StandardIndexNeedsRefresh(fileName_); }
 
-bool BamFile::HasReference(std::string_view name) const { return ReferenceId(name) >= 0; }
-
 const SamHeader& BamFile::Header() const { return header_; }
-
-std::int32_t BamFile::ReferenceId(std::string_view name) const { return header_.ReferenceId(name); }
 
 std::string BamFile::ReferenceName(std::int32_t id) const
 {
@@ -85,7 +81,7 @@ std::string BamFile::ReferenceName(std::int32_t id) const
 
 std::uint32_t BamFile::ReferenceLength(std::string_view name) const
 {
-    return ReferenceLength(ReferenceId(name));
+    return ReferenceLength(header_.ReferenceId(name));
 }
 
 std::uint32_t BamFile::ReferenceLength(std::int32_t id) const

@@ -1,7 +1,7 @@
 #include <pbsamoa/index/CraiIndex.hpp>
 
 #include "BinaryUtils.hpp"
-#include "CramInternal.hpp"
+#include "LibdeflateUtils.hpp"
 
 #include <libdeflate.h>
 
@@ -9,7 +9,6 @@
 #include <array>
 #include <format>
 #include <limits>
-#include <memory>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -176,28 +175,18 @@ CraiIndex CraiIndex::FromFile(const std::filesystem::path& path)
     return index;
 }
 
-const std::vector<CraiEntry>& CraiIndex::Entries() const { return entries_; }
-
 std::vector<CraiEntry> CraiIndex::EntriesForReference(std::int32_t refId) const
 {
-    const auto it{referenceEntries_.find(refId)};
-    if (it == std::end(referenceEntries_)) {
+    const auto it{entries_.find(refId)};
+    if (it == std::end(entries_)) {
         return {};
     }
-
-    std::vector<CraiEntry> result;
-    const auto& entryIndices{it->second};
-    result.reserve(entryIndices.size());
-    for (const std::size_t entryIndex : entryIndices) {
-        result.push_back(entries_.at(entryIndex));
-    }
-    return result;
+    return it->second;
 }
 
 void CraiIndex::AddEntry(CraiEntry entry)
 {
-    referenceEntries_[entry.SequenceId].push_back(std::size(entries_));
-    entries_.push_back(std::move(entry));
+    entries_[entry.SequenceId].push_back(std::move(entry));
 }
 
 }  // namespace Samoa

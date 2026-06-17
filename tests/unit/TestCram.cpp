@@ -1,7 +1,5 @@
-#include "TestData.hpp"
 #include "TestTempDir.hpp"
 
-#include "../../src/BinaryUtils.hpp"
 #include "../../src/CramInternal.hpp"
 
 #include <pbsamoa/cram/CramCodec.hpp>
@@ -2608,10 +2606,10 @@ TEST_F(CramWriterReaderTest, CraiSingleReferenceRowsMatchSliceOffsets)
 
     ASSERT_TRUE(std::filesystem::exists(tmpCraiPath));
     const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
-    ASSERT_EQ(std::size(index.Entries()), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(0)), 1U);
 
     const CramSliceOffsetInfo offsets = FirstDataSliceOffsetInfo(tmpPath);
-    const CraiEntry& entry = index.Entries().front();
+    const CraiEntry entry{index.EntriesForReference(0).front()};
     EXPECT_EQ(entry.SequenceId, 0);
     EXPECT_EQ(entry.AlignmentStart, 101);
     EXPECT_EQ(entry.AlignmentSpan, 5);
@@ -2646,11 +2644,14 @@ TEST_F(CramWriterReaderTest, CraiMultiReferenceRowsShareOffsetsAndIncludeUnmappe
 
     ASSERT_TRUE(std::filesystem::exists(tmpCraiPath));
     const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
-    ASSERT_EQ(std::size(index.Entries()), 3U);
+    // Three distinct reference ids: 0 (1 entry), 1 (1 entry), -1 (1 entry).
+    ASSERT_EQ(std::size(index.EntriesForReference(0)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(1)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(-1)), 1U);
 
-    const CraiEntry& first = index.Entries().at(0);
-    const CraiEntry& second = index.Entries().at(1);
-    const CraiEntry& third = index.Entries().at(2);
+    const CraiEntry first{index.EntriesForReference(1).front()};
+    const CraiEntry second{index.EntriesForReference(0).front()};
+    const CraiEntry third{index.EntriesForReference(-1).front()};
 
     EXPECT_EQ(first.SequenceId, 1);
     EXPECT_EQ(first.AlignmentStart, 201);
@@ -2696,15 +2697,16 @@ TEST_F(CramWriterReaderTest, CraiRegionQueryMappedReturnsOnlyOverlaps)
     }
 
     const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
-    ASSERT_FALSE(std::empty(index.Entries()));
+    const std::vector<CraiEntry> ref0Entries{index.EntriesForReference(0)};
+    ASSERT_FALSE(std::empty(ref0Entries));
 
     std::string duplicatedIndexText;
-    for (const CraiEntry& entry : index.Entries()) {
+    for (const CraiEntry& entry : ref0Entries) {
         duplicatedIndexText += std::format(
             "{}\t{}\t{}\t{}\t{}\t{}\n", entry.SequenceId, entry.AlignmentStart, entry.AlignmentSpan,
             entry.ContainerOffset, entry.SliceOffset, entry.SliceSize);
     }
-    const CraiEntry& first = index.Entries().front();
+    const CraiEntry& first = ref0Entries.front();
     duplicatedIndexText +=
         std::format("{}\t{}\t{}\t{}\t{}\t{}\n", first.SequenceId, first.AlignmentStart,
                     first.AlignmentSpan, first.ContainerOffset, first.SliceOffset, first.SliceSize);

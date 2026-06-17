@@ -36,12 +36,6 @@ inline void AppendLE(std::vector<std::byte>& out, T value)
     WriteLE(std::data(out) + appendOffset, value);
 }
 
-/// \brief Write a little-endian int32 to a byte vector.
-inline void WriteI32LE(std::vector<std::byte>& out, std::int32_t value) { AppendLE(out, value); }
-
-/// \brief Write a little-endian uint32 to a byte vector.
-inline void WriteU32LE(std::vector<std::byte>& out, std::uint32_t value) { AppendLE(out, value); }
-
 inline constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
 
 [[noreturn]] inline void ThrowReadFileError(const std::string& pathText)

@@ -28,7 +28,7 @@ std::size_t CountRawQuery(const std::filesystem::path& bamPath, const GenomicInt
     BamRawReader reader{bamPath};
 
     std::size_t count{0};
-    for (const auto& record : reader.Query(index, file.ReferenceId(interval.Name()),
+    for (const auto& record : reader.Query(index, file.Header().ReferenceId(interval.Name()),
                                            interval.Start(), interval.Stop())) {
         (void)record;
         ++count;

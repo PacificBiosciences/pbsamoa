@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
-#include <memory>
 #include <numeric>
 #include <ranges>
 #include <string>
@@ -268,32 +267,28 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
     std::vector<std::size_t> prefixSum(numRuns);
     std::inclusive_scan(std::cbegin(lengths), std::cend(lengths), std::begin(prefixSum));
 
-    // Build suffix sums (reverse inclusive scan)
-    std::vector<std::size_t> suffixSum(numRuns);
-    std::inclusive_scan(std::crbegin(lengths), std::crend(lengths), std::begin(suffixSum));
-
     const std::size_t clipEnd{clipOffset + clipLength};
     const std::size_t prefixSize{clipOffset};
-    const std::size_t suffixSize{seqLength - clipEnd};
 
     // Find the first run that extends past the prefix (i.e., into the clip
     // window)
     const auto prefixIt{std::ranges::upper_bound(prefixSum, prefixSize)};
-    // Find the first suffix run that extends past the suffix
-    const auto suffixIt{std::ranges::upper_bound(suffixSum, suffixSize)};
 
-    // Convert to pair indices in the original array
+    // The last retained run is the first whose cumulative end >= clipEnd;
+    // endRun is one past it (exclusive upper bound of the retained range).
     const std::size_t beginRun{
         static_cast<std::size_t>(std::ranges::distance(prefixSum.begin(), prefixIt))};
     const std::size_t endRun{
-        numRuns - static_cast<std::size_t>(std::ranges::distance(suffixSum.begin(), suffixIt))};
+        static_cast<std::size_t>(std::ranges::distance(
+            prefixSum.begin(), std::ranges::upper_bound(prefixSum, clipEnd - 1))) +
+        1};
 
     // Compute how many bases from the first retained run are clipped off the
     // front
     const std::size_t lostPrefixBases{prefixSize - PrefixTotalBefore(prefixSum.begin(), prefixIt)};
 
-    // Compute how many bases from the last retained run are clipped off the back
-    const std::size_t lostSuffixBases{suffixSize - PrefixTotalBefore(suffixSum.begin(), suffixIt)};
+    // Compute how many bases from the last retained run extend past clipEnd
+    const std::size_t lostSuffixBases{prefixSum[endRun - 1] - clipEnd};
 
     // Build the new RLE pairs
     TagArray result{'C'};
@@ -326,8 +321,7 @@ bool PileupClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::size
 
 // --- TagClipper ---
 
-void TagClipper::Register(std::initializer_list<TagKey> tags,
-                          std::shared_ptr<TagClipStrategy> strategy)
+void TagClipper::Register(std::initializer_list<TagKey> tags, const TagClipStrategy& strategy)
 {
     for (const auto& key : tags) {
         registrations_.push_back(Registration{key, strategy});
@@ -353,7 +347,7 @@ void TagClipper::ClipTags(TagMap& tags, std::size_t clipOffset, std::size_t clip
             continue;
         }
         TagValue val{*existing};
-        if (strategy->Clip(val, clipOffset, clipLength, seqLength, ctx)) {
+        if (strategy.get().Clip(val, clipOffset, clipLength, seqLength, ctx)) {
             tags.Set(key, std::move(val));
         } else {
             tags.Remove(key);
@@ -372,7 +366,7 @@ TagClipper TagClipper::PacBioDefault()
 {
     TagClipper clipper;
 
-    auto substringStrategy{std::make_shared<SubstringClipStrategy>()};
+    static const SubstringClipStrategy substringStrategy;
     clipper.Register(
         {
             TagKey{'d', 'q'},
@@ -388,7 +382,7 @@ TagClipper TagClipper::PacBioDefault()
         },
         substringStrategy);
 
-    auto reverseStrategy{std::make_shared<ReverseSubstringClipStrategy>()};
+    static const ReverseSubstringClipStrategy reverseStrategy;
     clipper.Register(
         {
             TagKey{'r', 'i'},
@@ -396,7 +390,7 @@ TagClipper TagClipper::PacBioDefault()
         },
         reverseStrategy);
 
-    auto pulseStrategy{std::make_shared<PulseClipStrategy>()};
+    static const PulseClipStrategy pulseStrategy;
     clipper.Register(
         {
             TagKey{'p', 'c'},
@@ -415,7 +409,7 @@ TagClipper TagClipper::PacBioDefault()
         },
         pulseStrategy);
 
-    auto basemodStrategy{std::make_shared<BasemodClipStrategy>()};
+    static const BasemodClipStrategy basemodStrategy;
     clipper.Register(
         {
             TagKey{'M', 'M'},
@@ -432,7 +426,7 @@ TagClipper TagClipper::PacBioDefault()
         substringStrategy);
 
     // Subread pileup: sa is RLE-encoded coverage
-    auto pileupStrategy{std::make_shared<PileupClipStrategy>()};
+    static const PileupClipStrategy pileupStrategy;
     clipper.Register(
         {
             TagKey{'s', 'a'},

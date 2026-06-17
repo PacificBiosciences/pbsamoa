@@ -1,10 +1,11 @@
 #include "Dump.hpp"
 #include "../../BinaryUtils.hpp"
 #include "../../CramInternal.hpp"
+#include "../../SamFieldUtils.hpp"
+#include "../../WriterUtils.hpp"
 #include "../CliUtils.hpp"
 #include "../MetricUtils.hpp"
 #include "../ParseUtils.hpp"
-#include "../SamOutput.hpp"
 
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
@@ -100,8 +101,9 @@ void AppendInt(std::string& out, std::int64_t v)
 
 void AppendReferenceName(std::string& out, const SamHeader& header, std::int32_t refId)
 {
-    if (refId < 0) {
-        out += '*';
+    const std::string_view sentinel{RnameSentinel(refId)};
+    if (!sentinel.empty()) {
+        out.append(sentinel);
         return;
     }
     out.append(header.ReferenceName(refId));
@@ -110,12 +112,9 @@ void AppendReferenceName(std::string& out, const SamHeader& header, std::int32_t
 void AppendNextReferenceName(std::string& out, const SamHeader& header, std::int32_t refId,
                              std::int32_t nextRefId)
 {
-    if (nextRefId < 0) {
-        out += '*';
-        return;
-    }
-    if (nextRefId == refId) {
-        out += '=';
+    const std::string_view sentinel{RnextSentinel(refId, nextRefId)};
+    if (!sentinel.empty()) {
+        out.append(sentinel);
         return;
     }
     out.append(header.ReferenceName(nextRefId));

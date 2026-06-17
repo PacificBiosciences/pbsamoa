@@ -64,6 +64,15 @@ public:
     std::int64_t QueryLength() const;
 
     TagMap ParseTags() const;
+
+    /// \brief Parse aux tags, keeping only keys accepted by \p keep.
+    ///
+    /// Walks the raw BAM aux bytes once, skipping tags that fail the predicate.
+    /// Replicates ParseTags()'s CG-tag suppression: when cgExpanded_ is true the
+    /// CG tag is never materialised (its data already lives in cigar_).
+    template <typename Filter>
+    TagMap ParseTagsFiltered(const Filter& filter, bool (*keep)(const Filter&, TagKey)) const;
+
     BamRecord ToOwned() const;
     BamRecord ToOwned(const DropTags& filter) const;
     BamRecord ToOwned(const KeepTags& filter) const;
@@ -236,6 +245,25 @@ inline TagMap RawRecord::ParseTags() const
 
 inline std::span<const std::byte> RawRecord::RawData() const { return data_; }
 
+template <typename Filter>
+TagMap RawRecord::ParseTagsFiltered(const Filter& filter, bool (*keep)(const Filter&, TagKey)) const
+{
+    const TagKey cgKey{'C', 'G'};
+    const TagMap parsed{ParseTagsFromBam(AuxData())};
+    TagMap tags;
+    for (const auto& [key, value] : parsed.Entries()) {
+        // Replicate ParseTags() CG-tag suppression: when the CG tag's CIGAR was
+        // expanded into cigar_, the tag is semantically stale — never include it.
+        if (cgExpanded_ && (key == cgKey)) {
+            continue;
+        }
+        if (keep(filter, key)) {
+            tags.Append(key, value);
+        }
+    }
+    return tags;
+}
+
 namespace detail {
 
 constexpr bool HasStoredQuality(std::uint8_t quality);
@@ -284,15 +312,26 @@ template <typename Filter>
 BamRecord ToOwnedFiltered(const RawRecord& raw, const Filter& filter,
                           bool (*keep)(const Filter&, TagKey))
 {
-    BamRecord record{raw.ToOwned()};
-    TagMap filtered;
-    const TagMap& tags{record.Tags()};
-    for (const auto& [key, value] : tags.Entries()) {
-        if (keep(filter, key)) {
-            filtered.Append(key, value);
-        }
+    BamRecord record;
+    const std::span<const std::uint8_t> qualities{raw.Qual()};
+    const bool hasStoredQualities{std::ranges::any_of(qualities, HasStoredQuality)};
+
+    record.Name(std::string{raw.Name()})
+        .Flag(raw.Flag())
+        .RefId(raw.RefId())
+        .Pos(raw.Pos())
+        .MapQ(raw.MapQ())
+        .Cigar(std::vector<CigarOp>{raw.CigarOps().begin(), raw.CigarOps().end()})
+        .NextRefId(raw.NextRefId())
+        .NextPos(raw.NextPos())
+        .Tlen(raw.Tlen())
+        .Sequence(raw.Seq().ToString());
+
+    if (hasStoredQualities) {
+        record.Qualities(std::vector<std::uint8_t>{qualities.begin(), qualities.end()});
     }
-    record.Tags(std::move(filtered));
+
+    record.Tags(raw.ParseTagsFiltered(filter, keep));
     return record;
 }
 

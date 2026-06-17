@@ -62,9 +62,13 @@ TEST(CraiIndex, ParsesSamtoolsIndexFixture)
                                                "-1\t0\t1\t14169\t346\t17346\n")};
 
     const CraiIndex index = CraiIndex::FromFile(craiPath.Path());
-    ASSERT_EQ(std::size(index.Entries()), 4U);
+    // Four distinct reference ids: 0, 1, 2, -1 — one entry each.
+    ASSERT_EQ(std::size(index.EntriesForReference(0)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(1)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(2)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(-1)), 1U);
 
-    const CraiEntry& first = index.Entries().at(0);
+    const CraiEntry first{index.EntriesForReference(0).front()};
     EXPECT_EQ(first.SequenceId, 0);
     EXPECT_EQ(first.AlignmentStart, 999901);
     EXPECT_EQ(first.AlignmentSpan, 497);
@@ -72,7 +76,7 @@ TEST(CraiIndex, ParsesSamtoolsIndexFixture)
     EXPECT_EQ(first.SliceOffset, 336);
     EXPECT_EQ(first.SliceSize, 8553);
 
-    const CraiEntry& last = index.Entries().at(3);
+    const CraiEntry last{index.EntriesForReference(-1).front()};
     EXPECT_EQ(last.SequenceId, -1);
     EXPECT_EQ(last.AlignmentStart, 0);
     EXPECT_EQ(last.AlignmentSpan, 1);
@@ -92,15 +96,20 @@ TEST(CraiIndex, PreservesMultiReferenceDuplicateOffsets)
                                                "-1\t0\t1\t9000\t80\t1100\n")};
 
     const CraiIndex index = CraiIndex::FromFile(craiPath.Path());
-    ASSERT_EQ(std::size(index.Entries()), 6U);
+    // Three distinct reference ids: 0 (2 entries), 1 (2 entries), 2 (1 entry), -1 (1 entry).
+    ASSERT_EQ(std::size(index.EntriesForReference(0)), 2U);
+    ASSERT_EQ(std::size(index.EntriesForReference(1)), 2U);
+    ASSERT_EQ(std::size(index.EntriesForReference(2)), 1U);
+    ASSERT_EQ(std::size(index.EntriesForReference(-1)), 1U);
 
-    const CraiEntry& first = index.Entries().at(0);
-    const CraiEntry& second = index.Entries().at(1);
-    EXPECT_EQ(first.SequenceId, 0);
-    EXPECT_EQ(second.SequenceId, 1);
-    EXPECT_EQ(first.ContainerOffset, second.ContainerOffset);
-    EXPECT_EQ(first.SliceOffset, second.SliceOffset);
-    EXPECT_EQ(first.SliceSize, second.SliceSize);
+    // The first slice (rows 0 and 1 in the CRAI) interleaves ref0/ref1 and shares offsets.
+    const CraiEntry ref0first{index.EntriesForReference(0).front()};
+    const CraiEntry ref1first{index.EntriesForReference(1).front()};
+    EXPECT_EQ(ref0first.SequenceId, 0);
+    EXPECT_EQ(ref1first.SequenceId, 1);
+    EXPECT_EQ(ref0first.ContainerOffset, ref1first.ContainerOffset);
+    EXPECT_EQ(ref0first.SliceOffset, ref1first.SliceOffset);
+    EXPECT_EQ(ref0first.SliceSize, ref1first.SliceSize);
 }
 
 TEST(CraiIndex, EntriesForReferenceHandlesMappedAndUnmapped)
