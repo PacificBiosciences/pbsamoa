@@ -11,6 +11,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -78,6 +79,47 @@ std::optional<std::size_t> ToRecordLimit(std::size_t recordLimit)
         return std::nullopt;
     }
     return recordLimit;
+}
+
+// --- Scatter chunking: deterministic PRNG + permutation ---
+//
+// std::shuffle / std::uniform_int_distribution are not specified to be
+// reproducible across standard-library implementations, so scatter chunking uses
+// a self-contained generator to guarantee identical output on every toolchain.
+
+std::uint64_t SplitMix64Next(std::uint64_t& state)
+{
+    state += 0x9E3779B97F4A7C15ULL;
+    std::uint64_t z{state};
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+// Unbiased integer in [0, bound) via rejection sampling (bound >= 1).
+std::uint64_t BoundedRandom(std::uint64_t& state, std::uint64_t bound)
+{
+    const std::uint64_t reject{(std::uint64_t{0} - bound) % bound};  // 2^64 mod bound
+    std::uint64_t value{SplitMix64Next(state)};
+    while (value < reject) {
+        value = SplitMix64Next(state);
+    }
+    return value % bound;
+}
+
+// Deterministic Fisher-Yates permutation of [0, n) seeded by `seed`.
+std::vector<std::int32_t> DeterministicPermutation(std::int32_t n, std::uint64_t seed)
+{
+    std::vector<std::int32_t> perm(static_cast<std::size_t>(n));
+    std::iota(std::ranges::begin(perm), std::ranges::end(perm), 0);
+
+    std::uint64_t state{seed};
+    SplitMix64Next(state);  // diffuse the seed before drawing swaps
+    for (std::int32_t i{n - 1}; i > 0; --i) {
+        const auto j{BoundedRandom(state, static_cast<std::uint64_t>(i) + 1)};
+        std::ranges::swap(perm[static_cast<std::size_t>(i)], perm[j]);
+    }
+    return perm;
 }
 
 void AccumulatePoolMetrics(PoolMetrics& target, const PoolMetrics& source)
@@ -198,12 +240,23 @@ struct BamRawReader::Impl
         }
     };
 
+    // One scatter tile: where its first record lives, and how many records to read.
+    struct ScatterTile
+    {
+        VirtualOffset Begin;
+        std::size_t Count;
+    };
+
     std::filesystem::path path;
     std::unique_ptr<BgzfReader> bgzf;
 
     std::optional<std::size_t> recordLimit;
     std::size_t recordsRead{0};
     std::int32_t numZmws_{-1};
+    bool scatterActive{false};
+    std::vector<ScatterTile> scatterPlan;
+    std::size_t scatterIdx{0};
+    std::size_t scatterRemaining{0};
     std::unique_ptr<CollectionState> collection;
 
     bool AtRecordLimit() const
@@ -225,9 +278,18 @@ struct BamRawReader::Impl
         return *recordLimit - recordsRead;
     }
 
+    // Scatter chunking seeks once per tile; the BGZF pipeline restarts on every
+    // seek, so scatter always reads synchronously regardless of BgzfWorkers.
+    static std::size_t EffectiveBgzfWorkers(const BamRawReaderConfig& config)
+    {
+        const bool scatter{(config.ChunkNum > 0) && (config.TotalChunks > 0) &&
+                           (config.ChunkingMode == ChunkMode::SCATTER)};
+        return scatter ? std::size_t{0} : config.BgzfWorkers;
+    }
+
     explicit Impl(const std::filesystem::path& p, BamRawReaderConfig config)
         : path{p}
-        , bgzf{std::make_unique<BgzfReader>(p, config.BgzfWorkers)}
+        , bgzf{std::make_unique<BgzfReader>(p, EffectiveBgzfWorkers(config))}
         , recordLimit{ToRecordLimit(config.RecordLimit)}
     {
         if ((config.ChunkNum > 0) && (config.TotalChunks > 0) && config.Whitelist) {
@@ -237,7 +299,7 @@ struct BamRawReader::Impl
         }
 
         if ((config.ChunkNum > 0) && (config.TotalChunks > 0)) {
-            ApplyChunkConfig(config.ChunkNum, config.TotalChunks);
+            ApplyChunkConfig(config);
         }
     }
 
@@ -246,8 +308,11 @@ struct BamRawReader::Impl
     {
     }
 
-    void ApplyChunkConfig(std::int32_t chunkNum, std::int32_t totalChunks)
+    void ApplyChunkConfig(const BamRawReaderConfig& config)
     {
+        const std::int32_t chunkNum{config.ChunkNum};
+        const std::int32_t totalChunks{config.TotalChunks};
+
         if (totalChunks < 1) {
             throw std::invalid_argument{
                 std::format("TotalChunks must be >= 1, got {}", totalChunks)};
@@ -255,6 +320,11 @@ struct BamRawReader::Impl
         if ((chunkNum < 1) || (chunkNum > totalChunks)) {
             throw std::invalid_argument{
                 std::format("ChunkNum must be in [1, {}], got {}", totalChunks, chunkNum)};
+        }
+
+        if (config.ChunkingMode == ChunkMode::SCATTER) {
+            ApplyScatterChunkConfig(config);
+            return;
         }
 
         const ZmwIndex index{ZmwIndex::Open(path)};
@@ -287,6 +357,130 @@ struct BamRawReader::Impl
 
         const VirtualOffset startOffset(index.FirstOffset(unique[startIdx]));
         bgzf->Seek(startOffset);
+    }
+
+    // Builds the scatter plan for this chunk: partition the unique ZMWs into tiles
+    // of up to M consecutive ZMWs, deterministically shuffle the tiles, and take
+    // this chunk's balanced slice of the shuffled order. Stores the resulting tile
+    // byte-ranges; reading hops between them (ReadScattered). chunkNum/totalChunks
+    // are already validated by ApplyChunkConfig.
+    void ApplyScatterChunkConfig(const BamRawReaderConfig& config)
+    {
+        const std::int32_t chunkNum{config.ChunkNum};
+        const std::int32_t totalChunks{config.TotalChunks};
+        const std::int32_t tileZmws{config.ChunkTileZmws};
+
+        if (tileZmws < 1) {
+            throw std::invalid_argument{
+                std::format("ChunkTileZmws must be >= 1, got {}", tileZmws)};
+        }
+
+        const ZmwIndex index{ZmwIndex::Open(path)};
+        const std::vector<ZmwIdentity> unique{index.UniqueZmws()};
+        const std::int64_t numZmws{std::ssize(unique)};
+
+        if (numZmws == 0) {
+            throw std::runtime_error{std::format("ZMW index is empty for: {}", path.string())};
+        }
+
+        recordsRead = 0;
+        scatterPlan.clear();
+        scatterIdx = 0;
+
+        const std::int64_t tile{tileZmws};
+        const std::int64_t numTiles{(numZmws + tile - 1) / tile};  // ceil
+        const std::vector<std::int32_t> perm{
+            DeterministicPermutation(static_cast<std::int32_t>(numTiles), config.ChunkSeed)};
+
+        // This chunk owns shuffled positions [lo, hi) (balanced floor-division slice).
+        const std::int64_t lo{(numTiles * (chunkNum - 1)) / totalChunks};
+        const std::int64_t hi{(numTiles * chunkNum) / totalChunks};
+
+        std::vector<std::int32_t> chunkTiles{std::ranges::begin(perm) + lo,
+                                             std::ranges::begin(perm) + hi};
+        std::ranges::sort(chunkTiles);  // file order -> mostly sequential reads
+
+        // Merge file-adjacent tiles (consecutive indices) into one Seek + one
+        // contiguous read.
+        std::int32_t zmwCount{0};
+        for (std::size_t i{0}; i < std::size(chunkTiles);) {
+            std::size_t j{i + 1};
+            while (j < std::size(chunkTiles) && chunkTiles[j] == chunkTiles[j - 1] + 1) {
+                ++j;
+            }
+
+            // run = chunkTiles[i, j): tile indices [chunkTiles[i], chunkTiles[j-1]].
+            const std::int64_t firstZmw{static_cast<std::int64_t>(chunkTiles[i]) * tile};
+            const std::int64_t lastZmw{
+                std::min((static_cast<std::int64_t>(chunkTiles[j - 1]) + 1) * tile, numZmws)};
+            zmwCount += static_cast<std::int32_t>(lastZmw - firstZmw);
+
+            const std::span<const ZmwIdentity> runZmwSpan{
+                std::data(unique) + firstZmw, static_cast<std::size_t>(lastZmw - firstZmw)};
+            const VirtualOffset begin(
+                index.FirstOffset(unique[static_cast<std::size_t>(firstZmw)]));
+            scatterPlan.push_back(ScatterTile{begin, std::size(index.Find(runZmwSpan))});
+
+            i = j;
+        }
+
+        numZmws_ = zmwCount;
+
+        if (std::empty(scatterPlan)) {
+            recordLimit = std::size_t{0};  // empty chunk: AtRecordLimit() short-circuits
+            return;
+        }
+
+        scatterActive = true;
+        scatterIdx = 0;
+        scatterRemaining = scatterPlan.front().Count;
+        bgzf->Seek(scatterPlan.front().Begin);
+    }
+
+    // Reads the next record in the scatter plan, hopping (Seek) to the next tile
+    // once the current tile's record count is exhausted. Returns nullopt at the
+    // end of the plan.
+    std::optional<RawRecord> ReadScattered()
+    {
+        while (true) {
+            if (scatterRemaining == 0) {
+                if ((scatterIdx + 1) >= std::size(scatterPlan)) {
+                    return std::nullopt;
+                }
+                ++scatterIdx;
+                bgzf->Seek(scatterPlan[scatterIdx].Begin);
+                scatterRemaining = scatterPlan[scatterIdx].Count;
+                continue;
+            }
+            std::optional<RawRecord> record{bgzf->ReadRecord()};
+            if (!record) {
+                return std::nullopt;
+            }
+            --scatterRemaining;
+            return record;
+        }
+    }
+
+    // Batch counterpart of ReadScattered (the BamRecordReader / pre-decode path).
+    // Each batch stays within one run: the record budget is capped at the run's
+    // remaining count, so the contiguous read never crosses a run boundary. The
+    // next call seeks to the following run.
+    std::optional<RawRecordBatch> ReadBatchScattered(ByteLimit limit)
+    {
+        while (scatterRemaining == 0) {
+            if ((scatterIdx + 1) >= std::size(scatterPlan)) {
+                return std::nullopt;
+            }
+            ++scatterIdx;
+            bgzf->Seek(scatterPlan[scatterIdx].Begin);
+            scatterRemaining = scatterPlan[scatterIdx].Count;
+        }
+        std::size_t recordCount{0};
+        std::optional<RawRecordBatch> batch{
+            ReadBatchFromReader(*bgzf, limit, scatterRemaining, &recordCount)};
+        scatterRemaining -= recordCount;
+        recordsRead += recordCount;
+        return batch;
     }
 
     Impl(const Impl&) = delete;
@@ -336,7 +530,8 @@ std::optional<RawRecord> BamRawReader::ReadRecord()
     }
 
     if (!impl_->collection) {
-        auto result{impl_->bgzf->ReadRecord()};
+        std::optional<RawRecord> result{impl_->scatterActive ? impl_->ReadScattered()
+                                                             : impl_->bgzf->ReadRecord()};
         if (result) {
             ++impl_->recordsRead;
         }
@@ -363,6 +558,10 @@ std::optional<RawRecord> BamRawReader::ReadRecord()
 
 std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 {
+    if (impl_->scatterActive) {
+        return impl_->ReadBatchScattered(limit);
+    }
+
     if (impl_->AtRecordLimit()) {
         return std::nullopt;
     }

@@ -29,17 +29,37 @@ BamRawReader reader{"input.bam", BamRawReaderConfig{.RecordLimit = 1000}};
 
 // Read chunk 2 of 4 (requires .zmi or .pbi alongside the BAM; ChunkNum is 1-based)
 BamRawReader reader{"input.bam", BamRawReaderConfig{.ChunkNum = 2, .TotalChunks = 4}};
+
+// Scatter chunk 2 of 4: a chaotic-but-deterministic sample across the whole file
+BamRawReader reader{"input.bam", BamRawReaderConfig{.ChunkNum = 2,
+                                                    .TotalChunks = 4,
+                                                    .ChunkingMode = ChunkMode::SCATTER,
+                                                    .ChunkTileZmws = 1,
+                                                    .ChunkSeed = 0}};
 ```
 
 `BamRawReaderConfig` fields:
 
-|     Field     | Default |                  Description                  |
-| ------------- | ------- | --------------------------------------------- |
-| `BgzfWorkers` | `0`     | BGZF decompression threads (0 = synchronous)  |
-| `RecordLimit` | `0`     | Stop after N records (0 = unlimited)          |
-| `ChunkNum`    | `0`     | 1-based chunk number (0 = no chunking)        |
-| `TotalChunks` | `0`     | Total chunk count (0 = no chunking)           |
-| `Whitelist`   | `{}`    | Optional `ZmwWhitelist` for whitelist queries |
+|      Field      |    Default    |                    Description                     |
+| --------------- | ------------- | -------------------------------------------------- |
+| `BgzfWorkers`   | `0`           | BGZF decompression threads (0 = synchronous)       |
+| `RecordLimit`   | `0`           | Stop after N records (0 = unlimited)               |
+| `ChunkNum`      | `0`           | 1-based chunk number (0 = no chunking)             |
+| `TotalChunks`   | `0`           | Total chunk count (0 = no chunking)                |
+| `ChunkingMode`  | `CONTIGUOUS`  | `CONTIGUOUS` ZMW ranges, or `SCATTER` (see below)  |
+| `ChunkTileZmws` | `1`           | Scatter only: read up to M consecutive ZMWs/seek   |
+| `ChunkSeed`     | `0`           | Scatter only: deterministic shuffle seed           |
+| `Whitelist`     | `{}`          | Optional `ZmwWhitelist` for whitelist queries      |
+
+Both chunk modes are ZMW-keyed (a ZMW's records stay together) and partition the
+file exactly: all `TotalChunks` chunks together visit every record once.
+`CONTIGUOUS` gives each chunk one contiguous ZMW range. `SCATTER` assigns tiles
+of up to `ChunkTileZmws` consecutive ZMWs to chunks via a seeded balanced
+shuffle, so each chunk samples ZMWs across the whole file; the same
+`(file, ChunkNum, TotalChunks, ChunkTileZmws, ChunkSeed)` reproduces the same
+chunk on every platform. Scatter reads synchronously (it ignores `BgzfWorkers`);
+both `Records()` and `ReadBatch` honor the scatter plan, so `BamRecordReader`
+works in scatter mode too.
 
 ### Header access
 

@@ -66,12 +66,25 @@ constexpr ByteLimit operator""_KiB(unsigned long long value) { return ByteLimit{
 
 }  // namespace Literals
 
+/// \brief How ChunkNum/TotalChunks partition the input.
+enum class ChunkMode : std::uint8_t
+{
+    CONTIGUOUS,  ///< Contiguous ZMW-range slices (default; unchanged behavior).
+    SCATTER,     ///< Seeded balanced shuffle of M-ZMW tiles; samples across the file.
+};
+
 struct BamRawReaderConfig
 {
     std::size_t BgzfWorkers{0};
     std::size_t RecordLimit{0};   // 0 = unlimited; >0 = stop after N records
     std::int32_t ChunkNum{0};     // 0 = no chunking; 1-based chunk number
     std::int32_t TotalChunks{0};  // 0 = no chunking; total number of chunks
+    // Scatter-chunking knobs (ignored unless ChunkingMode == SCATTER):
+    ChunkMode ChunkingMode{ChunkMode::CONTIGUOUS};
+    std::int32_t ChunkTileZmws{100};  // M: tile = up to M consecutive ZMWs (>= 1)
+    std::uint64_t ChunkSeed{42};      // deterministic shuffle seed
+    // Scatter reads synchronously regardless of BgzfWorkers (multi-seek would
+    // otherwise restart the BGZF pipeline per seek).
     std::optional<ZmwWhitelist> Whitelist{};
 };
 

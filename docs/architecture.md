@@ -356,6 +356,18 @@ while (auto view = reader.ReadRecord()) { /* … */ }
 proportionally, then seeks to `ZmwIndex::FirstOffset()` and sets an internal
 `RecordLimit`.
 
+Setting `ChunkingMode = ChunkMode::SCATTER` keeps the same exact-partition
+guarantee but spreads each chunk's ZMWs across the whole file (a
+chaotic-but-deterministic sample) instead of one contiguous range. The unique
+ZMWs are grouped into tiles of up to `ChunkTileZmws` consecutive ZMWs, the tiles
+are shuffled by a seeded balanced Fisher–Yates permutation (`ChunkSeed`), and
+this chunk takes its slice of the shuffled order. Each tile is read as a seek to
+its first record plus its exact record count (counts, not virtual-offset
+boundaries, because sync `BgzfReader::Tell()` is block-granular). Scatter reads
+synchronously; both `ReadRecord` and `ReadBatch` honor the scatter plan (each
+batch stays within one tile), so the `BamRecordReader` pre-decode path works in
+scatter mode as well.
+
 `RecordLimit` is also available directly to stop after an exact record count
 at a specific file position:
 

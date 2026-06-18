@@ -8,14 +8,18 @@
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/index/ZmwWhitelist.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
+#include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/ZmiBamWriter.hpp>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <format>
+#include <map>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -598,6 +602,287 @@ TEST(BamRawReader, QueryEmptyRegion)
         ++count;
     }
     EXPECT_EQ(count, 0u);
+}
+
+// --- Scatter (chaotic-deterministic) chunking ---
+
+namespace {
+
+// Builds a BAM (+ ZMI) at `path`: `numZmws` ZMWs in ascending hole-number order,
+// `subreadsPerZmw` records each. Hole numbers are 0..numZmws-1 so that file order
+// equals ascending hole number (an "ordered" fixture). Record names encode the
+// hole and subread index.
+void BuildScatterBam(const std::filesystem::path& path, std::int32_t numZmws,
+                     std::int32_t subreadsPerZmw)
+{
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.SetSortOrder("unknown");
+    header.AddReferenceSequence(ReferenceSequence{"ref", 1000});
+
+    ZmiBamWriter writer{path, header};
+    for (std::int32_t hole = 0; hole < numZmws; ++hole) {
+        for (std::int32_t sub = 0; sub < subreadsPerZmw; ++sub) {
+            BamRecord rec;
+            rec.Name(std::format("movie/{}/{}_{}", hole, sub * 100, (sub + 1) * 100))
+                .Flag(0)
+                .RefId(0)
+                .Pos(0)
+                .MapQ(30)
+                .Cigar({CigarOp{CigarOpType::M, 4}})
+                .Sequence("ACGT")
+                .Qualities({30, 30, 30, 30});
+            writer.Write(rec);
+        }
+    }
+}
+
+BamRawReaderConfig ScatterConfig(std::int32_t chunkNum, std::int32_t totalChunks,
+                                 std::int32_t tileZmws, std::uint64_t seed)
+{
+    return BamRawReaderConfig{
+        .ChunkNum = chunkNum,
+        .TotalChunks = totalChunks,
+        .ChunkingMode = ChunkMode::SCATTER,
+        .ChunkTileZmws = tileZmws,
+        .ChunkSeed = seed,
+    };
+}
+
+std::vector<std::string> ReadChunkNames(const std::filesystem::path& path,
+                                        const BamRawReaderConfig& config)
+{
+    BamRawReader reader{path, config};
+    std::vector<std::string> names;
+    for (const auto& view : reader.Records()) {
+        names.emplace_back(view.Name());
+    }
+    return names;
+}
+
+std::vector<std::string> WholeFileNames(const std::filesystem::path& path)
+{
+    return ReadChunkNames(path, BamRawReaderConfig{});
+}
+
+// Parses the hole number out of "movie/<hole>/<a>_<b>".
+std::int32_t HoleOf(std::string_view name)
+{
+    const std::size_t first{name.find('/')};
+    const std::size_t second{name.find('/', first + 1)};
+    const std::string_view holeText{name.substr(first + 1, second - first - 1)};
+    std::int32_t hole{0};
+    std::from_chars(holeText.data(), holeText.data() + std::size(holeText), hole);
+    return hole;
+}
+
+// Sorted distinct hole numbers per chunk for a scatter run.
+std::vector<std::vector<std::int32_t>> ScatterHolePartition(const std::filesystem::path& path,
+                                                            std::int32_t totalChunks,
+                                                            std::int32_t tileZmws,
+                                                            std::uint64_t seed)
+{
+    std::vector<std::vector<std::int32_t>> partition;
+    for (std::int32_t chunk = 1; chunk <= totalChunks; ++chunk) {
+        const auto names{ReadChunkNames(path, ScatterConfig(chunk, totalChunks, tileZmws, seed))};
+        std::vector<std::int32_t> holes;
+        for (const auto& name : names) {
+            holes.push_back(HoleOf(name));
+        }
+        std::ranges::sort(holes);
+        holes.erase(std::ranges::begin(std::ranges::unique(holes)), std::ranges::end(holes));
+        partition.push_back(std::move(holes));
+    }
+    return partition;
+}
+
+}  // namespace
+
+TEST(BamRawReaderScatter, CoversEveryRecordExactlyOnceSubreads)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_subreads");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/2);
+
+    const std::int32_t totalChunks{4};
+    std::vector<std::string> all;
+    for (std::int32_t chunk = 1; chunk <= totalChunks; ++chunk) {
+        const auto names{ReadChunkNames(path, ScatterConfig(chunk, totalChunks, 1, 0))};
+        all.insert(std::ranges::end(all), std::ranges::begin(names), std::ranges::end(names));
+    }
+    std::ranges::sort(all);
+
+    auto expected{WholeFileNames(path)};
+    std::ranges::sort(expected);
+
+    EXPECT_EQ(std::size(all), std::size(expected));                     // nothing dropped
+    EXPECT_EQ(std::ranges::adjacent_find(all), std::ranges::end(all));  // no duplicates
+    EXPECT_EQ(all, expected);                                           // exact same record set
+}
+
+TEST(BamRawReaderScatter, CoversEveryRecordExactlyOnceHiFi)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_hifi");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/1);
+
+    const std::int32_t totalChunks{5};
+    std::vector<std::string> all;
+    for (std::int32_t chunk = 1; chunk <= totalChunks; ++chunk) {
+        const auto names{ReadChunkNames(path, ScatterConfig(chunk, totalChunks, 1, 0))};
+        all.insert(std::ranges::end(all), std::ranges::begin(names), std::ranges::end(names));
+    }
+    std::ranges::sort(all);
+
+    auto expected{WholeFileNames(path)};
+    std::ranges::sort(expected);
+
+    EXPECT_EQ(std::ranges::adjacent_find(all), std::ranges::end(all));
+    EXPECT_EQ(all, expected);
+}
+
+TEST(BamRawReaderScatter, IsDeterministicForSameSeed)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_determinism");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/2);
+
+    for (std::int32_t chunk = 1; chunk <= 4; ++chunk) {
+        const auto first{ReadChunkNames(path, ScatterConfig(chunk, 4, 1, 42))};
+        const auto second{ReadChunkNames(path, ScatterConfig(chunk, 4, 1, 42))};
+        EXPECT_EQ(first, second);
+    }
+}
+
+TEST(BamRawReaderScatter, SamplesAcrossOrderedFile)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_ordered");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/1);
+
+    // Contiguous chunk 1 of 4 would be the first quarter of the file: holes {0,1,2}.
+    // Scatter must spread holes across the whole file, so the partition differs.
+    const auto scatter{ScatterHolePartition(path, 4, 1, 7)};
+
+    std::vector<std::vector<std::int32_t>> contiguous;
+    for (std::int32_t chunk = 1; chunk <= 4; ++chunk) {
+        const BamRawReaderConfig cfg{.ChunkNum = chunk, .TotalChunks = 4};  // CONTIGUOUS default
+        const auto names{ReadChunkNames(path, cfg)};
+        std::vector<std::int32_t> holes;
+        for (const auto& name : names) {
+            holes.push_back(HoleOf(name));
+        }
+        std::ranges::sort(holes);
+        contiguous.push_back(std::move(holes));
+    }
+
+    EXPECT_NE(scatter, contiguous);
+    // First contiguous chunk is exactly {0,1,2}; scatter's first chunk must not be.
+    EXPECT_NE(scatter.front(), (std::vector<std::int32_t>{0, 1, 2}));
+}
+
+TEST(BamRawReaderScatter, DifferentSeedsChangeAssignment)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_seed");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/1);
+
+    const auto seedA{ScatterHolePartition(path, 4, 1, 1)};
+    const auto seedB{ScatterHolePartition(path, 4, 1, 2)};
+    EXPECT_NE(seedA, seedB);
+}
+
+TEST(BamRawReaderScatter, KeepsSubreadsOfSameZmwTogether)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_zmw_together");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/3);
+
+    std::map<std::int32_t, std::int32_t> holeToChunk;
+    for (std::int32_t chunk = 1; chunk <= 4; ++chunk) {
+        const auto names{ReadChunkNames(path, ScatterConfig(chunk, 4, 1, 9))};
+        std::map<std::int32_t, std::int32_t> recordsThisChunk;
+        for (const auto& name : names) {
+            const std::int32_t hole{HoleOf(name)};
+            // A ZMW must not be split across chunks.
+            const auto [it, inserted]{holeToChunk.try_emplace(hole, chunk)};
+            if (!inserted) {
+                EXPECT_EQ(it->second, chunk) << "ZMW " << hole << " split across chunks";
+            }
+            ++recordsThisChunk[hole];
+        }
+        // Every ZMW present in this chunk must bring all 3 of its subreads.
+        for (const auto& [hole, count] : recordsThisChunk) {
+            EXPECT_EQ(count, 3) << "ZMW " << hole << " missing subreads";
+        }
+    }
+    EXPECT_EQ(std::size(holeToChunk), 12u);  // all ZMWs covered
+}
+
+TEST(BamRawReaderScatter, TileLargerThanInputPutsAllInOneChunk)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_big_tile");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/5, /*subreadsPerZmw=*/1);
+
+    const std::int32_t totalChunks{3};
+    std::int32_t nonEmpty{0};
+    std::size_t totalRecords{0};
+    for (std::int32_t chunk = 1; chunk <= totalChunks; ++chunk) {
+        const auto names{ReadChunkNames(path, ScatterConfig(chunk, totalChunks, /*M=*/100, 0))};
+        if (!std::empty(names)) {
+            ++nonEmpty;
+        }
+        totalRecords += std::size(names);
+    }
+    EXPECT_EQ(nonEmpty, 1);       // one tile -> exactly one non-empty chunk
+    EXPECT_EQ(totalRecords, 5u);  // still every record
+}
+
+TEST(BamRawReaderScatter, RejectsNonPositiveTile)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_bad_tile");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/4, /*subreadsPerZmw=*/1);
+
+    EXPECT_THROW(BamRawReader(path, ScatterConfig(1, 2, /*M=*/0, 0)), std::invalid_argument);
+}
+
+// BamRecordReader pre-decodes via ReadBatch (a background producer). This is the
+// path pbmm2's --chunk uses, so scatter must work through it too (not just
+// Records()/ReadRecord).
+TEST(BamRawReaderScatter, CoversEveryRecordExactlyOnceViaRecordReader)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_record_reader");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/2);
+
+    const std::int32_t totalChunks{4};
+    std::vector<std::string> all;
+    for (std::int32_t chunk = 1; chunk <= totalChunks; ++chunk) {
+        BamRecordReaderConfig cfg;
+        cfg.RawReaderConfig = ScatterConfig(chunk, totalChunks, 1, 7);
+        BamRecordReader reader{path, cfg};
+        while (const auto record = reader.ReadRecord()) {
+            all.emplace_back(record->Name());
+        }
+    }
+    std::ranges::sort(all);
+
+    auto expected{WholeFileNames(path)};
+    std::ranges::sort(expected);
+
+    EXPECT_EQ(std::ranges::adjacent_find(all), std::ranges::end(all));  // no duplicates
+    EXPECT_EQ(all, expected);                                           // exact partition
 }
 
 }  // namespace Samoa

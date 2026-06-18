@@ -47,6 +47,7 @@ if cram_script.found()
         'sort_spill',
         'zmi_build',
         'zmi_chunk',
+        'zmi_chunk_scatter',
         'zmi_index',
         'zmi_query',
     ]

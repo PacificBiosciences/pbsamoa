@@ -129,12 +129,30 @@ pbsamoa zmi-query movie.bam 12345
 
 ### chunk — partitioned reading
 
-Read a proportional partition of a BAM file, divided by unique ZMWs.
+Read a partition of a BAM file, divided by unique ZMWs. Records of a ZMW always
+stay together (works for subreads and HiFi), and running all `TOTAL` chunks
+visits every record exactly once.
 
 ```sh
 pbsamoa chunk movie.bam 1 4   # chunk 1 of 4 (1-based)
 pbsamoa chunk movie.bam 4 4   # chunk 4 of 4 (last)
 ```
+
+By default each chunk is one contiguous ZMW range. Use `--mode scatter` for a
+chaotic-but-deterministic partition that samples ZMWs across the whole file —
+useful when a single chunk should be a representative sample of the dataset:
+
+```sh
+pbsamoa chunk movie.bam 1 4 --mode scatter            # spread across the file
+pbsamoa chunk movie.bam 1 4 --mode scatter --tile 64  # 64 ZMWs/seek (fewer seeks)
+pbsamoa chunk movie.bam 1 4 --mode scatter --seed 7   # reproducible shuffle seed
+```
+
+Scatter assigns tiles of up to `M` consecutive ZMWs (`--tile M`, default 1) to
+chunks via a seeded balanced shuffle (`--seed S`, default 0). The same
+`(file, CHUNK, TOTAL, M, S)` always yields the same chunk on every platform.
+Larger `M` reads more ZMWs per seek (less disk seeking, coarser sampling).
+Both modes require a ZMW index (`.zmi`/`.pbi`); see `zmi-build`.
 
 ### bench — benchmarks
 
