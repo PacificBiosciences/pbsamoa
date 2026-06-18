@@ -11,9 +11,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <vector>
 
 #include <cstdint>
@@ -373,6 +375,49 @@ TEST(BaiIndex, BuildThrowsWhenMappedRecordsResumeAfterUnmappedTail)
     }
 
     EXPECT_THROW(BaiIndex::Build(bamPath), std::runtime_error);
+}
+
+TEST(BaiIndex, BuildParallelMatchesSerialBytes)
+{
+    // Synthesize a coordinate-sorted BAM large enough to span many BGZF blocks so
+    // the parallel path crosses multiple inflate windows (and records that span a
+    // window boundary). pos is non-decreasing and clamped within the reference.
+    const tests::TempDirGuard tempDir{"bai_parallel_equiv"};
+    const auto bamPath = tempDir.File("parallel_equiv.bam");
+    {
+        BamWriter writer{bamPath, MakeCoordinateHeader()};
+        for (std::int32_t i{0}; i < 50000; ++i) {
+            const std::int32_t pos{std::min<std::int32_t>(i / 100, 980)};
+            writer.Write(MakeMappedRecord("read-" + std::to_string(i), pos));
+        }
+    }
+
+    const auto readBytes = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary | std::ios::ate};
+        const std::streamsize size{in.tellg()};
+        in.seekg(0);
+        std::vector<char> bytes(static_cast<std::size_t>(size));
+        in.read(std::data(bytes), size);
+        return bytes;
+    };
+
+    const BaiIndex serial{BaiIndex::Build(bamPath, 1)};
+    const auto serialBai = tempDir.File("serial.bai");
+    serial.ToFile(serialBai);
+    const std::vector<char> serialBytes{readBytes(serialBai)};
+
+    // The index must be byte-identical regardless of worker count; determinism is
+    // the core correctness guarantee of the parallel build.
+    for (const std::size_t workers : {std::size_t{2}, std::size_t{3}, std::size_t{8}}) {
+        const BaiIndex parallel{BaiIndex::Build(bamPath, workers)};
+        const auto parallelBai = tempDir.File("parallel_" + std::to_string(workers) + ".bai");
+        parallel.ToFile(parallelBai);
+
+        EXPECT_EQ(readBytes(parallelBai), serialBytes) << "workers=" << workers;
+        EXPECT_EQ(parallel.NumReferences(), serial.NumReferences()) << "workers=" << workers;
+        EXPECT_EQ(parallel.MappedCount(), serial.MappedCount()) << "workers=" << workers;
+        EXPECT_EQ(parallel.UnmappedCount(), serial.UnmappedCount()) << "workers=" << workers;
+    }
 }
 
 }  // namespace Samoa

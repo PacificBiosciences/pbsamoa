@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
@@ -41,8 +42,11 @@ public:
     void ToFile(const std::filesystem::path& path) const;
 
     /// \brief Build a BAI index by scanning a coordinate-sorted BAM file.
+    /// \param[in] bamPath    coordinate-sorted BAM to index
+    /// \param[in] numWorkers parallel BGZF-inflate workers; 0 or 1 = single-threaded.
+    ///            The index is byte-identical regardless of numWorkers (deterministic).
     /// \throws std::runtime_error if the BAM header or record stream is not coordinate-sorted
-    static BaiIndex Build(const std::filesystem::path& bamPath);
+    static BaiIndex Build(const std::filesystem::path& bamPath, std::size_t numWorkers = 0);
 
     /// \brief Query the index for chunks overlapping [beg, end) on refId.
     ///

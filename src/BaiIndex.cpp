@@ -1,11 +1,16 @@
 #include <pbsamoa/index/BaiIndex.hpp>
 
 #include "BinaryUtils.hpp"
+#include "LibdeflateUtils.hpp"
 
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
+
+#include <pbcopper/parallel/FireAndForgetIndexed.h>
+
+#include <libdeflate.h>
 
 #include <algorithm>
 #include <array>
@@ -13,6 +18,7 @@
 #include <format>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -37,6 +43,11 @@ constexpr std::array<std::byte, 4> BAI_MAGIC{
     std::byte{'\1'},
 };
 constexpr std::size_t BAM_FIXED_FIELDS_SIZE{32};
+constexpr std::size_t BGZF_BLOCK_HEADER_SIZE{18U};
+constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U};  // BSIZE is 16-bit: blockSize <= 65536
+// Compressed blocks inflated per worker before the consumer drains the window.
+// Bounds memory to numWorkers * WINDOW_BLOCKS_PER_WORKER * (64 KiB + 64 KiB).
+constexpr std::size_t WINDOW_BLOCKS_PER_WORKER{4U};
 
 struct BlockSegment
 {
@@ -182,8 +193,223 @@ void CompactAccumulator(std::vector<std::byte>& recordAccum, std::vector<BlockSe
     accumPos = 0;
 }
 
-bool EnsureAccumulatedBytes(BgzfReader& bgzf, std::vector<std::byte>& blockBuf,
-                            std::vector<std::byte>& recordAccum,
+/// \brief One decompressed BGZF block tagged with the compressed file offset of
+///        its start. The data span is valid only until the next Next() call.
+struct DecodedBlock
+{
+    std::uint64_t coffset{0};
+    std::span<const std::byte> data{};
+};
+
+/// \brief Ordered source of decompressed BGZF blocks. Build() consumes blocks
+///        through this seam, so the (coffset, bytes) contract — and therefore the
+///        virtual-offset arithmetic in VirtualOffsetAt() — is identical for the
+///        serial and parallel implementations; only the decompression differs.
+class BlockSource
+{
+public:
+    BlockSource() = default;
+    BlockSource(const BlockSource&) = delete;
+    BlockSource& operator=(const BlockSource&) = delete;
+    virtual ~BlockSource() = default;
+
+    /// \brief Next non-empty block in file order, or nullopt at clean EOF.
+    /// \throws std::runtime_error on a truncated or corrupt block.
+    virtual std::optional<DecodedBlock> Next() = 0;
+};
+
+/// \brief Single-threaded source wrapping BgzfReader's synchronous ReadBlock().
+///        Tell() reports the start offset of the block just read, matching the
+///        coffset contract; this preserves the original Build() behaviour exactly.
+class SerialBlockSource final : public BlockSource
+{
+public:
+    explicit SerialBlockSource(const std::filesystem::path& path)
+        : reader_{path}, buffer_(MAX_DECOMPRESSED_BLOCK_SIZE)
+    {
+    }
+
+    std::optional<DecodedBlock> Next() override
+    {
+        const std::optional<std::size_t> bytesRead{
+            reader_.ReadBlock(std::span<std::byte>{buffer_})};
+        if (!bytesRead || (*bytesRead == 0)) {
+            return std::nullopt;
+        }
+        return DecodedBlock{reader_.Tell().BlockOffset(),
+                            std::span<const std::byte>{buffer_}.first(*bytesRead)};
+    }
+
+private:
+    BgzfReader reader_;
+    std::vector<std::byte> buffer_;
+};
+
+/// \brief Multi-threaded source: frames compressed BGZF blocks sequentially (cheap
+///        I/O), then inflates a bounded window of them in parallel. Blocks are
+///        emitted in file order with their coffsets, so the resulting index is
+///        byte-identical to the serial path for any worker count (deterministic).
+class ParallelBlockSource final : public BlockSource
+{
+    struct Slot
+    {
+        std::uint64_t coffset{0};
+        std::vector<std::byte> compressed;
+        BgzfBlockInfo info{};
+        std::uint32_t isize{0};
+        std::uint32_t expectedCrc{0};
+        std::vector<std::byte> out;
+        std::size_t outSize{0};
+    };
+
+public:
+    ParallelBlockSource(const std::filesystem::path& path, std::size_t numWorkers)
+        : numWorkers_{std::max<std::size_t>(numWorkers, 1)}
+        , file_{path, std::ios::binary}
+        , slots_(numWorkers_ * WINDOW_BLOCKS_PER_WORKER)
+    {
+        if (!file_) {
+            throw std::runtime_error{"Cannot open BAM file: " + path.string()};
+        }
+        decompressors_.reserve(numWorkers_);
+        for (std::size_t i{0}; i < numWorkers_; ++i) {
+            LibdeflateDecompressorPtr decompressor{libdeflate_alloc_decompressor()};
+            if (!decompressor) {
+                throw std::runtime_error{"Failed to allocate libdeflate decompressor"};
+            }
+            decompressors_.push_back(std::move(decompressor));
+        }
+        for (Slot& slot : slots_) {
+            slot.compressed.resize(MAX_COMPRESSED_BLOCK_SIZE);
+            slot.out.resize(MAX_DECOMPRESSED_BLOCK_SIZE);
+        }
+    }
+
+    std::optional<DecodedBlock> Next() override
+    {
+        if (cursor_ >= ready_) {
+            FillWindow();
+            if (ready_ == 0) {
+                return std::nullopt;
+            }
+        }
+        const Slot& slot{slots_[cursor_]};
+        ++cursor_;
+        return DecodedBlock{slot.coffset, std::span<const std::byte>{slot.out}.first(slot.outSize)};
+    }
+
+private:
+    // Read the next compressed block into slot. Returns false at physical EOF.
+    // Empty blocks (ISIZE == 0: the EOF marker or appended-file boundaries) are
+    // skipped here, mirroring BgzfReader::ReadBlockSync.
+    bool ReadCompressedBlock(Slot& slot)
+    {
+        while (true) {
+            const std::uint64_t coffset{static_cast<std::uint64_t>(file_.tellg())};
+            file_.read(reinterpret_cast<char*>(std::data(slot.compressed)),
+                       static_cast<std::streamsize>(BGZF_BLOCK_HEADER_SIZE));
+            const std::streamsize headerRead{file_.gcount()};
+            if (headerRead == 0) {
+                return false;  // physical EOF
+            }
+            if (headerRead < static_cast<std::streamsize>(BGZF_BLOCK_HEADER_SIZE)) {
+                throw std::runtime_error{"Truncated BGZF block header during BAI build"};
+            }
+
+            const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(
+                std::span<const std::byte>{slot.compressed}.first(BGZF_BLOCK_HEADER_SIZE))};
+            if (!info) {
+                throw std::runtime_error{"Invalid BGZF block header during BAI build"};
+            }
+
+            const std::size_t blockSize{info->blockSize};
+            if ((blockSize < BGZF_BLOCK_HEADER_SIZE) || (blockSize > MAX_COMPRESSED_BLOCK_SIZE)) {
+                throw std::runtime_error{"Invalid BGZF block size during BAI build"};
+            }
+
+            const std::streamsize remaining{static_cast<std::streamsize>(blockSize) -
+                                            static_cast<std::streamsize>(BGZF_BLOCK_HEADER_SIZE)};
+            file_.read(reinterpret_cast<char*>(std::data(slot.compressed) + BGZF_BLOCK_HEADER_SIZE),
+                       remaining);
+            if (file_.gcount() < remaining) {
+                throw std::runtime_error{"Truncated BGZF block during BAI build"};
+            }
+
+            const std::uint32_t isize{ReadU32LE(std::data(slot.compressed) + blockSize - 4U)};
+            if (isize == 0U) {
+                continue;  // empty block — skip
+            }
+
+            slot.coffset = coffset;
+            slot.info = *info;
+            slot.isize = isize;
+            slot.expectedCrc = ReadU32LE(std::data(slot.compressed) + blockSize - 8U);
+            return true;
+        }
+    }
+
+    void InflateSlot(Parallel::FireAndForgetIndexed::Index workerIdx, std::size_t slotIdx)
+    {
+        Slot& slot{slots_[slotIdx]};
+        std::size_t actualOut{0};
+        const libdeflate_result result{libdeflate_deflate_decompress(
+            decompressors_[static_cast<std::size_t>(workerIdx)].get(),
+            std::data(slot.compressed) + slot.info.compressedDataOffset,
+            slot.info.compressedDataSize, std::data(slot.out), slot.isize, &actualOut)};
+        if (result != LIBDEFLATE_SUCCESS) {
+            throw std::runtime_error{"BGZF decompression failed during BAI build"};
+        }
+        if (libdeflate_crc32(0, std::data(slot.out), actualOut) != slot.expectedCrc) {
+            throw std::runtime_error{"BGZF CRC32 mismatch during BAI build"};
+        }
+        slot.outSize = actualOut;
+    }
+
+    void FillWindow()
+    {
+        cursor_ = 0;
+        ready_ = 0;
+        while (ready_ < std::size(slots_)) {
+            if (!ReadCompressedBlock(slots_[ready_])) {
+                break;
+            }
+            ++ready_;
+        }
+        if (ready_ == 0) {
+            return;
+        }
+
+        // Inflate the framed blocks across numWorkers_ threads. Each worker owns a
+        // private decompressor (indexed by its worker id) and writes a disjoint
+        // slot, so there are no data races. Finalize() joins every task and
+        // rethrows the first exception (corruption fails loud).
+        Parallel::FireAndForgetIndexed pool{static_cast<std::int32_t>(numWorkers_)};
+        for (std::size_t i{0}; i < ready_; ++i) {
+            pool.ProduceWith([this](Parallel::FireAndForgetIndexed::Index workerIdx,
+                                    std::size_t slotIdx) { InflateSlot(workerIdx, slotIdx); },
+                             i);
+        }
+        pool.Finalize();
+    }
+
+    std::size_t numWorkers_;
+    std::ifstream file_;
+    std::vector<LibdeflateDecompressorPtr> decompressors_;
+    std::vector<Slot> slots_;
+    std::size_t ready_{0};
+    std::size_t cursor_{0};
+};
+
+std::unique_ptr<BlockSource> MakeBlockSource(const std::filesystem::path& path,
+                                             std::size_t numWorkers)
+{
+    if (numWorkers > 1) {
+        return std::make_unique<ParallelBlockSource>(path, numWorkers);
+    }
+    return std::make_unique<SerialBlockSource>(path);
+}
+
+bool EnsureAccumulatedBytes(BlockSource& source, std::vector<std::byte>& recordAccum,
                             std::vector<BlockSegment>& segments, std::uint64_t& currentBlockOffset,
                             std::size_t accumPos, std::size_t requiredBytes, bool& eof)
 {
@@ -191,18 +417,15 @@ bool EnsureAccumulatedBytes(BgzfReader& bgzf, std::vector<std::byte>& blockBuf,
         if (eof) {
             return false;
         }
-        const std::optional<std::size_t> bytesRead{bgzf.ReadBlock(std::span<std::byte>{blockBuf})};
-        currentBlockOffset = bgzf.Tell().BlockOffset();
-        if (!bytesRead || (*bytesRead == 0)) {
+        const std::optional<DecodedBlock> block{source.Next()};
+        if (!block) {
             eof = true;
             return false;
         }
-
-        const std::span<const std::byte> blockBytes{
-            std::span<const std::byte>{blockBuf}.first(*bytesRead)};
-        recordAccum.insert(std::ranges::end(recordAccum), std::ranges::begin(blockBytes),
-                           std::ranges::end(blockBytes));
-        segments.push_back(BlockSegment{currentBlockOffset, 0, *bytesRead});
+        currentBlockOffset = block->coffset;
+        recordAccum.insert(std::ranges::end(recordAccum), std::ranges::begin(block->data),
+                           std::ranges::end(block->data));
+        segments.push_back(BlockSegment{currentBlockOffset, 0, std::size(block->data)});
     }
     return true;
 }
@@ -407,15 +630,14 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
 
 // --- Build ---
 
-BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
+BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWorkers)
 {
-    BgzfReader bgzf{bamPath};
+    const std::unique_ptr<BlockSource> source{MakeBlockSource(bamPath, numWorkers)};
     BaiIndex index;
 
     // Step 1: Read and skip the BAM header
     std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
     std::size_t headerLen{0};
-    std::vector<std::byte> blockBuf(MAX_DECOMPRESSED_BLOCK_SIZE);
 
     // Track BGZF block offsets during header parsing
     std::uint64_t firstRecordBlockOffset{0};
@@ -424,20 +646,20 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
     std::int32_t nRef{0};
 
     for (;;) {
-        const std::optional<std::size_t> bytesRead{bgzf.ReadBlock(std::span<std::byte>{blockBuf})};
-
-        if (!bytesRead || (*bytesRead == 0)) {
+        const std::optional<DecodedBlock> block{source->Next()};
+        if (!block) {
             throw std::runtime_error{"Truncated BAM header"};
         }
 
-        const std::uint64_t blockOffset{bgzf.Tell().BlockOffset()};
+        const std::uint64_t blockOffset{block->coffset};
+        const std::size_t bytesRead{std::size(block->data)};
 
-        if (headerLen + *bytesRead > std::size(headerBuf)) {
-            headerBuf.resize(headerLen + *bytesRead + MAX_DECOMPRESSED_BLOCK_SIZE);
+        if (headerLen + bytesRead > std::size(headerBuf)) {
+            headerBuf.resize(headerLen + bytesRead + MAX_DECOMPRESSED_BLOCK_SIZE);
         }
 
-        std::ranges::copy_n(std::data(blockBuf), *bytesRead, std::data(headerBuf) + headerLen);
-        headerLen += *bytesRead;
+        std::ranges::copy_n(std::data(block->data), bytesRead, std::data(headerBuf) + headerLen);
+        headerLen += bytesRead;
 
         const std::size_t hdrSize{
             ComputeHeaderSize(std::span<const std::byte>{std::data(headerBuf), headerLen})};
@@ -466,10 +688,12 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
             if (remaining > 0) {
                 // Records start within this last block we read
                 firstRecordBlockOffset = blockOffset;
-                firstRecordWithinBlock = *bytesRead - remaining;
+                firstRecordWithinBlock = bytesRead - remaining;
             } else {
-                // Records start at the next block
-                firstRecordBlockOffset = bgzf.Tell().BlockOffset();
+                // Records start at the next block. firstRecordBlockOffset is unused in this
+                // case (headerLeftover == 0 → no initial segment), so the just-read block's
+                // offset is a harmless placeholder.
+                firstRecordBlockOffset = blockOffset;
                 firstRecordWithinBlock = 0;
             }
             break;
@@ -532,8 +756,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
 
     while (true) {
         // Ensure we have at least 4 bytes for block_size
-        if (!EnsureAccumulatedBytes(bgzf, blockBuf, recordAccum, segments, currentBlockOffset,
-                                    accumPos, 4, eof)) {
+        if (!EnsureAccumulatedBytes(*source, recordAccum, segments, currentBlockOffset, accumPos, 4,
+                                    eof)) {
             break;
         }
 
@@ -545,8 +769,8 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath)
         const std::size_t totalRecordBytes{4 + blockSize};
 
         // Ensure we have the complete record
-        if (!EnsureAccumulatedBytes(bgzf, blockBuf, recordAccum, segments, currentBlockOffset,
-                                    accumPos, totalRecordBytes, eof)) {
+        if (!EnsureAccumulatedBytes(*source, recordAccum, segments, currentBlockOffset, accumPos,
+                                    totalRecordBytes, eof)) {
             break;
         }
 
