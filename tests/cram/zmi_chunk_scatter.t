@@ -14,18 +14,18 @@ Contiguous chunk 1 of 4 is the first quarter of the file (holes 0,1,2):
 
 Scatter chunk 1 of 4 (seed 7) samples across the whole file instead:
 
-  $ "${PBSAMOA}" chunk indexed.bam 1 4 --mode scatter --seed 7 | grep -v '^@' | sed -E 's#movie/([0-9]+)/.*#\1#' | paste -sd' ' -
+  $ "${PBSAMOA}" chunk indexed.bam 1 4 --mode scatter --tile 1 --seed 7 | grep -v '^@' | sed -E 's#movie/([0-9]+)/.*#\1#' | paste -sd' ' -
   2 4 9
 
 Running all 4 scatter chunks visits every record exactly once (exact partition):
 
-  $ for c in 1 2 3 4; do "${PBSAMOA}" chunk indexed.bam $c 4 --mode scatter --seed 7 | grep -v '^@'; done | sed -E 's#movie/([0-9]+)/.*#\1#' | sort -n | paste -sd' ' -
+  $ for c in 1 2 3 4; do "${PBSAMOA}" chunk indexed.bam $c 4 --mode scatter --tile 1 --seed 7 | grep -v '^@'; done | sed -E 's#movie/([0-9]+)/.*#\1#' | sort -n | paste -sd' ' -
   0 1 2 3 4 5 6 7 8 9 10 11
 
 Same (chunk, total, tile, seed) is deterministic across runs:
 
-  $ "${PBSAMOA}" chunk indexed.bam 2 4 --mode scatter --seed 7 > run1.txt
-  $ "${PBSAMOA}" chunk indexed.bam 2 4 --mode scatter --seed 7 > run2.txt
+  $ "${PBSAMOA}" chunk indexed.bam 2 4 --mode scatter --tile 1 --seed 7 > run1.txt
+  $ "${PBSAMOA}" chunk indexed.bam 2 4 --mode scatter --tile 1 --seed 7 > run2.txt
   $ diff run1.txt run2.txt && echo SAME
   SAME
 
