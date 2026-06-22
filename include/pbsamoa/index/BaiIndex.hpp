@@ -5,6 +5,8 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <span>
 #include <vector>
 
 #include <cstddef>
@@ -64,6 +66,45 @@ private:
     std::uint64_t mappedCount_{0};
     std::uint64_t unmappedCount_{0};
     std::uint64_t noCoorCount_{0};  // n_no_coor: unplaced (refId < 0) reads only
+
+    friend class BaiStreamBuilder;
+};
+
+/// \brief Incrementally builds a BAI index from records observed in coordinate order.
+///
+/// This is the shared indexing core. BaiIndex::Build() drives it from a file scan;
+/// the BAM writer's index callback drives it on the fly while merging or sorting.
+/// Both paths feed identical (begin offset, record bytes) pairs, so they produce
+/// byte-identical output.
+///
+/// A record's end virtual offset equals the begin offset of the record that follows
+/// it, so each record is finalized when the next one arrives; Finalize() supplies the
+/// end offset of the last record (the position just past it).
+class BaiStreamBuilder
+{
+public:
+    /// \param[in] numReferences @SQ count of the indexed BAM (sizes the reference table)
+    explicit BaiStreamBuilder(std::int32_t numReferences);
+    ~BaiStreamBuilder();
+
+    BaiStreamBuilder(const BaiStreamBuilder&) = delete;
+    BaiStreamBuilder& operator=(const BaiStreamBuilder&) = delete;
+    BaiStreamBuilder(BaiStreamBuilder&&) noexcept;
+    BaiStreamBuilder& operator=(BaiStreamBuilder&&) noexcept;
+
+    /// \brief Observe one record, in coordinate (write) order.
+    /// \param[in] recordBeginVo virtual offset of the record's block_size field
+    /// \param[in] recordBytes   BAM record payload WITHOUT the 4-byte block_size prefix
+    /// \throws std::runtime_error if the records are not coordinate-sorted
+    void Observe(VirtualOffset recordBeginVo, std::span<const std::byte> recordBytes);
+
+    /// \brief Finish the index. Must be called exactly once, after the last Observe().
+    /// \param[in] endVo virtual offset just past the last observed record
+    BaiIndex Finalize(VirtualOffset endVo);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace Samoa

@@ -1,7 +1,9 @@
-Forced spill: a tiny --memory budget forces an external merge over many run
-files; the merged output must still equal the whole-file coordinate sort.
+Forced spill under a constrained file-descriptor budget: a tiny --memory budget
+forces an external merge over many run files, and a low open-file limit forces a
+bounded multi-pass merge (the run count exceeds the fds available to open them at
+once). The merged output must still equal the whole-file coordinate sort.
 
-  $ "${PBSAMOA}" sort --memory 1K "${TESTDIR}"/../data/many_records.bam spill.bam 2>/dev/null
+  $ ( ulimit -n 128; "${PBSAMOA}" sort --memory 1K "${TESTDIR}"/../data/many_records.bam spill.bam ) 2>/dev/null
   $ "${PBSAMOA}" sort "${TESTDIR}"/../data/many_records.bam mem.bam 2>/dev/null
 
 Spilled and in-memory sorts produce identical record bodies (determinism):

@@ -107,6 +107,11 @@ struct BgzfWriteMetrics
     std::uint64_t PackerStalls{0};  ///< packer found input queue empty
     std::uint64_t WriterStalls{0};  ///< IO writer found no ready results
 
+    /// Wall time the caller spent yield-spinning on a full input queue (summed).
+    /// Direct output-backpressure signal: high => compression/write cannot drain
+    /// as fast as the caller produces. Counts only the slow path (queue full).
+    std::uint64_t CallerStallNs{0};
+
     // --- Throughput ---
     std::uint64_t BytesCompressed{0};  ///< compressed payload bytes produced
     std::uint64_t BlocksWritten{0};    ///< BGZF blocks written

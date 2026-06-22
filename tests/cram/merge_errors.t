@@ -19,6 +19,14 @@ Sort-order mismatch (coordinate inputs, queryname merge requested):
   $ "${PBSAMOA}" merge --order queryname out.bam a.bam > /dev/null 2>&1
   [1]
 
+Mixed input sort orders cannot be auto-detected (coordinate + queryname):
+
+  $ samtools sort -n -o qn.bam "${TESTDIR}"/../data/unsorted.bam 2>/dev/null
+  $ "${PBSAMOA}" merge mixed.bam a.bam qn.bam 2>&1 | grep -c "mixed sort orders"
+  1
+  $ "${PBSAMOA}" merge mixed.bam a.bam qn.bam > /dev/null 2>&1
+  [1]
+
 Missing input file:
 
   $ "${PBSAMOA}" merge out.bam a.bam no_such_file.bam > /dev/null 2>&1

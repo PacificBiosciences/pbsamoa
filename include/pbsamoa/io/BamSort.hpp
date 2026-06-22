@@ -70,7 +70,9 @@ struct SortStats
 /// \brief Sort a single BAM file into a single sorted BAM file.
 ///
 /// External merge sort bounded by \p config.MaxMemory: builds RAM-bounded runs of
-/// RawRecords, stable-sorts and spills each, then k-way merges to the output.
+/// RawRecords, stable-sorts and spills each, then k-way merges to the output in
+/// bounded fan-in passes so the open run files stay within the process file-descriptor
+/// limit regardless of how many runs the memory budget produces.
 /// Output is validly sorted (correct order, unmapped-last, deterministic stable
 /// tie-breaking); record content matches `samtools sort`, BGZF bytes may differ.
 ///

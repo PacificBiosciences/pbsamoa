@@ -12,7 +12,6 @@
 #include <string_view>
 #include <vector>
 
-#include <cstdint>
 #include <cstdlib>
 
 namespace PacBio {
@@ -35,39 +34,6 @@ void PrintUsage()
                  "  --temp-dir DIR    directory for temporary run files");
 }
 
-/// Parse a memory size with an optional K/M/G suffix (base 1024) into bytes.
-ByteLimit ParseMemory(std::string_view text)
-{
-    if (text.empty()) {
-        throw std::runtime_error{"invalid --memory: empty value"};
-    }
-
-    std::uint64_t multiplier{1};
-    std::string_view digits{text};
-    switch (text.back()) {
-        case 'k':
-        case 'K':
-            multiplier = std::uint64_t{1024};
-            digits = text.substr(0, std::size(text) - 1);
-            break;
-        case 'm':
-        case 'M':
-            multiplier = std::uint64_t{1024} * 1024;
-            digits = text.substr(0, std::size(text) - 1);
-            break;
-        case 'g':
-        case 'G':
-            multiplier = std::uint64_t{1024} * 1024 * 1024;
-            digits = text.substr(0, std::size(text) - 1);
-            break;
-        default:
-            break;
-    }
-
-    const std::uint64_t value{Tools::ParseIntegerOrThrow<std::uint64_t>(digits, "--memory")};
-    return ByteLimit{value * multiplier};
-}
-
 }  // namespace
 
 int Runner(int argc, char** argv)
@@ -84,7 +50,7 @@ int Runner(int argc, char** argv)
             config.Tag = Tools::ParseSortTag(argc, argv, i);
             tagProvided = true;
         } else if (arg == "--memory") {
-            config.MaxMemory = ParseMemory(Tools::RequireOptionValue(argc, argv, i, "--memory"));
+            config.MaxMemory = Tools::ParseMemoryOption(argc, argv, i);
         } else if (arg == "--threads") {
             config.NumThreads = Tools::ParseThreadsOption(argc, argv, i);
         } else if (arg == "--compression") {

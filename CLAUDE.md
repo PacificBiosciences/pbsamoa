@@ -31,7 +31,7 @@ Cram tests resolve tool paths via env vars in `tests/meson.build` — run via `m
 
 ## CLI Tools (`src/tools/<name>/`)
 
-`pbsamoa` (umbrella) · `dump` · `convert` · `chunk` · `bai-build` · `bai-query` · `zmi-build` · `zmi-index` · `zmi-query` · `bench`. Shared helpers: `CliUtils.hpp`, `ParseUtils.hpp`, `SamOutput.hpp`, `MetricUtils.hpp`.
+`pbsamoa` (umbrella) · `dump` · `convert` · `sort` · `merge` · `chunk` · `bai-build` · `bai-query` · `zmi-build` · `zmi-index` · `zmi-query` · `bench`. Shared helpers: `CliUtils.hpp`, `ParseUtils.hpp`, `SamOutput.hpp`, `MetricUtils.hpp`. `merge` auto-detects sorted (k-way merge) vs unsorted (`--concat`, BGZF block passthrough).
 
 ## Design
 

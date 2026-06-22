@@ -91,6 +91,26 @@ std::optional<BgzfBlockInfo> ParseBgzfBlockHeader(std::span<const std::byte> dat
 std::optional<std::size_t> DecompressBgzfBlock(std::span<const std::byte> blockData,
                                                BgzfBlockInfo info, std::span<std::byte> output);
 
+/// \brief Maximum uncompressed payload a single BGZF block may hold (matches the
+///        writer's per-block packing limit). Inputs to CompressBgzfBlock must not
+///        exceed this.
+inline constexpr std::size_t BGZF_MAX_UNCOMPRESSED_BLOCK{0xFF00};  // 65280
+
+/// \brief Compress one buffer into a single self-contained, framed BGZF block.
+///
+/// Produces the full block (18-byte gzip+BC header, the raw DEFLATE payload, and
+/// the 8-byte CRC32/ISIZE trailer) — the inverse of DecompressBgzfBlock, with
+/// which it round-trips. Used by the merge concat path to emit the merged header
+/// and the partial header/record boundary block before copying the remaining
+/// compressed blocks verbatim.
+///
+/// \param[in] input uncompressed bytes, at most BGZF_MAX_UNCOMPRESSED_BLOCK
+/// \param[in] level libdeflate compression level, clamped to [1, 12]
+/// \returns the framed BGZF block bytes
+/// \throws std::runtime_error if \p input is too large or the framed block would
+///         exceed the 65536-byte BGZF maximum
+[[nodiscard]] std::vector<std::byte> CompressBgzfBlock(std::span<const std::byte> input, int level);
+
 /// \brief Check if 28 bytes match the BGZF EOF marker exactly.
 bool IsBgzfEofMarker(std::span<const std::byte> data);
 
@@ -223,6 +243,14 @@ public:
     /// Callback dispatch is asynchronous relative to Write() and may be deferred
     /// until Close() drains all queued blocks.
     void SetCallback(IndexCallbackFn callback);
+
+    /// \brief Virtual offset just past the last record written.
+    ///
+    /// Equals the begin offset a subsequent record would have had: the file offset of
+    /// the last non-empty block paired with that block's uncompressed size. Meaningful
+    /// only after Close() (which joins the IO thread); a zero offset if nothing was
+    /// written.
+    VirtualOffset EndVirtualOffset() const;
 
     /// \brief Flush remaining buffered data and close.
     /// Called automatically by destructor.

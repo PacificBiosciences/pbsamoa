@@ -439,6 +439,10 @@ Index callback notes:
 - Callback runs asynchronously on the BGZF IO writer thread.
 - Callback can be invoked after `Write()` returns (often during `Close()`).
 - Call `Close()` explicitly to surface write/close errors (destructor close suppresses errors).
+- The callback supplies each record's begin virtual offset; after `Close()`,
+  `writer.EndVirtualOffset()` gives the offset just past the last record (the end offset
+  of the final record). Feed both to `BaiStreamBuilder` to build a BAI on the fly — see
+  `BaiIndex` below.
 
 ### Writing records
 
@@ -700,6 +704,29 @@ auto chunks = index.Query(refId, 1000, 2000);
 auto index = BaiIndex::Build("sorted.bam");
 index.ToFile("sorted.bam.bai");
 ```
+
+### Build on the fly (streaming)
+
+`BaiStreamBuilder` is the shared indexing core that `Build()` drives from a file scan.
+Drive it instead from a `BamWriter` index callback to index while writing — no second
+pass. Both paths produce byte-identical output. Records must arrive in coordinate order;
+each record's end offset is the begin offset of the next, so `Finalize()` takes the end
+offset of the last record (`BamWriter::EndVirtualOffset()`).
+
+```cpp
+BaiStreamBuilder builder{header.NumReferences()};
+BamWriter writer{"sorted.bam", header, cfg,
+                 [&](std::int64_t beginVo, std::span<const std::byte> recordBytes) {
+                     builder.Observe(VirtualOffset{static_cast<std::uint64_t>(beginVo)},
+                                     recordBytes);  // runs on the IO thread
+                 }};
+// ... writer.Write(...) per record ...
+writer.Close();                                       // joins the IO thread
+builder.Finalize(writer.EndVirtualOffset()).ToFile("sorted.bam.bai");
+```
+
+`pbsamoa merge --bai` (and `MergeConfig::BaiOutput`) use exactly this path. `Observe()`
+throws if the records are not coordinate-sorted.
 
 ### Statistics
 

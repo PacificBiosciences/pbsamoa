@@ -35,6 +35,7 @@ lib = library(
         'BamRecordReader.cpp',
         'BamSort.cpp',
         'BamWriter.cpp',
+        'MergeReadAhead.cpp',
         'BamZmwReader.cpp',
         'Basemods.cpp',
         'Bgzf.cpp',

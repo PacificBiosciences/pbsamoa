@@ -77,6 +77,89 @@ Notes:
   `CompressionLevel`, `UseTempFile`) are currently API-only and are not
   exposed as `convert` flags.
 
+### sort — sort a BAM file
+
+Sort a BAM file by coordinate, query name, or a 2-char tag, using a RAM-bounded
+external merge sort (spill to temp run files, then a bounded-fan-in k-way merge —
+multi-pass when the run count exceeds the open-file limit).
+
+```sh
+pbsamoa sort -o sorted.bam input.bam
+pbsamoa sort --order queryname -o byname.bam input.bam
+```
+
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--order ORDER` | `coordinate` \| `queryname` \| `tag` (default: `coordinate`) |
+| `--tag XX` | 2-char tag to sort by (required iff `--order tag`) |
+| `--memory SIZE` | Peak run-buffer budget, `K`/`M`/`G` suffix (default: `768M`) |
+| `--temp-dir DIR` | Directory for temporary run files (default: output directory) |
+| `--threads N` | Worker threads, `0`/auto = `min(hw, 8)` |
+| `--compression L` | Output BGZF level `[1,12]` (default: `6`) |
+
+### merge — merge or concatenate BAM files
+
+Combine several BAM files (which must share an identical `@SQ` reference list)
+into one. The merged header unions their `@RG` / `@PG` / `@CO` records and an
+appended `pbsamoa.merge` `@PG`. With no `--order` / `--concat`, the mode is
+auto-detected from the inputs' `@HD SO`:
+
+- all `coordinate` or all `queryname` → streaming k-way sorted merge of the
+  inputs (each must already be sorted by that order); output is deterministic
+  and independent of the thread count, decode timing, and `--memory` budget.
+- all unsorted/unknown → byte-level concatenation.
+- a mix → error (pass `--order` or `--concat`).
+
+The sorted merge reads every input in parallel and ahead of the merge: each
+input is decompressed on a shared worker pool and framed into a per-input bounded
+queue, while the heap consumes already-decoded records and the writer compresses
+the output in parallel. `--memory` caps the total in-flight read-ahead across all
+inputs (a single budget, independent of input count); each input always keeps its
+head record available, so a budget below one record cannot stall the merge.
+
+When a coordinate merge's inputs occupy strictly disjoint coordinate ranges — each
+file's coordinates entirely precede the next's — the merge skips the heap entirely
+and emits via verbatim BGZF block passthrough (the `--concat` machinery), reordered
+by minimum coordinate, after a cheap probe confirms the inputs do not overlap. This
+eliminates recompression — the dominant cost — so the common shard / per-chromosome
+/ `chunk`→`merge` roundtrip runs several times faster than the heap merge (and than
+`samtools merge`, which always recompresses). Overlapping, internally unsorted, or
+query-name/tag merges use the heap path. The CLI summary notes `(passthrough)` when
+this path is taken.
+
+```sh
+pbsamoa merge out.bam a.bam b.bam              # auto-detect
+pbsamoa merge --order coordinate out.bam a.bam b.bam
+pbsamoa merge --concat out.bam a.bam b.bam     # force concatenation
+```
+
+`--concat` concatenates record streams via BGZF block passthrough — compressed
+blocks are copied input→output without decompress/recompress (only the single
+block straddling each input's header/record boundary is rebuilt), which is the
+fastest path. The output is marked `SO:unsorted` and its record count is not
+reported (counting would require decompressing every block).
+
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--order ORDER` | `coordinate` \| `queryname` \| `tag` (default: auto-detect) |
+| `--concat` | Byte-concatenate inputs (BGZF passthrough), output `SO:unsorted` |
+| `--tag XX` | 2-char tag inputs are sorted by (required iff `--order tag`) |
+| `--threads N` | Default size of both CPU pools (input decode + output compress), `0`/auto = `min(hw, 8)`. Does **not** bound the per-input producer threads (one I/O-bound thread per input). |
+| `--decode-threads N` | Input-decompression pool size; `0` = inherit `--threads`. Sorted merge only. |
+| `--compress-threads N` | Output-compression pool size; `0` = inherit `--threads`. Sorted merge only. |
+| `--memory SIZE` | Total input read-ahead budget, `K`/`M`/`G` suffix (default: `768M`); sorted merge only. Peak RAM also includes ~`NumInputs × --batch-bytes` (per-input current batches held outside the budget) plus the writer queue. |
+| `--batch-bytes SIZE` | Per-input handoff batch target, `K`/`M`/`G` suffix (default: `256K`); sorted merge only. |
+| `--writer-queue N` | Output writer queue depth in compressed blocks (default: `256`, must be `≥ 1`); sorted merge only. |
+| `--compression L` | Output BGZF level `[1,12]` (default: `6`) |
+| `--bai` | Write `<out>.bai` during the merge, built on the fly (no extra pass). Coordinate merges that take the heap path only — rejected (non-zero exit) for `--concat`, `queryname`/`tag` order, or the disjoint-chain passthrough, since none decodes records into an indexable coordinate-sorted stream. For those, run `bai-build` on the output instead. The index is byte-identical to `bai-build`. |
+
+The thread/memory knobs (except `--compression`) apply to the sorted-merge path
+only; `--concat` is single-threaded BGZF passthrough.
+
 ### bai-query — region query
 
 Extract records overlapping a genomic region using a BAI index.

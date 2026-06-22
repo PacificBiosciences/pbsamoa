@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <exception>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -201,6 +202,75 @@ bool IsBgzfEofMarker(std::span<const std::byte> data)
     }
 
     return std::ranges::equal(data.first(std::size(BGZF_EOF_MARKER)), BGZF_EOF_MARKER);
+}
+
+std::vector<std::byte> CompressBgzfBlock(std::span<const std::byte> input, const int level)
+{
+    if (std::size(input) > BGZF_MAX_UNCOMPRESSED_BLOCK) {
+        throw std::runtime_error{
+            std::format("CompressBgzfBlock: input size {} exceeds max block payload {}",
+                        std::size(input), BGZF_MAX_UNCOMPRESSED_BLOCK)};
+    }
+
+    const int clampedLevel{std::clamp(level, 1, 12)};
+    const detail::CompressorPtr compressor{libdeflate_alloc_compressor(clampedLevel)};
+    if (!compressor) {
+        throw std::runtime_error{"CompressBgzfBlock: libdeflate_alloc_compressor failed"};
+    }
+
+    std::vector<std::byte> compressedBuffer(BGZF_MAX_BLOCK_SIZE);
+    const std::size_t compressedSize{
+        libdeflate_deflate_compress(compressor.get(), std::data(input), std::size(input),
+                                    std::data(compressedBuffer), std::size(compressedBuffer))};
+    if (compressedSize == 0U) {
+        throw std::runtime_error{"CompressBgzfBlock: libdeflate_deflate_compress failed"};
+    }
+
+    const std::uint16_t xlen{6U};
+    const std::size_t blockSize{18U + compressedSize + 8U};
+    if (blockSize > BGZF_MAX_BLOCK_SIZE) {
+        throw std::runtime_error{"CompressBgzfBlock: framed block exceeds BGZF maximum"};
+    }
+    const std::uint16_t bsize{static_cast<std::uint16_t>(blockSize - 1U)};
+
+    const std::uint32_t crc{libdeflate_crc32(0, std::data(input), std::size(input))};
+    const std::uint32_t isize{static_cast<std::uint32_t>(std::size(input))};
+
+    const std::array<std::uint8_t, 18> frameHeader{
+        GZIP_ID1,
+        GZIP_ID2,
+        GZIP_CM_DEFLATE,
+        GZIP_FLG_FEXTRA,  // ID1, ID2, CM, FLG
+        0U,
+        0U,
+        0U,
+        0U,  // MTIME
+        0U,
+        0U,  // XFL, OS
+        static_cast<std::uint8_t>(xlen & 0xFFU),
+        static_cast<std::uint8_t>(xlen >> 8U),
+        BGZF_SI1,
+        BGZF_SI2,
+        2U,
+        0U,  // BC subfield ID + length
+        static_cast<std::uint8_t>(bsize & 0xFFU),
+        static_cast<std::uint8_t>(bsize >> 8U),
+    };
+
+    std::vector<std::byte> frame{};
+    frame.reserve(blockSize);
+    for (const std::uint8_t headerByte : frameHeader) {
+        frame.push_back(std::byte{headerByte});
+    }
+    frame.insert(std::end(frame), std::begin(compressedBuffer),
+                 std::begin(compressedBuffer) + compressedSize);
+
+    std::array<std::byte, 8> trailer{};
+    WriteLE<std::uint32_t>(std::data(trailer), crc);
+    WriteLE<std::uint32_t>(std::data(trailer) + 4U, isize);
+    frame.insert(std::end(frame), std::begin(trailer), std::end(trailer));
+
+    return frame;
 }
 
 /// \brief Helper: measure elapsed nanoseconds for a scope.
@@ -540,6 +610,7 @@ struct CompressedBatch
 struct WritePipelineCounters
 {
     std::atomic<std::uint64_t> callerStalls{0};
+    std::atomic<std::uint64_t> callerStallNs{0};
     std::atomic<std::uint64_t> packerStalls{0};
     std::atomic<std::uint64_t> compressNs{0};
     std::atomic<std::uint64_t> bytesCompressed{0};
@@ -574,6 +645,11 @@ struct BgzfWriter::Impl
     std::filesystem::path writePath;
     std::ofstream file{};
     std::uint64_t compressedOffset{0};
+    // File offset and uncompressed size of the last non-empty block written. Together
+    // they give the virtual offset just past the final record (see EndVirtualOffset);
+    // written only by the IO thread, read after Close() joins it.
+    std::uint64_t lastDataBlockOffset{0};
+    std::uint32_t lastDataBlockIsize{0};
     std::unique_ptr<Parallel::ThreadPool<detail::CompressedBatch>> pool;
     std::unique_ptr<rigtorp::SPSCQueue<detail::WriteItem>> inputQueue;
     std::jthread packerThread;
@@ -901,6 +977,10 @@ struct BgzfWriter::Impl
             const std::uint64_t blockFileOffset{compressedOffset};
             WriteFrame(block);
             FireCallbacks(block, blockFileOffset);
+            if (block.isize > 0) {
+                lastDataBlockOffset = blockFileOffset;
+                lastDataBlockIsize = block.isize;
+            }
             counters.blocksWritten.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -998,6 +1078,12 @@ void BgzfWriter::SetCallback(IndexCallbackFn callback)
     impl_->indexCallback = std::move(callback);
 }
 
+VirtualOffset BgzfWriter::EndVirtualOffset() const
+{
+    return VirtualOffset{impl_->lastDataBlockOffset,
+                         static_cast<std::uint16_t>(impl_->lastDataBlockIsize)};
+}
+
 void BgzfWriter::Write(std::span<const std::byte> data)
 {
     if (std::empty(data)) {
@@ -1025,11 +1111,26 @@ void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
     }
     impl_->RethrowIfError();
 
+    // Clock is read only on the slow path (queue full): the first failed
+    // try_emplace starts the stopwatch, so a never-full queue pays nothing.
+    std::chrono::steady_clock::time_point stallStart{};
+    bool stalled{false};
     while (!impl_->inputQueue->try_emplace(detail::WriteItemKind::DATA, std::move(data),
                                            std::move(callback))) {
+        if (!stalled) {
+            stallStart = std::chrono::steady_clock::now();
+            stalled = true;
+        }
         impl_->RethrowIfError();
         impl_->counters.callerStalls.fetch_add(1, std::memory_order_relaxed);
         std::this_thread::yield();
+    }
+    if (stalled) {
+        const auto elapsed{std::chrono::steady_clock::now() - stallStart};
+        impl_->counters.callerStallNs.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+            std::memory_order_relaxed);
     }
 }
 
@@ -1094,6 +1195,7 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 {
     BgzfWriteMetrics m{};
     m.CallerStalls = impl_->counters.callerStalls.load(std::memory_order_relaxed);
+    m.CallerStallNs = impl_->counters.callerStallNs.load(std::memory_order_relaxed);
     m.PackerStalls = impl_->counters.packerStalls.load(std::memory_order_relaxed);
     m.CompressNs = impl_->counters.compressNs.load(std::memory_order_relaxed);
     m.BytesCompressed = impl_->counters.bytesCompressed.load(std::memory_order_relaxed);

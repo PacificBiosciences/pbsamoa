@@ -168,5 +168,7 @@ WriterMetrics BamWriter::GetMetrics() const
     return m;
 }
 
+VirtualOffset BamWriter::EndVirtualOffset() const { return impl_->bgzf.EndVirtualOffset(); }
+
 }  // namespace Samoa
 }  // namespace PacBio

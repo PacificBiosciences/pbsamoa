@@ -29,6 +29,7 @@ test_exe = executable(
         'TestCram.cpp',
         'TestCraiIndex.cpp',
         'TestLosslessClipping.cpp',
+        'TestMergeReadAhead.cpp',
         'TestMetrics.cpp',
         'TestMultiBam.cpp',
         'TestPacBioBamRecord.cpp',

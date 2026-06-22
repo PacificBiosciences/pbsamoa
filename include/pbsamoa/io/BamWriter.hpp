@@ -67,6 +67,13 @@ public:
     /// \brief Snapshot writer metrics.
     WriterMetrics GetMetrics() const;
 
+    /// \brief Virtual offset just past the last record written (for on-the-fly indexing).
+    ///
+    /// Pairs with the per-record index callback: the callback supplies each record's
+    /// begin offset, and this supplies the end offset of the final record. Meaningful
+    /// only after Close().
+    VirtualOffset EndVirtualOffset() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

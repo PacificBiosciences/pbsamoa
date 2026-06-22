@@ -132,6 +132,39 @@ Key relationships:
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.
 
+- **SortBam / MergeBam** (free functions in `io/BamSort.hpp`, `io/BamMerge.hpp`)
+  combine files rather than streaming a single one. `SortBam` is a RAM-bounded
+  external merge sort (spill sorted runs, then the k-way `MergeRuns` core, which
+  caps simultaneously-open run files and falls back to a multi-pass merge when the
+  run count would exceed the process open-file limit). `MergeBam` detects the mode
+  from the inputs' `@HD SO`: a sorted merge (coordinate/queryname; deterministic via
+  source-index tie-break) or, for unsorted inputs / `--concat`, byte-level
+  concatenation through BGZF block passthrough (compressed blocks copied
+  input→output via `CompressBgzfBlock` only for the header and the one block
+  straddling each input's header/record boundary). A coordinate merge whose inputs
+  form a strictly disjoint chain is detected by `ProbeDisjointChain` (reads each
+  input's first record for its minimum key, then verifies — in min-sorted order —
+  that each input's records are non-decreasing and strictly precede the next input's
+  minimum, aborting early on the first overlapping or out-of-order record). When the
+  chain holds, the merge reuses that same passthrough copy in min-sorted order,
+  eliminating recompression; otherwise it falls back to the heap merge below. The
+  strict `max[i] < min[i+1]` test guarantees no cross-file equal keys, so the
+  passthrough output is record-identical to the heap merge.
+
+- **MergeReadAhead** (`io/MergeReadAhead.hpp`) backs the sorted merge. Each input
+  gets a producer thread that reads raw BGZF blocks and decompresses them on a
+  shared `ThreadPool`, framing records into per-input batches handed to the merge
+  heap as zero-copy views (the decompressed buffer is moved into the batch, not
+  copied per record); the heap writes those spans straight to the writer, which
+  compresses in parallel. A single `ReadAheadMemory` budget caps the summed
+  in-flight decompressed bytes across all inputs, with condition-variable
+  backpressure (no busy-spin) and a per-source head-batch guarantee so a sub-batch
+  budget cannot stall the merge. Per-source file order is preserved, so the merged
+  output is independent of thread count, decode timing, and budget. Avoiding the
+  per-record allocation is what lets input decompression actually overlap the
+  merge — on a 575 MB four-way coordinate merge it runs ~1.7x faster than
+  `samtools merge -@8`.
+
 - **RawRecord** owns a copy of raw BAM bytes. `CigarOp` values are eagerly
   copied into an aligned buffer on construction (BAM does not guarantee
   alignment). `SequenceView` and `TagMap` are decoded on demand. All decode

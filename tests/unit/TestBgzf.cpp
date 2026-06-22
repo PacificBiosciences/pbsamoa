@@ -189,5 +189,72 @@ TEST(BgzfDecompress, MaxBlockData)
     EXPECT_TRUE(std::ranges::equal(output, input));
 }
 
+TEST(BgzfCompress, RoundTripThroughDecompress)
+{
+    const std::string original{"Hello, BGZF world! pack me into one block."};
+    const std::span<const std::byte> inputSpan{
+        std::as_bytes(std::span{std::data(original), std::size(original)})};
+
+    const std::vector<std::byte> block{CompressBgzfBlock(inputSpan, 6)};
+
+    const std::span<const std::byte> blockSpan{block};
+    const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->blockSize, std::size(block));
+
+    std::vector<std::byte> output{};
+    output.resize(std::size(original));
+    const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
+    ASSERT_TRUE(result);
+    EXPECT_EQ(*result, std::size(original));
+    EXPECT_TRUE(std::ranges::equal(output, inputSpan));
+}
+
+TEST(BgzfCompress, EmptyInputProducesValidBlock)
+{
+    const std::vector<std::byte> block{CompressBgzfBlock(std::span<const std::byte>{}, 6)};
+
+    const std::span<const std::byte> blockSpan{block};
+    const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
+    ASSERT_TRUE(info);
+
+    std::vector<std::byte> output{};
+    output.resize(16U);
+    const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
+    ASSERT_TRUE(result);
+    EXPECT_EQ(*result, 0U);
+}
+
+TEST(BgzfCompress, MaxPayloadRoundTrips)
+{
+    std::vector<std::byte> input{};
+    input.resize(BGZF_MAX_UNCOMPRESSED_BLOCK);
+    for (std::size_t i{0}; i < std::size(input); ++i) {
+        input[i] = static_cast<std::byte>((i * 7U) & 0xFFU);
+    }
+
+    const std::vector<std::byte> block{CompressBgzfBlock(input, 6)};
+
+    const std::span<const std::byte> blockSpan{block};
+    const std::optional<BgzfBlockInfo> info{ParseBgzfBlockHeader(blockSpan)};
+    ASSERT_TRUE(info);
+
+    std::vector<std::byte> output{};
+    output.resize(BGZF_MAX_UNCOMPRESSED_BLOCK);
+    const std::optional<std::size_t> result{DecompressBgzfBlock(blockSpan, *info, output)};
+    ASSERT_TRUE(result);
+    EXPECT_EQ(*result, BGZF_MAX_UNCOMPRESSED_BLOCK);
+    EXPECT_TRUE(std::ranges::equal(output, input));
+}
+
+TEST(BgzfCompress, OversizeInputThrows)
+{
+    std::vector<std::byte> input{};
+    input.resize(BGZF_MAX_UNCOMPRESSED_BLOCK + 1U);
+    EXPECT_THROW(
+        { [[maybe_unused]] const std::vector<std::byte> block{CompressBgzfBlock(input, 6)}; },
+        std::runtime_error);
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

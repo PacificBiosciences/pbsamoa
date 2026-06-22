@@ -430,6 +430,28 @@ bool EnsureAccumulatedBytes(BlockSource& source, std::vector<std::byte>& recordA
     return true;
 }
 
+/// Per-reference statistics for the optional metadata pseudo-bin (37450), enabling
+/// samtools idxstats. begVo/endVo bracket every read placed on the reference.
+struct RefMeta
+{
+    std::uint64_t nMapped{0};
+    std::uint64_t nUnmapped{0};
+    std::uint64_t begVo{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t endVo{0};
+};
+
+/// A record parsed from its BAM bytes, holding only the scalars the index needs while
+/// it waits for its end virtual offset (the begin offset of the following record). The
+/// source byte span is transient, so nothing borrows from it past Observe().
+struct ParsedRecord
+{
+    VirtualOffset beginVo{};
+    std::int32_t refId{0};
+    std::int32_t pos{0};
+    std::int64_t refLen{0};
+    bool unmapped{false};
+};
+
 }  // namespace
 
 // --- BaiIndex accessors ---
@@ -628,12 +650,192 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
     return MergeChunks(candidates);
 }
 
+// --- BaiStreamBuilder ---
+
+struct BaiStreamBuilder::Impl
+{
+    std::int32_t nRef{0};
+    std::vector<ReferenceIndex> references;
+    std::vector<RefMeta> refMeta;
+
+    std::uint64_t mappedCount{0};
+    std::uint64_t placedUnmappedCount{0};  // FLAG 0x4 reads that still carry a refId >= 0
+    std::uint64_t noCoorCount{0};          // unplaced reads (refId < 0) -> n_no_coor
+
+    std::optional<std::pair<std::int32_t, std::int32_t>> lastMappedCoordinate{};
+    bool sawUnmappedTailRecord{false};
+
+    // One record deep: the latest observed record, held until its end offset is known.
+    bool havePending{false};
+    ParsedRecord pending{};
+
+    explicit Impl(std::int32_t numReferences)
+        : nRef{numReferences}
+        , references(static_cast<std::size_t>(std::max(numReferences, 0)))
+        , refMeta(static_cast<std::size_t>(std::max(numReferences, 0)))
+    {
+    }
+
+    /// Fold the pending record into the index now that its end offset (\p endVo) is known.
+    void ProcessPending(VirtualOffset endVo)
+    {
+        const ParsedRecord& r{pending};
+        const VirtualOffset recordVo{r.beginVo};
+        const VirtualOffset recordEndVo{endVo};
+
+        if (r.refId < 0) {
+            // Unplaced read (no coordinate): the true n_no_coor population, which always
+            // sorts after every placed read. htslib counts only these in n_no_coor.
+            sawUnmappedTailRecord = true;
+            ++noCoorCount;
+        } else if (r.refId < nRef) {
+            // Placed read (refId >= 0): either mapped, or placed-unmapped (FLAG 0x4 carrying
+            // a coordinate). Both participate in coordinate ordering.
+            if (sawUnmappedTailRecord) {
+                throw std::runtime_error{
+                    "BAI build requires coordinate-sorted records; saw a placed read after an "
+                    "unplaced tail"};
+            }
+            const std::pair<std::int32_t, std::int32_t> currentCoordinate{r.refId, r.pos};
+            if (lastMappedCoordinate && (currentCoordinate < *lastMappedCoordinate)) {
+                throw std::runtime_error{
+                    "BAI build requires coordinate-sorted records; saw an out-of-order placed "
+                    "read"};
+            }
+            lastMappedCoordinate = currentCoordinate;
+
+            RefMeta& meta{refMeta[static_cast<std::size_t>(r.refId)]};
+            meta.begVo = std::min(meta.begVo, recordVo.Value());
+            meta.endVo = std::max(meta.endVo, recordEndVo.Value());
+
+            if (r.unmapped) {
+                // Placed but unmapped: counted as per-reference n_unmapped (not n_no_coor),
+                // and not added to a bin since it has no alignment span.
+                ++placedUnmappedCount;
+                ++meta.nUnmapped;
+            } else {
+                ++mappedCount;
+                ++meta.nMapped;
+                ReferenceIndex& refIdx{references[static_cast<std::size_t>(r.refId)]};
+
+                const std::int32_t endPos{
+                    CheckedInt32(static_cast<std::int64_t>(r.pos) + r.refLen, "alignment end")};
+                const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(r.pos, endPos)};
+                const std::uint16_t bin{Reg2Bin(r.pos, nonEmptyEnd)};
+
+                refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
+
+                const std::int32_t begWindow = r.pos / BAI_LINEAR_INDEX_WINDOW;
+                const std::int32_t endWindow{
+                    static_cast<std::int32_t>((nonEmptyEnd - 1) / BAI_LINEAR_INDEX_WINDOW)};
+                const std::size_t maxWindow = endWindow + 1;
+                if (maxWindow > std::size(refIdx.linearIndex)) {
+                    refIdx.linearIndex.resize(maxWindow);
+                }
+                for (std::int32_t w{begWindow}; w <= endWindow; ++w) {
+                    VirtualOffset& entry{refIdx.linearIndex[w]};
+                    if (entry.Value() == 0 || recordVo < entry) {
+                        entry = recordVo;
+                    }
+                }
+            }
+        }
+
+        havePending = false;
+    }
+};
+
+BaiStreamBuilder::BaiStreamBuilder(std::int32_t numReferences)
+    : impl_{std::make_unique<Impl>(numReferences)}
+{
+}
+
+BaiStreamBuilder::~BaiStreamBuilder() = default;
+BaiStreamBuilder::BaiStreamBuilder(BaiStreamBuilder&&) noexcept = default;
+BaiStreamBuilder& BaiStreamBuilder::operator=(BaiStreamBuilder&&) noexcept = default;
+
+void BaiStreamBuilder::Observe(VirtualOffset recordBeginVo, std::span<const std::byte> recordBytes)
+{
+    // A record's end offset is the begin offset of the record that follows it, so the
+    // arrival of this record finalizes the previous one.
+    if (impl_->havePending) {
+        impl_->ProcessPending(recordBeginVo);
+    }
+
+    if (std::size(recordBytes) < BAM_FIXED_FIELDS_SIZE) {
+        throw std::runtime_error{"BAI build: BAM record shorter than its fixed fields"};
+    }
+
+    // Parse the minimal fields from the BAM binary (same layout as the file scan).
+    const std::byte* const rec{std::data(recordBytes)};
+    const std::int32_t refId{ReadI32LE(rec)};
+    const std::int32_t pos{ReadI32LE(rec + 4)};
+    const std::uint32_t binMqNl{ReadU32LE(rec + 8)};
+    const std::uint32_t flagNc{ReadU32LE(rec + 12)};
+    const std::uint16_t flag = flagNc >> 16;
+    const std::uint16_t nCigarOp = flagNc & 0xFFFF;
+    const std::uint8_t nameLen = binMqNl & 0xFF;
+
+    std::int64_t refLen{0};
+    if (nCigarOp > 0) {
+        const std::size_t cigarOffset{BAM_FIXED_FIELDS_SIZE + nameLen};
+        for (std::uint16_t ci{0}; ci < nCigarOp; ++ci) {
+            const std::uint32_t cigarVal{ReadU32LE(rec + cigarOffset + ci * 4)};
+            const std::uint8_t opCode{static_cast<std::uint8_t>(cigarVal & 0xFU)};
+            const std::uint32_t opLen{cigarVal >> 4};
+            if (ConsumesReference(opCode)) {
+                refLen += opLen;
+            }
+        }
+    }
+
+    impl_->pending = ParsedRecord{.beginVo = recordBeginVo,
+                                  .refId = refId,
+                                  .pos = pos,
+                                  .refLen = refLen,
+                                  .unmapped = ((flag & 0x4) != 0)};
+    impl_->havePending = true;
+}
+
+BaiIndex BaiStreamBuilder::Finalize(VirtualOffset endVo)
+{
+    if (impl_->havePending) {
+        impl_->ProcessPending(endVo);
+    }
+
+    // Merge chunks within each bin.
+    for (ReferenceIndex& ref : impl_->references) {
+        for (auto& [binNum, chunks] : ref.bins) {
+            chunks = MergeChunks(chunks);
+        }
+    }
+
+    // Emit the metadata pseudo-bin (37450) per reference. Added after the merge above so
+    // its two stat "chunks" — {begVo,endVo} and {n_mapped,n_unmapped} — are never merged.
+    for (std::int32_t r{0}; r < impl_->nRef; ++r) {
+        const RefMeta& meta{impl_->refMeta[static_cast<std::size_t>(r)]};
+        if ((meta.nMapped + meta.nUnmapped) == 0) {
+            continue;
+        }
+        std::vector<Chunk>& metaBin{
+            impl_->references[static_cast<std::size_t>(r)].bins[BAI_METADATA_BIN]};
+        metaBin.push_back(Chunk{VirtualOffset{meta.begVo}, VirtualOffset{meta.endVo}});
+        metaBin.push_back(Chunk{VirtualOffset{meta.nMapped}, VirtualOffset{meta.nUnmapped}});
+    }
+
+    BaiIndex index;
+    index.references_ = std::move(impl_->references);
+    index.mappedCount_ = impl_->mappedCount;
+    index.unmappedCount_ = impl_->placedUnmappedCount + impl_->noCoorCount;
+    index.noCoorCount_ = impl_->noCoorCount;
+    return index;
+}
+
 // --- Build ---
 
 BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWorkers)
 {
     const std::unique_ptr<BlockSource> source{MakeBlockSource(bamPath, numWorkers)};
-    BaiIndex index;
 
     // Step 1: Read and skip the BAM header
     std::vector<std::byte> headerBuf(MAX_DECOMPRESSED_BLOCK_SIZE * 4);
@@ -700,7 +902,10 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
         }
     }
 
-    index.references_.resize(nRef);
+    // The indexing itself is delegated to the shared streaming builder; this scan only
+    // recovers each record's begin virtual offset from the BGZF block layout and feeds
+    // the record bytes through. The on-the-fly writer callback drives the same builder.
+    BaiStreamBuilder builder{nRef};
 
     // Step 2: Re-open and seek to the first record position
     // We have leftover data from the header block. Rather than re-parsing,
@@ -733,25 +938,7 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
                                         headerLeftover});
     }
 
-    std::uint64_t mappedCount{0};
-    std::uint64_t placedUnmappedCount{0};  // FLAG 0x4 reads that still carry a refId >= 0
-    std::uint64_t noCoorCount{0};          // unplaced reads (refId < 0) → n_no_coor
     bool eof{false};
-    std::optional<std::pair<std::int32_t, std::int32_t>> lastMappedCoordinate;
-    bool sawUnmappedTailRecord{false};
-
-    // Per-reference statistics for the optional metadata pseudo-bin (37450), enabling
-    // samtools idxstats. begVo/endVo bracket every read placed on the reference.
-    struct RefMeta
-    {
-        std::uint64_t nMapped{0};
-        std::uint64_t nUnmapped{0};
-        std::uint64_t begVo{std::numeric_limits<std::uint64_t>::max()};
-        std::uint64_t endVo{0};
-    };
-
-    std::vector<RefMeta> refMeta(static_cast<std::size_t>(nRef));
-
     std::size_t accumPos{0};
 
     while (true) {
@@ -774,105 +961,12 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
             break;
         }
 
-        // Record virtual offset = position of the block_size field
+        // The record's begin virtual offset is the position of its block_size field.
+        // Its end offset is supplied by the next Observe() (the begin of the following
+        // record), so it need not be computed here.
         const VirtualOffset recordVo{VirtualOffsetAt(segments, accumPos)};
-        // End virtual offset = position just past this record
-        const VirtualOffset recordEndVo{VirtualOffsetAt(segments, accumPos + totalRecordBytes)};
-
-        // Parse minimal record fields from the BAM binary data (after block_size)
-        const std::byte* const rec{std::data(recordAccum) + accumPos + 4};
-        const std::int32_t refId{ReadI32LE(rec)};
-        const std::int32_t pos{ReadI32LE(rec + 4)};
-
-        // bin_mq_nl at offset 8: bin(16) | mapq(8) | nl(8)
-        const std::uint32_t binMqNl{ReadU32LE(rec + 8)};
-        // flag_nc at offset 12: flag(16) | nc(16)
-        const std::uint32_t flagNc{ReadU32LE(rec + 12)};
-        const std::uint16_t flag = flagNc >> 16;
-        const std::uint16_t nCigarOp = flagNc & 0xFFFF;
-        const std::uint8_t nameLen = binMqNl & 0xFF;
-
-        // Compute reference length from CIGAR
-        std::int64_t refLen{0};
-        if (nCigarOp > 0) {
-            const std::size_t cigarOffset{BAM_FIXED_FIELDS_SIZE + nameLen};
-            for (std::uint16_t ci{0}; ci < nCigarOp; ++ci) {
-                const std::uint32_t cigarVal{ReadU32LE(rec + cigarOffset + ci * 4)};
-                const std::uint8_t opCode{static_cast<std::uint8_t>(cigarVal & 0xFU)};
-                const std::uint32_t opLen{cigarVal >> 4};
-                if (ConsumesReference(opCode)) {
-                    refLen += opLen;
-                }
-            }
-        }
-
-        const bool isUnmapped{(flag & 0x4) != 0};
-
-        if (refId < 0) {
-            // Unplaced read (no coordinate): the true n_no_coor population, which always
-            // sorts after every placed read. htslib counts only these in n_no_coor.
-            sawUnmappedTailRecord = true;
-            ++noCoorCount;
-        } else if (refId < nRef) {
-            // Placed read (refId >= 0): either mapped, or placed-unmapped (FLAG 0x4 carrying
-            // a coordinate). Both participate in coordinate ordering.
-            if (sawUnmappedTailRecord) {
-                throw std::runtime_error{
-                    std::format("BaiIndex::Build requires coordinate-sorted BAM "
-                                "payload; saw placed "
-                                "refId={} pos={} after unplaced tail in {}",
-                                refId, pos, bamPath.string())};
-            }
-            const std::pair<std::int32_t, std::int32_t> currentCoordinate{refId, pos};
-            if (lastMappedCoordinate && currentCoordinate < *lastMappedCoordinate) {
-                throw std::runtime_error{
-                    std::format("BaiIndex::Build requires coordinate-sorted BAM "
-                                "payload; saw refId={} pos={} "
-                                "after refId={} pos={} in {}",
-                                refId, pos, lastMappedCoordinate->first,
-                                lastMappedCoordinate->second, bamPath.string())};
-            }
-            lastMappedCoordinate = currentCoordinate;
-
-            RefMeta& meta{refMeta[static_cast<std::size_t>(refId)]};
-            meta.begVo = std::min(meta.begVo, recordVo.Value());
-            meta.endVo = std::max(meta.endVo, recordEndVo.Value());
-
-            if (isUnmapped) {
-                // Placed but unmapped: counted as per-reference n_unmapped (not n_no_coor),
-                // and not added to a bin since it has no alignment span.
-                ++placedUnmappedCount;
-                ++meta.nUnmapped;
-            } else {
-                ++mappedCount;
-                ++meta.nMapped;
-                ReferenceIndex& refIdx{index.references_[refId]};
-
-                // Compute bin
-                const std::int32_t endPos{
-                    CheckedInt32(static_cast<std::int64_t>(pos) + refLen, "alignment end")};
-                const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(pos, endPos)};
-                const std::uint16_t bin{Reg2Bin(pos, nonEmptyEnd)};
-
-                // Add chunk to bin
-                refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
-
-                // Update linear index
-                const std::int32_t begWindow = pos / BAI_LINEAR_INDEX_WINDOW;
-                const std::int32_t endWindow{
-                    static_cast<std::int32_t>((nonEmptyEnd - 1) / BAI_LINEAR_INDEX_WINDOW)};
-                const std::size_t maxWindow = endWindow + 1;
-                if (maxWindow > std::size(refIdx.linearIndex)) {
-                    refIdx.linearIndex.resize(maxWindow);
-                }
-                for (std::int32_t w{begWindow}; w <= endWindow; ++w) {
-                    VirtualOffset& entry{refIdx.linearIndex[w]};
-                    if (entry.Value() == 0 || recordVo < entry) {
-                        entry = recordVo;
-                    }
-                }
-            }
-        }
+        builder.Observe(
+            recordVo, std::span<const std::byte>{std::data(recordAccum) + accumPos + 4, blockSize});
 
         accumPos += totalRecordBytes;
 
@@ -882,30 +976,11 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
         }
     }
 
-    // Merge chunks within each bin
-    for (ReferenceIndex& ref : index.references_) {
-        for (auto& [binNum, chunks] : ref.bins) {
-            chunks = MergeChunks(chunks);
-        }
-    }
-
-    // Emit the metadata pseudo-bin (37450) per reference. Added after the merge above so
-    // its two stat "chunks" — {begVo,endVo} and {n_mapped,n_unmapped} — are never merged.
-    for (std::int32_t r{0}; r < nRef; ++r) {
-        const RefMeta& meta{refMeta[static_cast<std::size_t>(r)]};
-        if ((meta.nMapped + meta.nUnmapped) == 0) {
-            continue;
-        }
-        std::vector<Chunk>& metaBin{index.references_[r].bins[BAI_METADATA_BIN]};
-        metaBin.push_back(Chunk{VirtualOffset{meta.begVo}, VirtualOffset{meta.endVo}});
-        metaBin.push_back(Chunk{VirtualOffset{meta.nMapped}, VirtualOffset{meta.nUnmapped}});
-    }
-
-    index.mappedCount_ = mappedCount;
-    index.unmappedCount_ = placedUnmappedCount + noCoorCount;
-    index.noCoorCount_ = noCoorCount;
-
-    return index;
+    // accumPos now sits just past the last complete record. By VirtualOffsetAt's
+    // past-the-end mapping that is the end offset of the last record (the begin offset a
+    // following record would have had) — exactly what Finalize() needs.
+    const VirtualOffset endVo{VirtualOffsetAt(segments, accumPos)};
+    return builder.Finalize(endVo);
 }
 
 }  // namespace Samoa
