@@ -4,6 +4,8 @@ thirdparty_c_args = c.get_supported_arguments(
     # Imported upstream C sources are warning-heavy under strict project flags.
     '-Wno-sign-compare',
     '-Wno-unused-parameter',
+    # GCC 16: dead 'nlines' loop counter in htscodecs tokenise_name3.c
+    '-Wno-unused-but-set-variable',
 )
 
 htscodecs_sources = files(
