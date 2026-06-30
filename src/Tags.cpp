@@ -310,14 +310,34 @@ void RequirePayloadSize(char type, std::span<const std::byte> payload, std::size
 using EntryIter = std::vector<TagMap::Entry>::iterator;
 using ConstEntryIter = std::vector<TagMap::Entry>::const_iterator;
 
+EntryIter LowerBoundEntry(std::vector<TagMap::Entry>& entries, TagKey key)
+{
+    return std::ranges::lower_bound(entries, key.Value(), {},
+                                    [](const TagMap::Entry& entry) { return entry.first.Value(); });
+}
+
+ConstEntryIter LowerBoundEntry(const std::vector<TagMap::Entry>& entries, TagKey key)
+{
+    return std::ranges::lower_bound(entries, key.Value(), {},
+                                    [](const TagMap::Entry& entry) { return entry.first.Value(); });
+}
+
 EntryIter FindEntry(std::vector<TagMap::Entry>& entries, TagKey key)
 {
-    return std::ranges::find(entries, key, &TagMap::Entry::first);
+    const EntryIter it{LowerBoundEntry(entries, key)};
+    if ((it == std::end(entries)) || (it->first != key)) {
+        return std::end(entries);
+    }
+    return it;
 }
 
 ConstEntryIter FindEntry(const std::vector<TagMap::Entry>& entries, TagKey key)
 {
-    return std::ranges::find(entries, key, &TagMap::Entry::first);
+    const ConstEntryIter it{LowerBoundEntry(entries, key)};
+    if ((it == std::cend(entries)) || (it->first != key)) {
+        return std::cend(entries);
+    }
+    return it;
 }
 
 struct BamSerializeVisitor
@@ -564,12 +584,12 @@ const TagValue* TagMap::Get(TagKey key) const
 
 void TagMap::Set(TagKey key, TagValue value)
 {
-    const EntryIter it{FindEntry(entries_, key)};
-    if (it != std::end(entries_)) {
+    const EntryIter it{LowerBoundEntry(entries_, key)};
+    if ((it != std::end(entries_)) && (it->first == key)) {
         it->second = std::move(value);
         return;
     }
-    entries_.emplace_back(key, std::move(value));
+    entries_.insert(it, Entry{key, std::move(value)});
 }
 
 bool TagMap::Remove(TagKey key)
@@ -590,7 +610,10 @@ std::size_t TagMap::Size() const { return std::size(entries_); }
 
 bool TagMap::Empty() const { return std::empty(entries_); }
 
-void TagMap::Append(TagKey key, TagValue value) { entries_.emplace_back(key, std::move(value)); }
+void TagMap::Append(TagKey key, TagValue value)
+{
+    entries_.insert(LowerBoundEntry(entries_, key), Entry{key, std::move(value)});
+}
 
 // --- Filters ---
 

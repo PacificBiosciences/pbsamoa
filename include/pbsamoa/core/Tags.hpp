@@ -77,9 +77,9 @@ private:
 /// Serialization to BAM picks the smallest sufficient type.
 using TagValue = std::variant<char, std::int64_t, float, std::string, HexString, TagArray>;
 
-/// \brief Ordered collection of tag key-value pairs with linear-scan lookup.
+/// \brief Collection of tag key-value pairs sorted by tag key.
 ///
-/// Records rarely exceed ~30 tags; linear scan beats hash due to cache effects.
+/// Records rarely exceed ~30 tags; a sorted vector keeps iteration cache-friendly.
 class TagMap
 {
 public:
@@ -89,7 +89,7 @@ public:
     void Set(TagKey key, TagValue value);
     bool Remove(TagKey key);
     bool Contains(TagKey key) const;
-    /// \brief Append a key-value pair without checking for duplicates. Caller must guarantee the key does not already exist.
+    /// \brief Insert a key-value pair without checking for duplicates. Caller must guarantee the key does not already exist.
     void Append(TagKey key, TagValue value);
 
     std::span<const Entry> Entries() const;

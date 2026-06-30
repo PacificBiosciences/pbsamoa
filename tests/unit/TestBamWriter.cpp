@@ -126,6 +126,33 @@ TEST_F(BamWriterTest, WriteAndReadBackRecord)
     EXPECT_FALSE(reader.ReadRecord());
 }
 
+TEST_F(BamWriterTest, OwnedRecordTagsAreWrittenSorted)
+{
+    BamRecord record = MakeTestRecord();
+    TagMap tags;
+    tags.Set(TagKey{'z', 'm'}, 'z');
+    tags.Set(TagKey{'a', 'c'}, 'a');
+    tags.Set(TagKey{'r', 'q'}, 'r');
+    record.Tags(std::move(tags));
+
+    {
+        BamWriter writer{tmpPath, MakeMinimalHeader()};
+        writer.Write(record);
+    }
+
+    BamRawReader reader{tmpPath};
+    const auto view = reader.ReadRecord();
+    ASSERT_TRUE(view);
+    const std::span<const std::byte> aux{view->AuxData()};
+    ASSERT_EQ(std::size(aux), 12U);
+    EXPECT_EQ(aux[0], std::byte{'a'});
+    EXPECT_EQ(aux[1], std::byte{'c'});
+    EXPECT_EQ(aux[4], std::byte{'r'});
+    EXPECT_EQ(aux[5], std::byte{'q'});
+    EXPECT_EQ(aux[8], std::byte{'z'});
+    EXPECT_EQ(aux[9], std::byte{'m'});
+}
+
 TEST_F(BamWriterTest, WriteMultipleRecords)
 {
     const SamHeader header = MakeMinimalHeader();
