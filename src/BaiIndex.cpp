@@ -430,28 +430,6 @@ bool EnsureAccumulatedBytes(BlockSource& source, std::vector<std::byte>& recordA
     return true;
 }
 
-/// Per-reference statistics for the optional metadata pseudo-bin (37450), enabling
-/// samtools idxstats. begVo/endVo bracket every read placed on the reference.
-struct RefMeta
-{
-    std::uint64_t nMapped{0};
-    std::uint64_t nUnmapped{0};
-    std::uint64_t begVo{std::numeric_limits<std::uint64_t>::max()};
-    std::uint64_t endVo{0};
-};
-
-/// A record parsed from its BAM bytes, holding only the scalars the index needs while
-/// it waits for its end virtual offset (the begin offset of the following record). The
-/// source byte span is transient, so nothing borrows from it past Observe().
-struct ParsedRecord
-{
-    VirtualOffset beginVo{};
-    std::int32_t refId{0};
-    std::int32_t pos{0};
-    std::int64_t refLen{0};
-    bool unmapped{false};
-};
-
 }  // namespace
 
 // --- BaiIndex accessors ---
@@ -654,6 +632,28 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
 
 struct BaiStreamBuilder::Impl
 {
+    /// Per-reference statistics for the optional metadata pseudo-bin (37450), enabling
+    /// samtools idxstats. begVo/endVo bracket every read placed on the reference.
+    struct RefMeta
+    {
+        std::uint64_t nMapped{0};
+        std::uint64_t nUnmapped{0};
+        std::uint64_t begVo{std::numeric_limits<std::uint64_t>::max()};
+        std::uint64_t endVo{0};
+    };
+
+    /// A record parsed from its BAM bytes, holding only the scalars the index needs while
+    /// it waits for its end virtual offset (the begin offset of the following record). The
+    /// source byte span is transient, so nothing borrows from it past Observe().
+    struct ParsedRecord
+    {
+        VirtualOffset beginVo{};
+        std::int32_t refId{0};
+        std::int32_t pos{0};
+        std::int64_t refLen{0};
+        bool unmapped{false};
+    };
+
     std::int32_t nRef{0};
     std::vector<ReferenceIndex> references;
     std::vector<RefMeta> refMeta;
@@ -789,11 +789,11 @@ void BaiStreamBuilder::Observe(VirtualOffset recordBeginVo, std::span<const std:
         }
     }
 
-    impl_->pending = ParsedRecord{.beginVo = recordBeginVo,
-                                  .refId = refId,
-                                  .pos = pos,
-                                  .refLen = refLen,
-                                  .unmapped = ((flag & 0x4) != 0)};
+    impl_->pending = Impl::ParsedRecord{.beginVo = recordBeginVo,
+                                        .refId = refId,
+                                        .pos = pos,
+                                        .refLen = refLen,
+                                        .unmapped = ((flag & 0x4) != 0)};
     impl_->havePending = true;
 }
 
@@ -813,7 +813,7 @@ BaiIndex BaiStreamBuilder::Finalize(VirtualOffset endVo)
     // Emit the metadata pseudo-bin (37450) per reference. Added after the merge above so
     // its two stat "chunks" — {begVo,endVo} and {n_mapped,n_unmapped} — are never merged.
     for (std::int32_t r{0}; r < impl_->nRef; ++r) {
-        const RefMeta& meta{impl_->refMeta[static_cast<std::size_t>(r)]};
+        const Impl::RefMeta& meta{impl_->refMeta[static_cast<std::size_t>(r)]};
         if ((meta.nMapped + meta.nUnmapped) == 0) {
             continue;
         }

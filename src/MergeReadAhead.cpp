@@ -38,7 +38,7 @@ using DecodePool = PacBio::Parallel::ThreadPool<>;
 
 /// Compressed BGZF blocks read per IO step before a parallel decompress dispatch.
 /// Matches BgzfReader's batch granularity so one large input saturates the pool.
-constexpr std::int32_t BLOCKS_PER_BATCH{32};
+constexpr std::int32_t MERGE_BLOCKS_PER_BATCH{32};
 
 /// Target framed-record payload per handoff batch. Records are handed to the merge
 /// consumer in batches of roughly this size so the per-record cost is an index
@@ -268,12 +268,12 @@ struct MergeReadAhead::Impl
             while (!stopToken.stop_requested()) {
                 std::vector<std::vector<std::byte>> blocks{};
                 std::vector<BgzfBlockInfo> infos{};
-                blocks.reserve(BLOCKS_PER_BATCH);
-                infos.reserve(BLOCKS_PER_BATCH);
+                blocks.reserve(MERGE_BLOCKS_PER_BATCH);
+                infos.reserve(MERGE_BLOCKS_PER_BATCH);
                 bool eof{false};
 
                 const auto ioStart{std::chrono::steady_clock::now()};
-                for (std::int32_t b{0}; b < BLOCKS_PER_BATCH; ++b) {
+                for (std::int32_t b{0}; b < MERGE_BLOCKS_PER_BATCH; ++b) {
                     std::array<std::byte, 18> blockHeader{};
                     in.read(reinterpret_cast<char*>(std::data(blockHeader)), 18);
                     const std::streamsize headerRead{in.gcount()};
