@@ -13,6 +13,25 @@ throughput, deterministic chunking of inputs, and flexible record filtering. Nat
 reader/writer support includes CRAI interop and configurable block/data-series compression methods.
 The "open" reflects our commitment to developing this library in the open.
 
+## Highlight: faster sorted BAM merges
+
+`pbsamoa merge` is much faster than `samtools merge` on sorted inputs:
+
+```sh
+pbsamoa merge --threads 32 --memory 5G out.bam inputs/*.bam
+```
+
+On a 16-input sorted benchmark with 8M HiFi reads:
+
+|       Tool       | Version  | Threads | Run time | Speedup |
+| ---------------- | -------- | ------: | -------: | ------: |
+| `samtools merge` | 1.23     |      20 |    8m28s |    1.0x |
+| `pbsamoa merge`  | e26bab59 |      20 |    2m16s |   ~3.7x |
+| `pbsamoa merge`  | e26bab59 |      32 |    1m03s |   ~8.0x |
+
+See [CLI Tools](docs/cli.md#merge--merge-or-concatenate-bam-files) for merge
+modes and tuning knobs.
+
 ## Quick Start
 
 Everything in this library is in the `PacBio::Samoa` namespace, for clarity prepend all examples
