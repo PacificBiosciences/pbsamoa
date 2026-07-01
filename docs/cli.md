@@ -112,6 +112,12 @@ auto-detected from the inputs' `@HD SO`:
 - all unsorted/unknown → byte-level concatenation.
 - a mix → error (pass `--order` or `--concat`).
 
+Performance note: `pbsamoa merge` is much faster than `samtools merge` on
+sorted inputs. On a 16-input benchmark with 8,535,828 records, `samtools 1.23
+merge -@20` took 8m28s, while `pbsamoa merge --threads 20 --memory 5G` took
+2m16s (~3.7x faster). With `--threads 32 --memory 5G`, `pbsamoa merge`
+finished in 1m03s (~8.0x faster than that samtools run).
+
 The sorted merge reads every input in parallel and ahead of the merge: each
 input is decompressed on a shared worker pool and framed into a per-input bounded
 queue, while the heap consumes already-decoded records and the writer compresses
@@ -122,12 +128,12 @@ head record available, so a budget below one record cannot stall the merge.
 When a coordinate merge's inputs occupy strictly disjoint coordinate ranges — each
 file's coordinates entirely precede the next's — the merge skips the heap entirely
 and emits via verbatim BGZF block passthrough (the `--concat` machinery), reordered
-by minimum coordinate, after a cheap probe confirms the inputs do not overlap. This
-eliminates recompression — the dominant cost — so the common shard / per-chromosome
-/ `chunk`→`merge` roundtrip runs several times faster than the heap merge (and than
-`samtools merge`, which always recompresses). Overlapping, internally unsorted, or
-query-name/tag merges use the heap path. The CLI summary notes `(passthrough)` when
-this path is taken.
+by minimum coordinate, after `ProbeDisjointChain` verifies non-overlap and internal
+sort order. This eliminates recompression — the dominant cost — so the common shard
+/ per-chromosome / `chunk`→`merge` roundtrip runs several times faster than the heap
+merge (and than `samtools merge`, which always recompresses). Overlapping, internally
+unsorted, or query-name/tag merges use the heap path. The CLI summary notes
+`(passthrough)` when this path is taken.
 
 ```sh
 pbsamoa merge out.bam a.bam b.bam              # auto-detect

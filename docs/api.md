@@ -725,7 +725,9 @@ writer.Close();                                       // joins the IO thread
 builder.Finalize(writer.EndVirtualOffset()).ToFile("sorted.bam.bai");
 ```
 
-`pbsamoa merge --bai` (and `MergeConfig::BaiOutput`) use exactly this path. `Observe()`
+`pbsamoa merge --bai` (and `MergeConfig::BaiOutput`) use exactly this path for
+coordinate-sorted heap merges. Concat, queryname/tag merges, and disjoint-chain
+passthrough are rejected; run `bai-build` on those outputs instead. `Observe()`
 throws if the records are not coordinate-sorted.
 
 ### Statistics

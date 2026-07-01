@@ -162,8 +162,10 @@ Key relationships:
   budget cannot stall the merge. Per-source file order is preserved, so the merged
   output is independent of thread count, decode timing, and budget. Avoiding the
   per-record allocation is what lets input decompression actually overlap the
-  merge — on a 575 MB four-way coordinate merge it runs ~1.7x faster than
-  `samtools merge -@8`.
+  merge — on a 16-input sorted benchmark with 8,535,828 records,
+  `pbsamoa merge --threads 20 --memory 5G` ran in 2m16s versus 8m28s for
+  `samtools 1.23 merge -@20` (~3.7x faster), and `--threads 32 --memory 5G`
+  ran in 1m03s (~8.0x faster than that samtools run).
 
 - **RawRecord** owns a copy of raw BAM bytes. `CigarOp` values are eagerly
   copied into an aligned buffer on construction (BAM does not guarantee
