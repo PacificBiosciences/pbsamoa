@@ -20,7 +20,7 @@ Options:
 
 | Flag | Alias | Description |
 | ---- | ----- | ----------- |
-| `--bgzf-threads N` | `-j` | Decompression worker threads (default: auto, max 10) |
+| `--bgzf-threads N` | | Decompression worker threads (default: auto, max 10) |
 | `--format-threads N` | | SAM formatting thread pool size for BAM input (default: `max(hw_concurrency, 4)`) |
 | `--reference ref.fa` | | Reference FASTA for reference-based CRAM decoding |
 | `--region ref:start-end|*` | | CRAM-only region query (`*` selects unmapped) |
@@ -258,5 +258,5 @@ Options:
 
 | Flag | Alias | Description |
 | ---- | ----- | ----------- |
-| `--bgzf-threads N` | `-j` | BGZF decompression worker threads (default: auto, max 8) |
+| `--bgzf-threads N` | | BGZF decompression worker threads (default: auto, max 10) |
 | `--decode-threads N` | | BamRecord decode worker threads (default: 4) |

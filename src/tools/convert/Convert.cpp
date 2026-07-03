@@ -1,12 +1,17 @@
 #include "Convert.hpp"
 
-#include "../CliUtils.hpp"
 #include "../ParseUtils.hpp"
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/CramWriter.hpp>
 #include <pbsamoa/io/SamReader.hpp>
+
+#include <pbcopper/cli2/Interface.h>
+#include <pbcopper/cli2/Option.h>
+#include <pbcopper/cli2/PositionalArgument.h>
+#include <pbcopper/cli2/Results.h>
 
 #include <algorithm>
 #include <array>
@@ -14,12 +19,14 @@
 #include <filesystem>
 #include <format>
 #include <optional>
-#include <print>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 
 namespace PacBio {
@@ -27,31 +34,86 @@ namespace Samoa {
 namespace Convert {
 namespace {
 
-void PrintBlockCompressionHelp()
-{
-    std::println(stderr,
-                 "Valid values: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,"
-                 "fqzcomp,tok or numeric 0-8");
-}
+// ---- CLIv2 option / positional constants ------------------------------------
 
-void PrintSeriesCompressionHelp()
-{
-    std::println(stderr,
-                 "Valid series include: BF,CF,RI,RL,AP,RG,RN,MF,NS,NP,TS,NF,TL,"
-                 "FN,FC,FP,MQ,BA,QS,BS,IN,DL,SC,RS,PD,HC,BB,QQ");
-}
+const CLI_v2::Option RecordsPerSlice{
+    R"({
+    "names" : ["records-per-slice"],
+    "description" : "Number of records per CRAM slice.",
+    "type" : "integer",
+    "default" : 0
+})"};
 
-void PrintUsage()
-{
-    std::println(stderr,
-                 "Usage: pbsamoa convert [--records-per-slice N] "
-                 "[--bgzf-threads N] [--convert-to-bam-record] "
-                 "[--decode-threads N] "
-                 "[--compression-threads N] "
-                 "[--block-compression METHOD] "
-                 "[--series-compression SERIES=METHOD]... [--write-crai] "
-                 "INPUT.(bam|sam) OUTPUT.cram");
-}
+// Thread counts use -1 as a sentinel meaning "not user-provided / auto-detect".
+const CLI_v2::Option BgzfThreads{
+    R"({
+    "names" : ["bgzf-threads"],
+    "description" : "BGZF decompression threads; 0 = auto.",
+    "type" : "integer",
+    "default" : -1
+})"};
+
+const CLI_v2::Option DecodeThreads{
+    R"({
+    "names" : ["decode-threads"],
+    "description" : "BAM record decode threads; 0 = auto.",
+    "type" : "integer",
+    "default" : -1
+})"};
+
+const CLI_v2::Option ConvertToBamRecord{
+    R"({
+    "names" : ["convert-to-bam-record"],
+    "description" : "Decode BAM records before writing to CRAM."
+})"};
+
+const CLI_v2::Option CompressionThreads{
+    R"({
+    "names" : ["compression-threads"],
+    "description" : "CRAM compression threads; 0 = auto.",
+    "type" : "integer",
+    "default" : -1
+})"};
+
+const CLI_v2::Option BlockCompression{
+    R"({
+    "names" : ["block-compression"],
+    "description" : "CRAM block compression method.",
+    "type" : "string",
+    "choices" : ["raw", "gzip", "bzip2", "lzma", "rans4x8", "rans4x16", "arith", "fqzcomp", "tok"],
+    "default" : "rans4x8"
+})"};
+
+// Repeatable: --series-compression may appear multiple times.
+const CLI_v2::Option SeriesCompression{
+    R"({
+    "names" : ["series-compression"],
+    "description" : "Per-series compression override (SERIES=METHOD); may be repeated.",
+    "type" : "string",
+    "repeatable" : true
+})"};
+
+const CLI_v2::Option WriteCrai{
+    R"({
+    "names" : ["write-crai"],
+    "description" : "Write CRAI index alongside output CRAM."
+})"};
+
+const CLI_v2::PositionalArgument Input{
+    R"({
+    "name" : "input",
+    "description" : "Input BAM or SAM file.",
+    "type" : "file"
+})"};
+
+const CLI_v2::PositionalArgument Output{
+    R"({
+    "name" : "output",
+    "description" : "Output CRAM file.",
+    "type" : "file"
+})"};
+
+// ---- Domain helpers (unchanged from the original) ---------------------------
 
 std::optional<CramBlockMethod> ParseCompressionMethod(std::string_view arg)
 {
@@ -182,127 +244,93 @@ void ConvertSamToCram(const std::filesystem::path& inputPath,
 
 }  // namespace
 
-int Runner(int argc, char** argv)
+CLI_v2::Interface CreateInterface()
+{
+    CLI_v2::Interface interface{"pbsamoa convert", "Convert BAM/SAM to CRAM format.",
+                                LibraryFormattedVersion()};
+    // convert has no --num-threads flag; disable the built-in to avoid shadowing.
+    interface.DisableNumThreadsOption();
+    interface.AddOptions({RecordsPerSlice, BgzfThreads, DecodeThreads, ConvertToBamRecord,
+                          CompressionThreads, BlockCompression, SeriesCompression, WriteCrai});
+    interface.AddPositionalArguments({Input, Output});
+    return interface;
+}
+
+int Runner(const CLI_v2::Results& results)
 {
     CramWriterConfig config;
-    config.BlockCompressionMethod = CramBlockMethod::RANS4X8;
-    std::int32_t bgzfThreadsOpt{-1};
-    std::int32_t decodeThreadsOpt{-1};
-    std::int32_t compressionThreadsOpt{-1};
-    bool convertToBamRecord{false};
-    const char* inputFile{nullptr};
-    const char* outputFile{nullptr};
 
-    for (int i{0}; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-
-        if ((arg == "--help") || (arg == "-h")) {
-            PrintUsage();
-            return EXIT_SUCCESS;
+    // --records-per-slice (optional; default 0 = use library default).
+    // Use IsUserProvided() to distinguish "not given" (skip) from "user gave 0" (must throw).
+    if (results[RecordsPerSlice].IsUserProvided()) {
+        const std::int32_t v{results[RecordsPerSlice]};
+        if (v < 1) {
+            throw std::runtime_error{"records-per-slice must be > 0"};
         }
-
-        if (arg == "--records-per-slice") {
-            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
-                Tools::RequireOptionValue(argc, argv, i, "--records-per-slice"),
-                "records-per-slice")};
-            if (v < 1) {
-                throw std::runtime_error{"records-per-slice must be > 0"};
-            }
-            config.RecordsPerSlice = v;
-            continue;
-        }
-
-        if (arg == "--bgzf-threads") {
-            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
-                Tools::RequireOptionValue(argc, argv, i, "--bgzf-threads"), "bgzf-threads")};
-            if (v < 0) {
-                throw std::runtime_error{"bgzf-threads must be >= 0"};
-            }
-            bgzfThreadsOpt = v;
-            continue;
-        }
-
-        if (arg == "--decode-threads") {
-            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
-                Tools::RequireOptionValue(argc, argv, i, "--decode-threads"), "decode-threads")};
-            if (v < 0) {
-                throw std::runtime_error{"decode-threads must be >= 0"};
-            }
-            decodeThreadsOpt = v;
-            continue;
-        }
-
-        if (arg == "--convert-to-bam-record") {
-            convertToBamRecord = true;
-            continue;
-        }
-
-        if (arg == "--compression-threads") {
-            const std::int32_t v{Tools::ParseIntegerOrThrow<std::int32_t>(
-                Tools::RequireOptionValue(argc, argv, i, "--compression-threads"),
-                "compression-threads")};
-            if (v < 0) {
-                throw std::runtime_error{"compression-threads must be >= 0"};
-            }
-            compressionThreadsOpt = v;
-            continue;
-        }
-
-        if ((arg == "--block-compression") && Tools::HasFollowingArgument(i, argc)) {
-            const std::string_view methodArg{Tools::NextArgumentView(argv, i)};
-            const auto method = ParseCompressionMethod(methodArg);
-            if (!method) {
-                std::println(stderr, "Error: invalid block compression method '{}'", methodArg);
-                PrintBlockCompressionHelp();
-                return EXIT_FAILURE;
-            }
-            config.BlockCompressionMethod = *method;
-            continue;
-        }
-
-        if ((arg == "--series-compression") && Tools::HasFollowingArgument(i, argc)) {
-            const std::string_view specArg{Tools::NextArgumentView(argv, i)};
-            const auto parsed{ParseSeriesCompression(specArg)};
-            if (!parsed) {
-                std::println(stderr, "Error: {}", parsed.error());
-                PrintSeriesCompressionHelp();
-                PrintBlockCompressionHelp();
-                return EXIT_FAILURE;
-            }
-            const auto [series, method]{*parsed};
-            config.DataSeriesCompressionMethods[series] = method;
-            continue;
-        }
-
-        if (arg == "--write-crai") {
-            config.WriteCrai = true;
-            continue;
-        }
-
-        if (!std::empty(arg) && arg[0] == '-') {
-            std::println(stderr, "Error: unknown option '{}'", arg);
-            PrintUsage();
-            return EXIT_FAILURE;
-        }
-
-        if (!inputFile) {
-            inputFile = argv[i];
-        } else if (!outputFile) {
-            outputFile = argv[i];
-        } else {
-            std::println(stderr, "Error: too many positional arguments");
-            PrintUsage();
-            return EXIT_FAILURE;
-        }
+        config.RecordsPerSlice = v;
     }
 
-    if (!inputFile || !outputFile) {
-        PrintUsage();
-        return EXIT_FAILURE;
+    // Thread counts: -1 sentinel = not provided / auto; validate only user-supplied values.
+    const std::int32_t bgzfThreadsOpt{results[BgzfThreads]};
+    if (results[BgzfThreads].IsUserProvided() && (bgzfThreadsOpt < 0)) {
+        throw std::runtime_error{"bgzf-threads must be >= 0"};
     }
 
-    const std::filesystem::path inputPath{inputFile};
-    const std::filesystem::path outputPath{outputFile};
+    const std::int32_t decodeThreadsOpt{results[DecodeThreads]};
+    if (results[DecodeThreads].IsUserProvided() && (decodeThreadsOpt < 0)) {
+        throw std::runtime_error{"decode-threads must be >= 0"};
+    }
+
+    // Copy-init (not brace-init): Result's bool conversion is ambiguous with brace-init.
+    const bool convertToBamRecord = results[ConvertToBamRecord];
+
+    const std::int32_t compressionThreadsOpt{results[CompressionThreads]};
+    if (results[CompressionThreads].IsUserProvided() && (compressionThreadsOpt < 0)) {
+        throw std::runtime_error{"compression-threads must be >= 0"};
+    }
+
+    // --block-compression (default "rans4x8" matches the library's default).
+    // choices in the JSON is for --help only; ParseCompressionMethod also accepts 0-8 numerics.
+    const std::string blockCompressionStr = results[BlockCompression];
+    const auto blockMethod{ParseCompressionMethod(blockCompressionStr)};
+    if (!blockMethod) {
+        throw std::runtime_error{std::format(
+            "invalid block compression method '{}'\n"
+            "Valid values: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,fqzcomp,tok or numeric 0-8",
+            blockCompressionStr)};
+    }
+    config.BlockCompressionMethod = *blockMethod;
+
+    // --series-compression (repeatable; processed in order of appearance).
+    const std::vector<std::string> seriesCompressions =
+        results.ToVector<std::string>(SeriesCompression);
+    for (const std::string& specStr : seriesCompressions) {
+        const auto parsed{ParseSeriesCompression(specStr)};
+        if (!parsed) {
+            throw std::runtime_error{std::format(
+                "{}\n"
+                "Valid series include: BF,CF,RI,RL,AP,RG,RN,MF,NS,NP,TS,NF,TL,"
+                "FN,FC,FP,MQ,BA,QS,BS,IN,DL,SC,RS,PD,HC,BB,QQ\n"
+                "Valid values: raw,gzip,bzip2,lzma,rans4x8,rans4x16,arith,fqzcomp,tok or "
+                "numeric 0-8",
+                parsed.error())};
+        }
+        const auto [series, method]{*parsed};
+        config.DataSeriesCompressionMethods[series] = method;
+    }
+
+    const bool writeCrai = results[WriteCrai];
+    config.WriteCrai = writeCrai;
+
+    // CLIv2 does not enforce required positional count — guard before indexing.
+    const std::vector<std::string>& positional{results.PositionalArguments()};
+    if (positional.size() != 2) {
+        throw std::runtime_error{
+            "convert requires exactly two arguments: <input.bam|sam> <output.cram>"};
+    }
+
+    const std::filesystem::path inputPath{positional[0]};
+    const std::filesystem::path outputPath{positional[1]};
     constexpr std::int32_t MAX_IO_WORKERS{16};
     constexpr std::int32_t MAX_COMPRESSION_WORKERS{8};
     const std::size_t bgzfWorkers{Tools::ResolveNumWorkers(bgzfThreadsOpt, MAX_IO_WORKERS)};
@@ -311,12 +339,11 @@ int Runner(int argc, char** argv)
         Tools::ResolveNumWorkers(compressionThreadsOpt, MAX_COMPRESSION_WORKERS);
 
     if (outputPath.extension() != ".cram") {
-        std::println(stderr, "Error: output must use .cram extension");
-        return EXIT_FAILURE;
+        throw std::runtime_error{"output must use .cram extension"};
     }
 
     if (inputPath.extension() == ".bam") {
-        if (convertToBamRecord || decodeThreadsOpt >= 0) {
+        if (convertToBamRecord || (decodeThreadsOpt >= 0)) {
             ConvertBamToCramViaBamRecord(inputPath, outputPath, config, bgzfWorkers, decodeWorkers);
         } else {
             ConvertBamToCramRaw(inputPath, outputPath, config, bgzfWorkers);
@@ -328,8 +355,7 @@ int Runner(int argc, char** argv)
         return EXIT_SUCCESS;
     }
 
-    std::println(stderr, "Error: input must use .bam or .sam extension");
-    return EXIT_FAILURE;
+    throw std::runtime_error{"input must use .bam or .sam extension"};
 }
 
 }  // namespace Convert

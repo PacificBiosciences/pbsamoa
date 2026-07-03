@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-pbsamoa — C++23 SAM/BAM/CRAM/BAI library. Single dep: libdeflate (Meson wrap). `AGENTS.md` is the non-Claude mirror; keep both in sync.
+pbsamoa — C++23 SAM/BAM/CRAM/BAI library. Core deps (Meson wraps): libdeflate + pbcopper (pbcopper also powers the CLI tools via CLIv2). `AGENTS.md` is the non-Claude mirror; keep both in sync.
 
 ## Build & Test
 

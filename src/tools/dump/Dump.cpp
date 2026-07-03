@@ -3,10 +3,10 @@
 #include "../../CramInternal.hpp"
 #include "../../SamFieldUtils.hpp"
 #include "../../WriterUtils.hpp"
-#include "../CliUtils.hpp"
 #include "../MetricUtils.hpp"
 #include "../ParseUtils.hpp"
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/Metrics.hpp>
@@ -18,6 +18,10 @@
 #include <pbsamoa/io/CramReader.hpp>
 #include <pbsamoa/io/SamReader.hpp>
 
+#include <pbcopper/cli2/Interface.h>
+#include <pbcopper/cli2/Option.h>
+#include <pbcopper/cli2/PositionalArgument.h>
+#include <pbcopper/cli2/Results.h>
 #include <pbcopper/parallel/ThreadPool.h>
 
 #include <algorithm>
@@ -38,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include <cstdint>
 #include <cstdio>
@@ -48,11 +53,74 @@ namespace Samoa {
 namespace Dump {
 namespace {
 
+// ---- CLIv2 option / positional constants ----
+
+// --bgzf-threads is long-only: `-j` belongs to the built-in --num-threads (disabled
+// below via DisableNumThreadsOption()), whose auto-resolution differs from dump's
+// -1 = auto (capped at 10).
+const CLI_v2::Option BgzfThreads{
+    R"({
+    "names" : ["bgzf-threads"],
+    "description" : "BGZF decompression threads; -1 = auto (capped at 10).",
+    "type" : "integer",
+    "default" : -1
+})"};
+
+const CLI_v2::Option FormatThreads{
+    R"({
+    "names" : ["format-threads"],
+    "description" : "SAM formatting threads; 0 = auto (max of hardware concurrency and 4). BAM only.",
+    "type" : "integer",
+    "default" : 0
+})"};
+
+const CLI_v2::Option Reference{
+    R"({
+    "names" : ["reference"],
+    "description" : "Reference FASTA path (required for reference-based CRAM).",
+    "type" : "file"
+})"};
+
+const CLI_v2::Option Region{
+    R"({
+    "names" : ["region"],
+    "description" : "Genomic region to query (ref:start-end or * for unmapped). CRAM only.",
+    "type" : "string"
+})"};
+
+const CLI_v2::Option Index{
+    R"({
+    "names" : ["index"],
+    "description" : "Index file path (.crai). CRAM only.",
+    "type" : "file"
+})"};
+
+const CLI_v2::Option NoHeader{
+    R"({
+    "names" : ["no-header"],
+    "description" : "Suppress the SAM header."
+})"};
+
+const CLI_v2::Option HeaderOnly{
+    R"({
+    "names" : ["header-only"],
+    "description" : "Output only the SAM header."
+})"};
+
+const CLI_v2::PositionalArgument InputFile{
+    R"({
+    "name" : "input",
+    "description" : "Input BAM/SAM/CRAM file.",
+    "type" : "file"
+})"};
+
+// ---- Internal types and helpers (unchanged from legacy) ----
+
 enum class HeaderMode
 {
     Full,
-    NoHeader,
-    HeaderOnly,
+    Suppress,
+    OnlyHeader,
 };
 
 struct CramRegion
@@ -209,7 +277,7 @@ void FormatRecordImpl(const Record& record, const SamHeader& header, std::string
 
 void WriteHeader(const SamHeader& header, HeaderMode headerMode)
 {
-    if (headerMode == HeaderMode::NoHeader) {
+    if (headerMode == HeaderMode::Suppress) {
         return;
     }
 
@@ -338,7 +406,7 @@ void DumpSam(const std::filesystem::path& path, HeaderMode headerMode)
     SamReader reader{path};
     const SamHeader& header{reader.Header()};
     WriteHeader(header, headerMode);
-    if (headerMode == HeaderMode::HeaderOnly) {
+    if (headerMode == HeaderMode::OnlyHeader) {
         return;
     }
 
@@ -357,7 +425,7 @@ void DumpCram(const std::filesystem::path& path, const std::filesystem::path& re
     CramReader reader{path, config};
     const SamHeader& header{reader.Header()};
     WriteHeader(header, headerMode);
-    if (headerMode == HeaderMode::HeaderOnly) {
+    if (headerMode == HeaderMode::OnlyHeader) {
         return;
     }
 
@@ -405,7 +473,7 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
 
     const auto& header{reader.Header()};
     WriteHeader(header, headerMode);
-    if (headerMode == HeaderMode::HeaderOnly) {
+    if (headerMode == HeaderMode::OnlyHeader) {
         return;
     }
 
@@ -466,55 +534,42 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
 
 }  // namespace
 
-int Runner(int argc, char** argv)
+CLI_v2::Interface CreateInterface()
+{
+    CLI_v2::Interface interface{"pbsamoa dump",
+                                "Convert a BAM/SAM/CRAM file to SAM text on stdout.",
+                                LibraryFormattedVersion()};
+    // dump defines its own `-j` (bgzf threads); disable the built-in `-j`/`--num-threads`
+    // so it does not shadow or conflict with dump's custom `-j`.
+    interface.DisableNumThreadsOption();
+    interface.AddOptions(
+        {BgzfThreads, FormatThreads, Reference, Region, Index, NoHeader, HeaderOnly});
+    interface.AddPositionalArguments({InputFile});
+    return interface;
+}
+
+int Runner(const CLI_v2::Results& results)
 {
     static std::array<char, 1 << 20> stdoutBuf;
 
-    // Parse options
-    std::int32_t bgzfOpt{-1};
-    std::int32_t formatOpt{0};
-    const char* inputFile{nullptr};
-    const char* referenceFile{nullptr};
-    const char* regionText{nullptr};
-    const char* indexFile{nullptr};
-    bool noHeader{false};
-    bool headerOnly{false};
-
-    for (int i{0}; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if (arg == "--bgzf-threads") {
-            bgzfOpt = Tools::ParseIntOption<std::int32_t>(argc, argv, i, "--bgzf-threads",
-                                                          "bgzf-threads");
-        } else if (arg == "--format-threads") {
-            formatOpt = Tools::ParseIntOption<std::int32_t>(argc, argv, i, "--format-threads",
-                                                            "format-threads");
-        } else if (arg == "-j") {
-            bgzfOpt = Tools::ParseIntOption<std::int32_t>(argc, argv, i, "-j", "bgzf-threads");
-        } else if (arg == "--reference") {
-            referenceFile = Tools::RequireOptionValue(argc, argv, i, "--reference");
-        } else if (arg == "--region") {
-            regionText = Tools::RequireOptionValue(argc, argv, i, "--region");
-        } else if (arg == "--index") {
-            indexFile = Tools::RequireOptionValue(argc, argv, i, "--index");
-        } else if (arg == "--no-header") {
-            noHeader = true;
-        } else if (arg == "--header-only") {
-            headerOnly = true;
-        } else if (!std::empty(arg) && arg[0] != '-') {
-            inputFile = argv[i];
-        } else {
-            throw std::runtime_error{std::format("unknown option: {}", arg)};
-        }
+    // CLIv2 does not enforce required positional count; guard before indexing.
+    const std::vector<std::string>& positional{results.PositionalArguments()};
+    if (positional.size() != 1) {
+        throw std::runtime_error{"dump requires exactly one argument: INPUT"};
     }
 
-    if (!inputFile) {
-        std::println(stderr,
-                     "Usage: pbsamoa dump [--bgzf-threads N] [--format-threads N] "
-                     "[--no-header|--header-only] [--reference ref.fa] "
-                     "[--region ref:start-end|*] [--index file.crai] "
-                     "INPUT.(bam|sam|cram)");
-        return EXIT_FAILURE;
-    }
+    // Numeric reads: brace-init exact-width type (never read into std::size_t directly).
+    const std::int32_t bgzfOpt{results[BgzfThreads]};
+    const std::int32_t formatOpt{results[FormatThreads]};
+
+    // String reads: copy-init (brace-init is ambiguous due to Result's char-type conversion).
+    const std::string referenceStr = results[Reference];
+    const std::string regionStr = results[Region];
+    const std::string indexStr = results[Index];
+
+    // Bool flag reads: copy-init.
+    const bool noHeader = results[NoHeader];
+    const bool headerOnly = results[HeaderOnly];
 
     if (noHeader && headerOnly) {
         throw std::runtime_error{"--no-header and --header-only are mutually exclusive"};
@@ -522,46 +577,49 @@ int Runner(int argc, char** argv)
 
     HeaderMode headerMode{HeaderMode::Full};
     if (noHeader) {
-        headerMode = HeaderMode::NoHeader;
+        headerMode = HeaderMode::Suppress;
     } else if (headerOnly) {
-        headerMode = HeaderMode::HeaderOnly;
+        headerMode = HeaderMode::OnlyHeader;
     }
 
-    const std::filesystem::path path{inputFile};
+    const std::filesystem::path path{positional[0]};
     const std::size_t bgzfWorkers{Tools::ResolveNumWorkers(bgzfOpt, /*explicitCap=*/10)};
     std::setvbuf(stdout, std::data(stdoutBuf), _IOFBF, std::size(stdoutBuf));
 
+    const bool hasRegion{!regionStr.empty()};
+    const bool hasIndex{!indexStr.empty()};
+
     if (path.extension() == ".sam") {
-        if (regionText || indexFile) {
+        if (hasRegion || hasIndex) {
             throw std::runtime_error{"--region/--index are only supported for CRAM input"};
         }
         DumpSam(path, headerMode);
         return EXIT_SUCCESS;
     }
     if (path.extension() == ".cram") {
-        if (indexFile && !regionText) {
+        if (hasIndex && !hasRegion) {
             throw std::runtime_error{"--index requires --region for CRAM input"};
         }
         std::filesystem::path referencePath{};
-        if (referenceFile) {
-            referencePath = referenceFile;
+        if (!referenceStr.empty()) {
+            referencePath = referenceStr;
         }
 
         std::optional<std::string> region{};
-        if (regionText) {
-            region.emplace(regionText);
+        if (hasRegion) {
+            region.emplace(regionStr);
         }
 
         std::optional<std::filesystem::path> indexPath{};
-        if (indexFile) {
-            indexPath.emplace(indexFile);
+        if (hasIndex) {
+            indexPath.emplace(indexStr);
         }
 
         DumpCram(path, referencePath, region, indexPath, bgzfWorkers, headerMode);
         return EXIT_SUCCESS;
     }
 
-    if (regionText || indexFile) {
+    if (hasRegion || hasIndex) {
         throw std::runtime_error{"--region/--index are only supported for CRAM input"};
     }
 

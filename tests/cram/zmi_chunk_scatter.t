@@ -37,5 +37,5 @@ Same (chunk, total, tile, seed) is deterministic across runs:
 --tile/--seed without --mode scatter is rejected:
 
   $ "${PBSAMOA}" chunk indexed.bam 1 4 --tile 3 2>&1
-  Error: --tile/--seed require --mode scatter
+  *pbsamoa chunk ERROR: --tile/--seed require --mode scatter (glob)
   [1]

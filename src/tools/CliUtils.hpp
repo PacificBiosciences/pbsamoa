@@ -8,64 +8,21 @@
 #include <array>
 #include <format>
 #include <stdexcept>
-#include <string>
 #include <string_view>
 
-#include <cstddef>
 #include <cstdint>
 
 namespace PacBio {
 namespace Samoa {
 namespace Tools {
 
-inline bool HasFollowingArgument(int index, int argc) { return (index + 1) < argc; }
+// --- Value interpreters for pbcopper CLIv2 option strings ---------------------
+// CLIv2 does the scanning/typing; these turn an already-extracted option value
+// into a domain type (or validate it).
 
-inline std::string_view NextArgumentView(char* const* argv, int& index)
+/// Interpret an --order value.  Throws on an unrecognized value.
+inline SortOrder ParseSortOrder(std::string_view value)
 {
-    ++index;
-    return argv[index];
-}
-
-inline const char* RequireOptionValue(int argc, char** argv, int& currentIndex,
-                                      std::string_view option)
-{
-    if (!HasFollowingArgument(currentIndex, argc)) {
-        throw std::runtime_error{std::format("missing value for {}", option)};
-    }
-    ++currentIndex;
-    return argv[currentIndex];
-}
-
-template <typename IntType>
-IntType ParseNextIntegerArgument(char* const* argv, int& index, std::string_view name)
-{
-    return ParseIntegerOrThrow<IntType>(NextArgumentView(argv, index), name);
-}
-
-template <typename IntType>
-IntType ParseIntOption(int argc, char** argv, int& currentIndex, std::string_view option,
-                       std::string_view parseName)
-{
-    return ParseIntegerOrThrow<IntType>(RequireOptionValue(argc, argv, currentIndex, option),
-                                        parseName);
-}
-
-/// Build a "pbsamoa <tool> arg1 arg2 ..." command-line string for @PG CL tags.
-inline std::string BuildCommandLine(std::string_view toolName, int argc, char** argv)
-{
-    std::string commandLine{"pbsamoa "};
-    commandLine += toolName;
-    for (int i{0}; i < argc; ++i) {
-        commandLine += ' ';
-        commandLine += argv[i];
-    }
-    return commandLine;
-}
-
-/// Parse --order coordinate|queryname|tag.  Throws on invalid value.
-inline SortOrder ParseSortOrder(int argc, char** argv, int& i)
-{
-    const std::string_view value{RequireOptionValue(argc, argv, i, "--order")};
     if (value == "coordinate") {
         return SortOrder::COORDINATE;
     }
@@ -78,50 +35,19 @@ inline SortOrder ParseSortOrder(int argc, char** argv, int& i)
     throw std::runtime_error{std::format("invalid --order: {}", value)};
 }
 
-/// Parse --tag XX (exactly 2 chars).  Throws on invalid value.
-inline std::array<char, 2> ParseSortTag(int argc, char** argv, int& i)
+/// Interpret a --tag value (exactly 2 characters).  Throws otherwise.
+inline std::array<char, 2> ParseSortTag(std::string_view value)
 {
-    const std::string_view value{RequireOptionValue(argc, argv, i, "--tag")};
     if (std::size(value) != 2) {
         throw std::runtime_error{std::format("--tag must be exactly 2 characters: {}", value)};
     }
     return {value[0], value[1]};
 }
 
-/// Parse a thread-count option (>= 0; 0 means auto).  Returns std::size_t.
-/// \p option names the flag for the value lookup and error message so the same
-/// parser serves --threads, --decode-threads, --compress-threads, etc.
-inline std::size_t ParseThreadsOption(int argc, char** argv, int& i,
-                                      std::string_view option = "--threads")
+/// Interpret a memory SIZE value with an optional K/M/G suffix (base 1024).
+/// \p option names the flag for the error message.
+inline ByteLimit ParseMemory(std::string_view text, std::string_view option = "--memory")
 {
-    const std::int32_t threads{
-        ParseIntegerOrThrow<std::int32_t>(RequireOptionValue(argc, argv, i, option), option)};
-    if (threads < 0) {
-        throw std::runtime_error{std::format("{} must be >= 0", option)};
-    }
-    return static_cast<std::size_t>(threads);
-}
-
-/// Parse a positive count option (>= 1).  Returns std::size_t.  \p option names
-/// the flag for the value lookup and error message (e.g. --writer-queue).
-inline std::size_t ParsePositiveCountOption(int argc, char** argv, int& i, std::string_view option)
-{
-    const std::int64_t value{
-        ParseIntegerOrThrow<std::int64_t>(RequireOptionValue(argc, argv, i, option), option)};
-    if (value < 1) {
-        throw std::runtime_error{std::format("{} must be >= 1", option)};
-    }
-    return static_cast<std::size_t>(value);
-}
-
-/// Parse a SIZE option with an optional K/M/G suffix (base 1024) into a ByteLimit.
-/// \p option names the flag for the value lookup and error message. Shared by
-/// `sort` (--memory run-buffer budget), `merge` (--memory read-ahead budget), and
-/// merge's --batch-bytes.
-inline ByteLimit ParseMemoryOption(int argc, char** argv, int& i,
-                                   std::string_view option = "--memory")
-{
-    const std::string_view text{RequireOptionValue(argc, argv, i, option)};
     if (text.empty()) {
         throw std::runtime_error{std::format("invalid {}: empty value", option)};
     }
@@ -152,11 +78,9 @@ inline ByteLimit ParseMemoryOption(int argc, char** argv, int& i,
     return ByteLimit{value * multiplier};
 }
 
-/// Parse --compression L ([1, 12]).  Returns the level as int.
-inline std::int32_t ParseCompressionLevelOption(int argc, char** argv, int& i)
+/// Validate a compression level in [1, 12].  Throws otherwise.
+inline std::int32_t CheckCompressionLevel(std::int32_t level)
 {
-    const std::int32_t level{ParseIntegerOrThrow<std::int32_t>(
-        RequireOptionValue(argc, argv, i, "--compression"), "--compression")};
     if ((level < 1) || (level > 12)) {
         throw std::runtime_error{"--compression must be in [1, 12]"};
     }

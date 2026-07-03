@@ -3,31 +3,32 @@
 #include "RecordParser.hpp"
 
 #include "../../PathUtils.hpp"
-#include "../CliUtils.hpp"
-#include "../ParseUtils.hpp"
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/io/ZmiWriter.hpp>
 
+#include <pbcopper/cli2/Interface.h>
+#include <pbcopper/cli2/Option.h>
+#include <pbcopper/cli2/PositionalArgument.h>
+#include <pbcopper/cli2/Results.h>
 #include <pbcopper/parallel/ThreadPool.h>
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <optional>
 #include <print>
-#include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <thread>
-#include <utility>
 #include <vector>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -39,60 +40,32 @@ namespace {
 constexpr std::size_t BGZF_HEADER_PREFIX{18U};
 constexpr std::size_t MAX_DECOMPRESSED_SIZE{65536U};
 
-struct CliArgs
-{
-    std::filesystem::path InputPath;
-    std::int32_t Threads{-1};
-    bool Quiet{false};
-};
-
 struct DecompressedBlock
 {
     std::uint64_t FileOffset{0};
     std::vector<std::byte> Data;
 };
 
-void PrintUsage()
-{
-    std::println(stderr,
-                 "Usage: pbsamoa zmi-index [--threads N] [--quiet] IN.bam\n"
-                 "\n"
-                 "Build a .zmi sidecar index for IN.bam without rewriting the BAM.\n"
-                 "Output is written to IN.bam.zmi.");
-}
+const CLI_v2::Option Threads{
+    R"({
+    "names" : ["threads"],
+    "description" : "Worker threads; 0 = auto (hardware concurrency).",
+    "type" : "integer",
+    "default" : 0
+})"};
 
-CliArgs ParseArgs(int argc, char** argv)
-{
-    CliArgs result;
-    for (int i{0}; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if ((arg == "--help") || (arg == "-h")) {
-            PrintUsage();
-            std::exit(EXIT_SUCCESS);
-        } else if (arg == "--quiet") {
-            result.Quiet = true;
-        } else if (arg == "--threads") {
-            result.Threads = ::PacBio::Samoa::Tools::ParseIntegerOrThrow<std::int32_t>(
-                ::PacBio::Samoa::Tools::RequireOptionValue(argc, argv, i, "--threads"),
-                "--threads");
-            if (result.Threads < 1) {
-                throw std::runtime_error{"zmi-index: --threads must be >= 1"};
-            }
-        } else if (arg.starts_with("--")) {
-            throw std::runtime_error{"zmi-index: unknown flag '" + std::string{arg} + "'"};
-        } else if (std::empty(result.InputPath)) {
-            result.InputPath = std::filesystem::path{arg};
-        } else {
-            throw std::runtime_error{"zmi-index: unexpected positional argument '" +
-                                     std::string{arg} + "'"};
-        }
-    }
+const CLI_v2::Option Quiet{
+    R"({
+    "names" : ["quiet"],
+    "description" : "Suppress the summary line written to stderr."
+})"};
 
-    if (std::empty(result.InputPath)) {
-        throw std::runtime_error{"zmi-index: input BAM path is required"};
-    }
-    return result;
-}
+const CLI_v2::PositionalArgument Input{
+    R"({
+    "name" : "input",
+    "description" : "Input BAM file.",
+    "type" : "file"
+})"};
 
 std::size_t ResolveThreadCount(std::int32_t requested)
 {
@@ -119,24 +92,42 @@ DecompressedBlock DecompressOne(std::vector<std::byte> compressed, BgzfBlockInfo
 
 }  // namespace
 
-int Runner(int argc, char** argv)
+CLI_v2::Interface CreateInterface()
 {
-    CliArgs args;
-    try {
-        args = ParseArgs(argc, argv);
-    } catch (const std::exception& e) {
-        std::println(stderr, "{}", e.what());
-        PrintUsage();
-        return EXIT_FAILURE;
+    CLI_v2::Interface interface{"pbsamoa zmi-index",
+                                "Build a .zmi sidecar index for IN.bam without rewriting the BAM. "
+                                "Output is written to IN.bam.zmi.",
+                                LibraryFormattedVersion()};
+    // zmi-index keeps its own --threads (0 = auto via hardware_concurrency); the built-in
+    // --num-threads resolves 0 to the raw hardware count with different semantics.
+    interface.DisableNumThreadsOption();
+    interface.AddOptions({Threads, Quiet});
+    interface.AddPositionalArguments({Input});
+    return interface;
+}
+
+int Runner(const CLI_v2::Results& results)
+{
+    // Exact-width read: never read into std::size_t (ambiguous conversion).
+    const std::int32_t threads{results[Threads]};
+    // Bool flags use copy-init.
+    const bool quiet = results[Quiet];
+
+    // CLIv2 does not enforce the required positional-argument count, so guard before indexing.
+    const std::vector<std::string>& pos{results.PositionalArguments()};
+    if (pos.size() != 1) {
+        throw std::runtime_error{"zmi-index requires exactly one argument: <input>"};
     }
 
-    if (!std::filesystem::exists(args.InputPath)) {
-        std::println(stderr, "zmi-index: input file not found: {}", args.InputPath.string());
-        return EXIT_FAILURE;
+    const std::filesystem::path inputPath{pos[0]};
+
+    if (!std::filesystem::exists(inputPath)) {
+        throw std::runtime_error{std::string{"zmi-index: input file not found: "} +
+                                 inputPath.string()};
     }
 
-    const std::filesystem::path zmiPath{SidecarPath(args.InputPath, ".zmi")};
-    const std::size_t numWorkers{ResolveThreadCount(args.Threads)};
+    const std::filesystem::path zmiPath{SidecarPath(inputPath, ".zmi")};
+    const std::size_t numWorkers{ResolveThreadCount(threads)};
 
     using Pool = ::PacBio::Parallel::ThreadPool<DecompressedBlock>;
     Pool pool{Pool::Config{.NumThreads = numWorkers, .QueueMultiplier = 4U}};
@@ -146,10 +137,10 @@ int Runner(int argc, char** argv)
 
     const std::jthread reader{[&]() {
         try {
-            std::ifstream input{args.InputPath, std::ios::binary};
+            std::ifstream input{inputPath, std::ios::binary};
             if (!input) {
-                throw std::runtime_error{"zmi-index: cannot open input '" +
-                                         args.InputPath.string() + "'"};
+                throw std::runtime_error{"zmi-index: cannot open input '" + inputPath.string() +
+                                         "'"};
             }
 
             std::array<std::byte, BGZF_HEADER_PREFIX> headerBytes{};
@@ -208,6 +199,7 @@ int Runner(int argc, char** argv)
         }
     }};
 
+    // Remove the partial sidecar on any failure so we don't leave a corrupt file behind.
     try {
         ZmiWriter writer{zmiPath};
         RecordParser parser;
@@ -228,14 +220,13 @@ int Runner(int argc, char** argv)
         parser.Finish();
         writer.Close();
 
-        if (!args.Quiet) {
+        if (!quiet) {
             std::println(stderr, "ZMI index written to {} ({} records)", zmiPath.string(),
                          parser.RecordsEmitted());
         }
-    } catch (const std::exception& e) {
-        std::println(stderr, "zmi-index: {}", e.what());
+    } catch (...) {
         std::filesystem::remove(zmiPath);
-        return EXIT_FAILURE;
+        throw;
     }
 
     return EXIT_SUCCESS;

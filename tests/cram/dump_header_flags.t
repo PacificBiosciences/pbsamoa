@@ -19,5 +19,5 @@
   0
 
   $ "${PBSAMOA}" dump --no-header --header-only "${TESTDIR}"/../data/spec_example.bam > /dev/null
-  Error: --no-header and --header-only are mutually exclusive
+  *--no-header and --header-only are mutually exclusive* (glob)
   [1]

@@ -12,100 +12,49 @@
 
 #include <pbsamoa/PbSamoaLibraryInfo.hpp>
 
-#include <array>
-#include <exception>
-#include <print>
-#include <ranges>
-#include <string_view>
+#include <pbcopper/cli2/CLI.h>
+#include <pbcopper/cli2/MultiToolInterface.h>
 
 namespace {
 
-using Runner = int (*)(int argc, char** argv);
-
-struct CommandSpec
+PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
 {
-    std::string_view Name;
-    Runner Run;
-};
+    using namespace PacBio::Samoa;
 
-constexpr std::array COMMANDS{
-    CommandSpec{"dump", PacBio::Samoa::Dump::Runner},
-    CommandSpec{"chunk", PacBio::Samoa::ChunkTool::Runner},
-    CommandSpec{"sort", PacBio::Samoa::SortTool::Runner},
-    CommandSpec{"merge", PacBio::Samoa::MergeTool::Runner},
-    CommandSpec{"convert", PacBio::Samoa::Convert::Runner},
-    CommandSpec{"bai-build", PacBio::Samoa::BaiBuild::Runner},
-    CommandSpec{"bai-query", PacBio::Samoa::BaiQuery::Runner},
-    CommandSpec{"zmi-build", PacBio::Samoa::ZmiBuild::Runner},
-    CommandSpec{"zmi-index", PacBio::Samoa::ZmiIndex::Runner},
-    CommandSpec{"zmi-query", PacBio::Samoa::ZmiQuery::Runner},
-    CommandSpec{"bench", PacBio::Samoa::Bench::Runner},
-};
-
-void PrintUsage()
-{
-    std::print(stderr,
-               "pbsamoa - SAM/BAM/BAI toolkit ({})\n"
-               "\n"
-               "Usage: pbsamoa <command> [args...]\n"
-               "\n"
-               "Commands:\n"
-               "  dump       Convert BAM to SAM text on stdout\n"
-               "  chunk      Dump a chunk of BAM records as SAM text\n"
-               "  sort       Sort a BAM file (coordinate/queryname/tag)\n"
-               "  merge      Merge or concatenate BAM files\n"
-               "  convert    Convert BAM/SAM to CRAM format\n"
-               "  bai-build  Build BAI index for a BAM file\n"
-               "  bai-query  Query BAM records by genomic region\n"
-               "  zmi-build  Copy BAM and build ZMI index alongside\n"
-               "  zmi-index  Build ZMI index for an existing BAM (no rewrite)\n"
-               "  zmi-query  Query BAM records by ZMW hole number\n"
-               "  bench      Benchmark pbsamoa read/write performance\n"
-               "\n"
-               "Examples:\n"
-               "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
-               "  pbsamoa convert    input.bam output.cram  Convert BAM/SAM to CRAM\n"
-               "  pbsamoa bai-build  input.bam              Build BAI index\n"
-               "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
-               "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
-               "  pbsamoa sort       input.bam sorted.bam   Coordinate-sort a BAM\n"
-               "  pbsamoa merge      out.bam a.bam b.bam     Merge or concatenate BAMs\n"
-               "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
-               "  pbsamoa zmi-index  input.bam              Build .zmi sidecar (no rewrite)\n"
-               "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
-               "  pbsamoa bench      input.bam              Run benchmarks\n",
-               PacBio::Samoa::LibraryFormattedVersion());
+    PacBio::CLI_v2::MultiToolInterface interface{"pbsamoa", "SAM/BAM/BAI toolkit",
+                                                 LibraryFormattedVersion()};
+    interface.AddTools({
+        {"dump", Dump::CreateInterface(), &Dump::Runner},
+        {"chunk", ChunkTool::CreateInterface(), &ChunkTool::Runner},
+        {"sort", SortTool::CreateInterface(), &SortTool::Runner},
+        {"merge", MergeTool::CreateInterface(), &MergeTool::Runner},
+        {"convert", Convert::CreateInterface(), &Convert::Runner},
+        {"bai-build", BaiBuild::CreateInterface(), &BaiBuild::Runner},
+        {"bai-query", BaiQuery::CreateInterface(), &BaiQuery::Runner},
+        {"zmi-build", ZmiBuild::CreateInterface(), &ZmiBuild::Runner},
+        {"zmi-index", ZmiIndex::CreateInterface(), &ZmiIndex::Runner},
+        {"zmi-query", ZmiQuery::CreateInterface(), &ZmiQuery::Runner},
+        {"bench", Bench::CreateInterface(), &Bench::Runner},
+    });
+    interface.HelpFooter(
+        "Examples:\n"
+        "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
+        "  pbsamoa convert    input.bam output.cram  Convert BAM/SAM to CRAM\n"
+        "  pbsamoa bai-build  input.bam              Build BAI index\n"
+        "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
+        "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
+        "  pbsamoa sort       input.bam sorted.bam   Coordinate-sort a BAM\n"
+        "  pbsamoa merge      out.bam a.bam b.bam     Merge or concatenate BAMs\n"
+        "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
+        "  pbsamoa zmi-index  input.bam              Build .zmi sidecar (no rewrite)\n"
+        "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
+        "  pbsamoa bench      input.bam              Run benchmarks");
+    return interface;
 }
 
 }  // namespace
 
 int main(int argc, char* argv[])
 {
-    using namespace PacBio::Samoa;
-
-    try {
-        if (argc < 2) {
-            PrintUsage();
-            return 1;
-        }
-
-        const std::string_view cmd{argv[1]};
-
-        if (const auto command{std::ranges::find(COMMANDS, cmd, &CommandSpec::Name)};
-            command != std::ranges::end(COMMANDS)) {
-            return command->Run(argc - 2, argv + 2);
-        }
-
-        if ((cmd == "--help") || (cmd == "-h")) {
-            PrintUsage();
-            return 0;
-        }
-
-        std::println(stderr, "Unknown command: {}", argv[1]);
-        PrintUsage();
-        return 1;
-    } catch (const std::exception& e) {
-        std::println(stderr, "Error: {}", e.what());
-        return 1;
-    }
+    return PacBio::CLI_v2::Run(argc, argv, CreateMultiToolInterface());
 }

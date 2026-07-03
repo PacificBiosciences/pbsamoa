@@ -1,20 +1,26 @@
 #include "Bench.hpp"
+
 #include "../../PathUtils.hpp"
-#include "../CliUtils.hpp"
 #include "../MetricUtils.hpp"
 #include "../ParseUtils.hpp"
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/core/Metrics.hpp>
 #include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
-#include <print>
 
-#include <algorithm>
-#include <chrono>
+#include <pbcopper/cli2/Interface.h>
+#include <pbcopper/cli2/Option.h>
+#include <pbcopper/cli2/PositionalArgument.h>
+#include <pbcopper/cli2/Results.h>
+
 #include <filesystem>
-#include <string_view>
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <cstdint>
 #include <cstdlib>
@@ -23,6 +29,32 @@ namespace PacBio {
 namespace Samoa {
 namespace Bench {
 namespace {
+
+// --bgzf-threads is long-only: `-j` belongs to the built-in --num-threads (disabled
+// below via DisableNumThreadsOption()), whose auto-resolution differs from bench's
+// -1 = auto (min of hardware concurrency and 10).
+const CLI_v2::Option BgzfThreads{
+    R"({
+    "names" : ["bgzf-threads"],
+    "description" : "BGZF decompression worker threads; -1 = auto (min of hardware concurrency and 10).",
+    "type" : "integer",
+    "default" : -1
+})"};
+
+const CLI_v2::Option DecodeThreads{
+    R"({
+    "names" : ["decode-threads"],
+    "description" : "BAM record decode worker threads; 0 = serial.",
+    "type" : "integer",
+    "default" : 4
+})"};
+
+const CLI_v2::PositionalArgument Input{
+    R"({
+    "name" : "input",
+    "description" : "Input BAM file.",
+    "type" : "file"
+})"};
 
 struct ReadCounts
 {
@@ -238,31 +270,33 @@ void BenchRegionQuery(const std::filesystem::path& bamPath)
 
 }  // namespace
 
-int Runner(int argc, char** argv)
+CLI_v2::Interface CreateInterface()
 {
-    std::int32_t bgzfOpt{-1};
-    std::int32_t decodeOpt{4};
-    const char* inputFile{nullptr};
+    CLI_v2::Interface interface{"pbsamoa bench",
+                                "Benchmark pbsamoa read/write performance on a BAM file.",
+                                LibraryFormattedVersion()};
+    // bench keeps its own -j/--bgzf-threads (default -1 = auto, capped at 10);
+    // the built-in --num-threads/-j resolves 0 to raw hardware count and would
+    // shadow -j, so disable it.
+    interface.DisableNumThreadsOption();
+    interface.AddOptions({BgzfThreads, DecodeThreads});
+    interface.AddPositionalArguments({Input});
+    return interface;
+}
 
-    for (int i{0}; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if ((arg == "--bgzf-threads") && Tools::HasFollowingArgument(i, argc)) {
-            bgzfOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "bgzf-threads");
-        } else if ((arg == "--decode-threads") && Tools::HasFollowingArgument(i, argc)) {
-            decodeOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "decode-threads");
-        } else if ((arg == "-j") && Tools::HasFollowingArgument(i, argc)) {
-            bgzfOpt = Tools::ParseNextIntegerArgument<std::int32_t>(argv, i, "bgzf-threads");
-        } else if (!std::empty(arg) && arg[0] != '-') {
-            inputFile = argv[i];
-        }
+int Runner(const CLI_v2::Results& results)
+{
+    // Read into exact-width ints (never std::size_t — ambiguous conversion).
+    const std::int32_t bgzfOpt{results[BgzfThreads]};
+    const std::int32_t decodeOpt{results[DecodeThreads]};
+
+    // CLIv2 does not enforce the required positional-argument count.
+    const std::vector<std::string>& pos{results.PositionalArguments()};
+    if (pos.size() != 1) {
+        throw std::runtime_error{"bench requires exactly one argument: INPUT"};
     }
 
-    if (!inputFile) {
-        std::println(stderr, "Usage: pbsamoa bench [--bgzf-threads N] [--decode-threads N] INPUT");
-        return EXIT_FAILURE;
-    }
-
-    const std::filesystem::path path{inputFile};
+    const std::filesystem::path path{pos[0]};
 
     const std::size_t bgzfWorkers{Tools::ResolveNumWorkers(bgzfOpt, /*explicitCap=*/10)};
     std::size_t decodeWorkers{4U};

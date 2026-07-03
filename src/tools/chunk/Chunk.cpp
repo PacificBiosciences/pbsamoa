@@ -1,15 +1,21 @@
 #include "Chunk.hpp"
-#include "../CliUtils.hpp"
-#include "../ParseUtils.hpp"
 
+#include "../ParseUtils.hpp"
 #include "../SamOutput.hpp"
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
+#include <pbcopper/cli2/Interface.h>
+#include <pbcopper/cli2/Option.h>
+#include <pbcopper/cli2/PositionalArgument.h>
+#include <pbcopper/cli2/Results.h>
+
 #include <filesystem>
-#include <optional>
 #include <print>
-#include <string_view>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <cstdint>
 #include <cstdlib>
@@ -19,99 +25,105 @@ namespace Samoa {
 namespace ChunkTool {
 namespace {
 
-void PrintUsage()
-{
-    std::println(stderr,
-                 "Usage: pbsamoa chunk IN.bam CHUNK TOTAL [--mode contiguous|scatter] "
-                 "[--tile M] [--seed S]\n"
-                 "  --mode   contiguous (default): one contiguous ZMW range per chunk\n"
-                 "           scatter: seeded balanced shuffle of M-ZMW tiles, sampled\n"
-                 "                    across the whole file (chaotic but deterministic)\n"
-                 "  --tile M scatter only: read up to M consecutive ZMWs per seek "
-                 "(default 1)\n"
-                 "  --seed S scatter only: shuffle seed (default 0)\n"
-                 "Running all TOTAL chunks visits every record exactly once.");
-}
+const CLI_v2::Option Mode{
+    R"({
+    "names" : ["mode"],
+    "description" : "Chunking mode: contiguous (default) selects one contiguous ZMW range per chunk; scatter uses a seeded balanced shuffle of tile-ZMW groups sampled across the whole file (chaotic but deterministic).",
+    "type" : "string",
+    "choices" : ["contiguous", "scatter"],
+    "default" : "contiguous"
+})"};
+
+const CLI_v2::Option Tile{
+    R"({
+    "names" : ["tile"],
+    "description" : "Scatter only: read up to M consecutive ZMWs per seek (>= 1).",
+    "type" : "integer",
+    "default" : 100
+})"};
+
+// ChunkSeed is std::uint64_t, so parse as a string via ParseIntegerOrThrow<uint64_t>:
+// CLIv2's "unsigned integer" type is only 32-bit and would truncate the seed range.
+const CLI_v2::Option Seed{
+    R"({
+    "names" : ["seed"],
+    "description" : "Scatter only: deterministic shuffle seed.",
+    "type" : "string",
+    "default" : "42"
+})"};
+
+const CLI_v2::PositionalArgument Input{
+    R"({
+    "name" : "input",
+    "description" : "Input BAM file.",
+    "type" : "file"
+})"};
+
+const CLI_v2::PositionalArgument ChunkNum{
+    R"({
+    "name" : "chunk",
+    "description" : "1-based chunk index."
+})"};
+
+const CLI_v2::PositionalArgument Total{
+    R"({
+    "name" : "total",
+    "description" : "Total number of chunks."
+})"};
 
 }  // namespace
 
-int Runner(int argc, char** argv)
+CLI_v2::Interface CreateInterface()
+{
+    CLI_v2::Interface interface{"pbsamoa chunk",
+                                "Dump a chunk of BAM records as SAM text on stdout.",
+                                LibraryFormattedVersion()};
+    interface.AddOptions({Mode, Tile, Seed});
+    interface.AddPositionalArguments({Input, ChunkNum, Total});
+    return interface;
+}
+
+int Runner(const CLI_v2::Results& results)
 {
     BamRawReaderConfig readerConfig;
-    const char* bamPath{nullptr};
-    std::optional<std::int32_t> chunkNum;
-    std::optional<std::int32_t> totalChunks;
-    bool tileOrSeedSet{false};
 
-    for (int i{0}; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-
-        if ((arg == "--help") || (arg == "-h")) {
-            PrintUsage();
-            return EXIT_SUCCESS;
-        }
-
-        if (arg == "--mode") {
-            const std::string_view mode{Tools::RequireOptionValue(argc, argv, i, "--mode")};
-            if (mode == "contiguous") {
-                readerConfig.ChunkingMode = ChunkMode::CONTIGUOUS;
-            } else if (mode == "scatter") {
-                readerConfig.ChunkingMode = ChunkMode::SCATTER;
-            } else {
-                std::println(stderr, "Error: invalid --mode '{}' (expected contiguous|scatter)",
-                             mode);
-                return EXIT_FAILURE;
-            }
-            continue;
-        }
-
-        if (arg == "--tile") {
-            readerConfig.ChunkTileZmws =
-                Tools::ParseIntOption<std::int32_t>(argc, argv, i, "--tile", "tile");
-            tileOrSeedSet = true;
-            continue;
-        }
-
-        if (arg == "--seed") {
-            readerConfig.ChunkSeed =
-                Tools::ParseIntOption<std::uint64_t>(argc, argv, i, "--seed", "seed");
-            tileOrSeedSet = true;
-            continue;
-        }
-
-        if (!std::empty(arg) && (arg[0] == '-')) {
-            std::println(stderr, "Error: unknown option '{}'", arg);
-            PrintUsage();
-            return EXIT_FAILURE;
-        }
-
-        if (!bamPath) {
-            bamPath = argv[i];
-        } else if (!chunkNum) {
-            chunkNum = Tools::ParseIntegerOrThrow<std::int32_t>(arg, "CHUNK");
-        } else if (!totalChunks) {
-            totalChunks = Tools::ParseIntegerOrThrow<std::int32_t>(arg, "TOTAL");
-        } else {
-            std::println(stderr, "Error: too many positional arguments");
-            PrintUsage();
-            return EXIT_FAILURE;
-        }
+    const std::string mode = results[Mode];
+    if (mode == "contiguous") {
+        readerConfig.ChunkingMode = ChunkMode::CONTIGUOUS;
+    } else if (mode == "scatter") {
+        readerConfig.ChunkingMode = ChunkMode::SCATTER;
+    } else {
+        throw std::runtime_error{"invalid --mode: " + mode};
     }
 
-    if (!bamPath || !chunkNum || !totalChunks) {
-        PrintUsage();
-        return EXIT_FAILURE;
+    const std::int32_t tile{results[Tile]};
+    readerConfig.ChunkTileZmws = tile;
+
+    const std::string seedStr = results[Seed];
+    readerConfig.ChunkSeed = Tools::ParseIntegerOrThrow<std::uint64_t>(seedStr, "seed");
+
+    // IsUserProvided mirrors the original's tileOrSeedSet flag (set only when the user
+    // explicitly passes --tile or --seed, not when the default is applied).
+    const bool tileOrSeedSet = results[Tile].IsUserProvided() || results[Seed].IsUserProvided();
+
+    // CLIv2 does not enforce the required positional-argument count, so guard it here.
+    const std::vector<std::string>& positional{results.PositionalArguments()};
+    if (positional.size() != 3) {
+        throw std::runtime_error{"chunk requires exactly three arguments: <input> <chunk> <total>"};
     }
+
+    const std::int32_t chunkNum{Tools::ParseIntegerOrThrow<std::int32_t>(positional[1], "CHUNK")};
+    const std::int32_t totalChunks{
+        Tools::ParseIntegerOrThrow<std::int32_t>(positional[2], "TOTAL")};
 
     if (tileOrSeedSet && (readerConfig.ChunkingMode != ChunkMode::SCATTER)) {
-        std::println(stderr, "Error: --tile/--seed require --mode scatter");
-        return EXIT_FAILURE;
+        throw std::runtime_error{"--tile/--seed require --mode scatter"};
     }
 
-    readerConfig.ChunkNum = *chunkNum;
-    readerConfig.TotalChunks = *totalChunks;
+    readerConfig.ChunkNum = chunkNum;
+    readerConfig.TotalChunks = totalChunks;
 
-    BamRawReader reader{std::filesystem::path{bamPath}, readerConfig};
+    BamRawReader reader{std::filesystem::path{positional[0]}, readerConfig};
     const auto& header{reader.Header()};
     std::print("{}", header.ToText());
 
