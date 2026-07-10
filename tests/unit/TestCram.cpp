@@ -1,3 +1,4 @@
+#include "TestData.hpp"
 #include "TestTempDir.hpp"
 
 #include "../../src/CramInternal.hpp"
@@ -1009,15 +1010,8 @@ TEST(CramCodec, HuffmanMalformedCodeThrowsDecodeFailure)
 
 TEST(CramCodec, HuffmanDecodeUsesIndexedLookupWithoutLinearEntryScan)
 {
-    std::vector<std::byte> sourceBytes;
-    for (const auto& path : {std::filesystem::path{"../src/CramCodec.cpp"},
-                             std::filesystem::path{"src/CramCodec.cpp"}}) {
-        if (std::filesystem::exists(path)) {
-            sourceBytes = ReadFileBytes(path);
-            break;
-        }
-    }
-    ASSERT_FALSE(sourceBytes.empty()) << "failed to read CramCodec.cpp source";
+    const std::vector<std::byte> sourceBytes{
+        ReadFileBytes(tests::SourceDir / "src" / "CramCodec.cpp")};
 
     const std::string source(reinterpret_cast<const char*>(sourceBytes.data()), sourceBytes.size());
     const std::size_t decodeStart = source.find("std::int32_t HuffmanCodec::DecodeInt");
@@ -1031,15 +1025,8 @@ TEST(CramCodec, HuffmanDecodeUsesIndexedLookupWithoutLinearEntryScan)
 
 TEST(CramCodec, DecodeTagPayloadUsesExplicitCodecKindWithoutExceptionProbing)
 {
-    std::vector<std::byte> sourceBytes;
-    for (const auto& path : {std::filesystem::path{"../src/CramReader.cpp"},
-                             std::filesystem::path{"src/CramReader.cpp"}}) {
-        if (std::filesystem::exists(path)) {
-            sourceBytes = ReadFileBytes(path);
-            break;
-        }
-    }
-    ASSERT_FALSE(sourceBytes.empty()) << "failed to read CramReader.cpp source";
+    const std::vector<std::byte> sourceBytes{
+        ReadFileBytes(tests::SourceDir / "src" / "CramReader.cpp")};
 
     const std::string source(reinterpret_cast<const char*>(sourceBytes.data()), sourceBytes.size());
     const std::size_t decodeStart = source.find("std::vector<std::byte> DecodeTagPayload");
@@ -1262,15 +1249,8 @@ TEST(CramCompression, BlockCompressDecompressWithReusableGzipContexts)
 
 TEST(CramReaderInfrastructure, DecodeRecordUsesContextStruct)
 {
-    std::vector<std::byte> sourceBytes;
-    for (const auto& path : {std::filesystem::path{"../src/CramReader.cpp"},
-                             std::filesystem::path{"src/CramReader.cpp"}}) {
-        if (std::filesystem::exists(path)) {
-            sourceBytes = ReadFileBytes(path);
-            break;
-        }
-    }
-    ASSERT_FALSE(sourceBytes.empty()) << "failed to read CramReader.cpp source";
+    const std::vector<std::byte> sourceBytes{
+        ReadFileBytes(tests::SourceDir / "src" / "CramReader.cpp")};
 
     const std::string source(reinterpret_cast<const char*>(sourceBytes.data()), sourceBytes.size());
     EXPECT_NE(source.find("struct DecodeRecordContext"), std::string::npos);

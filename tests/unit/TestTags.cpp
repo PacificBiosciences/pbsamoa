@@ -274,19 +274,40 @@ TEST(TagBamParse, SignedInt)
     EXPECT_EQ(std::get<std::int64_t>(*val), -10);
 }
 
-TEST(TagBamParse, UnknownBArraySubtypeStopsParsing)
+TEST(TagBamParse, RejectsUnknownBArraySubtype)
 {
-    // 'XX:B:x' has an unknown element subtype, so its payload length is undefined; parsing
-    // must stop instead of mis-syncing onto the following bytes (htslib bad_aux behaviour).
+    // 'XX:B:x' has an unknown element subtype, so its payload length is undefined.
     const std::vector<std::byte> data{
         std::byte{'X'},  std::byte{'X'}, std::byte{'B'}, std::byte{'x'},
         std::byte{1},    std::byte{0},   std::byte{0},   std::byte{0},  // count = 1
         std::byte{0xAB},                                                // bogus payload byte
         std::byte{'N'},  std::byte{'M'}, std::byte{'C'}, std::byte{7},  // must NOT be reached
     };
-    const TagMap tags{ParseTagsFromBam(data)};
-    EXPECT_FALSE(tags.Contains(TagKey{'X', 'X'}));
-    EXPECT_FALSE(tags.Contains(TagKey{'N', 'M'}));
+    EXPECT_THROW(ParseTagsFromBam(data), std::runtime_error);
+    std::string sam;
+    EXPECT_THROW(SerializeRawTagsToSam(data, sam), std::runtime_error);
+}
+
+TEST(TagBamParse, RejectsMalformedAuxDataConsistently)
+{
+    const std::vector<std::vector<std::byte>> malformed{
+        {std::byte{'N'}, std::byte{'M'}},                                  // incomplete header
+        {std::byte{'N'}, std::byte{'M'}, std::byte{'i'}, std::byte{1}},    // truncated int32
+        {std::byte{'R'}, std::byte{'G'}, std::byte{'Z'}, std::byte{'x'}},  // no NUL
+        {std::byte{'X'}, std::byte{'X'}, std::byte{'q'}, std::byte{0}},    // unknown type
+        {std::byte{'X'}, std::byte{'H'}, std::byte{'H'}, std::byte{'A'}, std::byte{0}},
+        {std::byte{'X'}, std::byte{'H'}, std::byte{'H'}, std::byte{'A'}, std::byte{'Z'},
+         std::byte{0}},
+        {std::byte{'X'}, std::byte{'A'}, std::byte{'B'}, std::byte{'I'}, std::byte{1}, std::byte{0},
+         std::byte{0}, std::byte{0}},  // array count 1, no payload
+        {std::byte{'N'}, std::byte{'M'}, std::byte{'C'}, std::byte{1}, std::byte{0}},
+    };
+
+    for (const auto& data : malformed) {
+        EXPECT_THROW(ParseTagsFromBam(data), std::runtime_error);
+        std::string sam;
+        EXPECT_THROW(SerializeRawTagsToSam(data, sam), std::runtime_error);
+    }
 }
 
 TEST(TagBamParse, StringTypeZ)

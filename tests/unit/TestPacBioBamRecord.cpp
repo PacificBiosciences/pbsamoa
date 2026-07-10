@@ -88,6 +88,14 @@ TEST(PacBioBamRecord, QueryEndFromName)
     EXPECT_EQ(record.QueryEnd(), 2000);
 }
 
+TEST(PacBioBamRecord, QueryIntervalWithTrailingJunkFallsBackToWholeRead)
+{
+    auto record{MakePacBioRecord("movie1/12345/100_2000junk")};
+    record.Sequence("ACGTACGT");
+    EXPECT_EQ(record.QueryStart(), 0);
+    EXPECT_EQ(record.QueryEnd(), 8);
+}
+
 TEST(PacBioBamRecord, ReadGroupId)
 {
     const auto record{MakeFullRecord()};

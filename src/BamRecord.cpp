@@ -563,11 +563,12 @@ std::optional<std::pair<std::int32_t, std::int32_t>> TryParseQueryInterval(
     const std::string_view endText{interval.substr(underscore + 1)};
     std::int32_t start{0};
     std::int32_t end{0};
-    const std::from_chars_result startResult{
-        std::from_chars(std::data(startText), std::data(startText) + std::size(startText), start)};
-    const std::from_chars_result endResult{
-        std::from_chars(std::data(endText), std::data(endText) + std::size(endText), end)};
-    if ((startResult.ec != std::errc{}) || (endResult.ec != std::errc{})) {
+    const char* const startEnd{std::data(startText) + std::size(startText)};
+    const char* const endEnd{std::data(endText) + std::size(endText)};
+    const auto [startPtr, startEc]{std::from_chars(std::data(startText), startEnd, start)};
+    const auto [endPtr, endEc]{std::from_chars(std::data(endText), endEnd, end)};
+    if ((startEc != std::errc{}) || (startPtr != startEnd) || (endEc != std::errc{}) ||
+        (endPtr != endEnd)) {
         return std::nullopt;
     }
     return std::make_pair(start, end);

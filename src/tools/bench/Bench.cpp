@@ -289,6 +289,12 @@ int Runner(const CLI_v2::Results& results)
     // Read into exact-width ints (never std::size_t — ambiguous conversion).
     const std::int32_t bgzfOpt{results[BgzfThreads]};
     const std::int32_t decodeOpt{results[DecodeThreads]};
+    if (bgzfOpt < -1) {
+        throw std::runtime_error{"--bgzf-threads must be >= -1"};
+    }
+    if (decodeOpt < 0) {
+        throw std::runtime_error{"--decode-threads must be >= 0"};
+    }
 
     // CLIv2 does not enforce the required positional-argument count.
     const std::vector<std::string>& pos{results.PositionalArguments()};

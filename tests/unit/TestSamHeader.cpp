@@ -24,6 +24,11 @@ TEST(SamHeaderValidation, RejectsZeroReferenceLength)
     EXPECT_TRUE(SamHeader::FromText("@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1\n").has_value());
 }
 
+TEST(SamHeaderValidation, RejectsReferenceLengthWithTrailingJunk)
+{
+    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:100junk\n").has_value());
+}
+
 TEST(SamHeaderValidation, RejectsDuplicateReadGroupId)
 {
     // SAMv1 §1.3: each @RG ID must be unique.

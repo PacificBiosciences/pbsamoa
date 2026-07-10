@@ -54,6 +54,7 @@ test_exe = executable(
         'TestZmwWhitelist.cpp',
     ) + configure_file(
         configuration: {
+            'PROJECT_SOURCE_ROOT': meson.project_source_root(),
             'TESTS_DATA_DIR': meson.current_source_dir() / '..' / 'data',
         },
         input: 'TestData.hpp.in',

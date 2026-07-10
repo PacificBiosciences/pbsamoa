@@ -48,12 +48,17 @@ std::uint8_t ParseUInt8(std::string_view text, std::string_view context)
     return static_cast<std::uint8_t>(v);
 }
 
-std::int32_t ToZeroBasedSamPosition(const std::int32_t oneBasedPos)
+std::int32_t ParseSamPosition(std::string_view text, std::string_view context)
 {
-    if (oneBasedPos <= 0) {
+    const std::uint32_t oneBasedPos{ParseInteger<std::uint32_t>(text, context)};
+    if (oneBasedPos > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error{std::format("{}: value out of range (0-{}): '{}'", context,
+                                             std::numeric_limits<std::int32_t>::max(), text)};
+    }
+    if (oneBasedPos == 0) {
         return -1;
     }
-    return oneBasedPos - 1;
+    return static_cast<std::int32_t>(oneBasedPos - 1);
 }
 
 void StripTrailingCr(std::string& line)
@@ -209,8 +214,7 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
     record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME", /*requireSqLines=*/true));
 
-    const std::int32_t pos{ParseInteger<std::int32_t>(fields[3], "POS")};
-    record.Pos(ToZeroBasedSamPosition(pos));
+    record.Pos(ParseSamPosition(fields[3], "POS"));
 
     record.MapQ(ParseUInt8(fields[4], "MAPQ"));
 
@@ -227,8 +231,7 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
             ParseReferenceId(fields[6], header, lineNumber, "RNEXT", /*requireSqLines=*/false));
     }
 
-    const std::int32_t pnext{ParseInteger<std::int32_t>(fields[7], "PNEXT")};
-    record.NextPos(ToZeroBasedSamPosition(pnext));
+    record.NextPos(ParseSamPosition(fields[7], "PNEXT"));
 
     record.Tlen(ParseInteger<std::int32_t>(fields[8], "TLEN"));
 

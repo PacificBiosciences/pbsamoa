@@ -6,6 +6,7 @@
 namespace tests {
 
 inline const std::filesystem::path DataDir{"@TESTS_DATA_DIR@"};
+inline const std::filesystem::path SourceDir{"@PROJECT_SOURCE_ROOT@"};
 
 }  // namespace tests
 
@@ -14,6 +15,7 @@ namespace Samoa {
 namespace tests {
 
 inline const std::filesystem::path& DataDir = ::tests::DataDir;
+inline const std::filesystem::path& SourceDir = ::tests::SourceDir;
 
 }  // namespace tests
 }  // namespace Samoa

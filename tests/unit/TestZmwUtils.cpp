@@ -26,6 +26,11 @@ TEST(ZmwUtils, ParseZmwFromNameEmptyZmw) { EXPECT_EQ(ParseZmwFromName("movie//re
 
 TEST(ZmwUtils, ParseZmwFromNameNonNumericZmw) { EXPECT_EQ(ParseZmwFromName("movie/abc/rest"), 0); }
 
+TEST(ZmwUtils, ParseZmwFromNameRejectsNumericPrefix)
+{
+    EXPECT_EQ(ParseZmwFromName("movie/42junk/rest"), 0);
+}
+
 TEST(ZmwUtils, ParseZmwFromNameEmpty) { EXPECT_EQ(ParseZmwFromName(""), 0); }
 
 // --- ReadGroupBaseId / ParseReadGroupId ---
@@ -49,6 +54,7 @@ TEST(ZmwUtils, ParseReadGroupIdHex)
 TEST(ZmwUtils, ParseReadGroupIdInvalidReturnsZero)
 {
     EXPECT_EQ(ParseReadGroupId("rg1"), 0);
+    EXPECT_EQ(ParseReadGroupId("0000002ag"), 0);
     EXPECT_EQ(ParseReadGroupId(""), 0);
 }
 

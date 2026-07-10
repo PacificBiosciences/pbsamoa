@@ -102,9 +102,9 @@ std::expected<std::int32_t, std::string> ParseInt32Field(std::string_view value,
                                                          std::string_view errorMessage)
 {
     std::int32_t parsed{0};
-    const std::from_chars_result result{
-        std::from_chars(std::data(value), std::data(value) + std::size(value), parsed)};
-    if (result.ec != std::errc{}) {
+    const char* const end{std::data(value) + std::size(value)};
+    const auto [ptr, ec]{std::from_chars(std::data(value), end, parsed)};
+    if ((ec != std::errc{}) || (ptr != end)) {
         return std::unexpected{std::string{errorMessage}};
     }
     return parsed;

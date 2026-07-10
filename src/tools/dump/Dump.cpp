@@ -561,6 +561,12 @@ int Runner(const CLI_v2::Results& results)
     // Numeric reads: brace-init exact-width type (never read into std::size_t directly).
     const std::int32_t bgzfOpt{results[BgzfThreads]};
     const std::int32_t formatOpt{results[FormatThreads]};
+    if (bgzfOpt < -1) {
+        throw std::runtime_error{"--bgzf-threads must be >= -1"};
+    }
+    if (formatOpt < 0) {
+        throw std::runtime_error{"--format-threads must be >= 0"};
+    }
 
     // String reads: copy-init (brace-init is ambiguous due to Result's char-type conversion).
     const std::string referenceStr = results[Reference];

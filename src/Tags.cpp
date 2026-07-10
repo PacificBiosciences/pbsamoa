@@ -273,8 +273,8 @@ bool ParseExact(std::string_view text, T& value)
 {
     const char* const begin{std::data(text)};
     const char* const end{begin + std::size(text)};
-    const std::from_chars_result parseResult{std::from_chars(begin, end, value)};
-    return (parseResult.ec == std::errc{}) && (parseResult.ptr == end);
+    const auto [ptr, ec]{std::from_chars(begin, end, value)};
+    return (ec == std::errc{}) && (ptr == end);
 }
 
 std::string ReadTextPayload(std::span<const std::byte> payload)
@@ -292,11 +292,19 @@ std::string ReadNulTerminatedText(std::span<const std::byte> data, std::size_t& 
         ++offset;
     }
 
-    std::string text{reinterpret_cast<const char*>(std::data(data) + start), offset - start};
-    if (offset < std::size(data)) {
-        ++offset;
+    if (offset == std::size(data)) {
+        throw std::runtime_error{"Tags: unterminated BAM auxiliary text payload"};
     }
+    std::string text{reinterpret_cast<const char*>(std::data(data) + start), offset - start};
+    ++offset;
     return text;
+}
+
+void RequireBamAuxBytes(std::span<const std::byte> data, std::size_t offset, std::size_t count)
+{
+    if ((offset > std::size(data)) || (count > (std::size(data) - offset))) {
+        throw std::runtime_error{"Tags: truncated BAM auxiliary data"};
+    }
 }
 
 void RequirePayloadSize(char type, std::span<const std::byte> payload, std::size_t expected)
@@ -645,7 +653,8 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
     TagMap result;
     std::size_t offset{0};
 
-    while ((offset + 3) <= std::size(data)) {
+    while (offset < std::size(data)) {
+        RequireBamAuxBytes(data, offset, 3);
         const char c1{static_cast<char>(data[offset])};
         const char c2{static_cast<char>(data[offset + 1])};
         const char type{static_cast<char>(data[offset + 2])};
@@ -655,58 +664,42 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
 
         switch (type) {
             case 'A':
-                if (offset >= std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 1);
                 result.Append(key, TagValue{static_cast<char>(data[offset])});
                 ++offset;
                 break;
             case 'c':
-                if ((offset + 1) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 1);
                 result.Append(key, TagValue{std::int64_t{static_cast<std::int8_t>(data[offset])}});
                 ++offset;
                 break;
             case 'C':
-                if ((offset + 1) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 1);
                 result.Append(key, TagValue{std::int64_t{static_cast<std::uint8_t>(data[offset])}});
                 ++offset;
                 break;
             case 's':
-                if ((offset + 2) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 2);
                 result.Append(key, TagValue{std::int64_t{ReadI16LE(std::data(data) + offset)}});
                 offset += 2;
                 break;
             case 'S':
-                if ((offset + 2) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 2);
                 result.Append(key, TagValue{std::int64_t{ReadU16LE(std::data(data) + offset)}});
                 offset += 2;
                 break;
             case 'i':
-                if ((offset + 4) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 4);
                 result.Append(key, TagValue{std::int64_t{ReadI32LE(std::data(data) + offset)}});
                 offset += 4;
                 break;
             case 'I':
-                if ((offset + 4) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 4);
                 result.Append(key, TagValue{std::int64_t{ReadU32LE(std::data(data) + offset)}});
                 offset += 4;
                 break;
             case 'f':
-                if ((offset + 4) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 4);
                 result.Append(key, TagValue{ReadF32LE(std::data(data) + offset)});
                 offset += 4;
                 break;
@@ -725,9 +718,7 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
                 break;
             }
             case 'B': {
-                if ((offset + 5) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, 5);
                 const char elemType{static_cast<char>(data[offset])};
                 offset += 1;
                 const std::uint32_t count{ReadU32LE(std::data(data) + offset)};
@@ -736,14 +727,11 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
                 TagArray arr{elemType};
                 const std::size_t elemSize{arr.ElementSize()};
                 if (elemSize == 0) {
-                    // Unknown B subtype: element width is undefined, so the rest of the aux
-                    // stream cannot be located. Stop rather than mis-sync later tags.
-                    return result;
+                    throw std::runtime_error{
+                        std::format("Tags: unsupported B-array element type '{}'", elemType)};
                 }
                 const std::size_t totalBytes{count * elemSize};
-                if ((offset + totalBytes) > std::size(data)) {
-                    return result;
-                }
+                RequireBamAuxBytes(data, offset, totalBytes);
                 arr.Resize(count);
                 std::ranges::copy_n(std::data(data) + offset, totalBytes,
                                     std::data(arr.MutableData()));
@@ -752,7 +740,7 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
                 break;
             }
             default:
-                break;
+                throw std::runtime_error{std::format("Tags: unsupported BAM tag type '{}'", type)};
         }
     }
 
@@ -1073,16 +1061,27 @@ void SerializeBArrayFloat(const std::byte* data, std::uint32_t count, std::strin
 std::size_t AppendNulTerminatedTextTag(std::string& out, char type, std::span<const std::byte> data,
                                        std::size_t offset)
 {
+    const std::size_t start{offset};
+    while ((offset < std::size(data)) && (data[offset] != std::byte{0})) {
+        ++offset;
+    }
+    if (offset == std::size(data)) {
+        throw std::runtime_error{"Tags: unterminated BAM auxiliary text payload"};
+    }
+    const std::span<const std::byte> payload{data.subspan(start, offset - start)};
+    if ((type == 'H') &&
+        (((std::size(payload) % 2) != 0) || !std::ranges::all_of(payload, [](std::byte value) {
+             return IsHexDigit(static_cast<char>(value));
+         }))) {
+        throw std::runtime_error{"Tags: type 'H' payload is not valid hex"};
+    }
+
     out += type;
     out += ':';
-    while ((offset < std::size(data)) && (data[offset] != std::byte{0})) {
-        out += static_cast<char>(data[offset]);
-        ++offset;
+    for (const std::byte value : payload) {
+        out += static_cast<char>(value);
     }
-    if (offset < std::size(data)) {
-        ++offset;
-    }
-    return offset;
+    return offset + 1;
 }
 
 }  // namespace
@@ -1091,7 +1090,8 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
 {
     std::size_t offset{0};
 
-    while ((offset + 3) <= std::size(data)) {
+    while (offset < std::size(data)) {
+        RequireBamAuxBytes(data, offset, 3);
         const char c1{static_cast<char>(data[offset])};
         const char c2{static_cast<char>(data[offset + 1])};
         const char type{static_cast<char>(data[offset + 2])};
@@ -1103,58 +1103,42 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
         out += ':';
 
         if (type == 'A') {
-            if (offset >= std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 1);
             out += "A:";
             out += static_cast<char>(data[offset]);
             offset += 1;
         } else if (type == 'c') {
-            if ((offset + 1) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 1);
             out += "i:";
             AppendIntRaw(out, static_cast<std::int8_t>(data[offset]));
             offset += 1;
         } else if (type == 'C') {
-            if ((offset + 1) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 1);
             out += "i:";
             AppendIntRaw(out, static_cast<std::uint8_t>(data[offset]));
             offset += 1;
         } else if (type == 's') {
-            if ((offset + 2) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 2);
             out += "i:";
             AppendIntRaw(out, ReadI16LE(std::data(data) + offset));
             offset += 2;
         } else if (type == 'S') {
-            if ((offset + 2) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 2);
             out += "i:";
             AppendIntRaw(out, ReadU16LE(std::data(data) + offset));
             offset += 2;
         } else if (type == 'i') {
-            if ((offset + 4) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 4);
             out += "i:";
             AppendIntRaw(out, ReadI32LE(std::data(data) + offset));
             offset += 4;
         } else if (type == 'I') {
-            if ((offset + 4) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 4);
             out += "i:";
             AppendIntRaw(out, ReadU32LE(std::data(data) + offset));
             offset += 4;
         } else if (type == 'f') {
-            if ((offset + 4) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 4);
             out += "f:";
             AppendFloatRaw(out, ReadF32LE(std::data(data) + offset));
             offset += 4;
@@ -1163,9 +1147,7 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
         } else if (type == 'H') {
             offset = AppendNulTerminatedTextTag(out, type, data, offset);
         } else if (type == 'B') {
-            if ((offset + 5) > std::size(data)) {
-                break;
-            }
+            RequireBamAuxBytes(data, offset, 5);
             const char elemType{static_cast<char>(data[offset])};
             offset += 1;
             const std::uint32_t count{ReadU32LE(std::data(data) + offset)};
@@ -1176,52 +1158,39 @@ void SerializeRawTagsToSam(std::span<const std::byte> data, std::string& out)
 
             // Fast-path for byte arrays (dominant in PacBio kinetics data)
             if (elemType == 'C') {
-                if ((offset + count) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, count);
                 SerializeBArrayUInt8(std::data(data) + offset, count, out);
                 offset += count;
             } else if (elemType == 'c') {
-                if ((offset + count) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, count);
                 SerializeBArrayInt8(std::data(data) + offset, count, out);
                 offset += count;
             } else if (elemType == 's') {
-                if ((offset + static_cast<std::size_t>(count) * 2) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, static_cast<std::size_t>(count) * 2);
                 SerializeBArrayInt<std::int16_t>(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 2;
             } else if (elemType == 'S') {
-                if ((offset + static_cast<std::size_t>(count) * 2) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, static_cast<std::size_t>(count) * 2);
                 SerializeBArrayInt<std::uint16_t>(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 2;
             } else if (elemType == 'i') {
-                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, static_cast<std::size_t>(count) * 4);
                 SerializeBArrayInt<std::int32_t>(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 4;
             } else if (elemType == 'I') {
-                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, static_cast<std::size_t>(count) * 4);
                 SerializeBArrayInt<std::uint32_t>(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 4;
             } else if (elemType == 'f') {
-                if ((offset + static_cast<std::size_t>(count) * 4) > std::size(data)) {
-                    break;
-                }
+                RequireBamAuxBytes(data, offset, static_cast<std::size_t>(count) * 4);
                 SerializeBArrayFloat(std::data(data) + offset, count, out);
                 offset += static_cast<std::size_t>(count) * 4;
             } else {
-                // Unknown B subtype: payload length is undefined, so stop rather than
-                // mis-sync onto bytes that are not really array data (htslib bad_aux).
-                break;
+                throw std::runtime_error{
+                    std::format("Tags: unsupported B-array element type '{}'", elemType)};
             }
+        } else {
+            throw std::runtime_error{std::format("Tags: unsupported BAM tag type '{}'", type)};
         }
     }
 }

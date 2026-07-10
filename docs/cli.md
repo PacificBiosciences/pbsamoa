@@ -49,10 +49,10 @@ Options:
 | Flag | Description |
 | ---- | ----------- |
 | `--records-per-slice N` | Maximum records per CRAM slice (default: `10000`) |
-| `--bgzf-threads N` | BAM input decompression workers (default: auto, max 16) |
+| `--bgzf-threads N` | BAM input decompression workers (default: auto, max 8; `0` = serial; explicit counts capped at 16) |
 | `--convert-to-bam-record` | Opt in to decoding BAM input into `BamRecord` before CRAM write |
-| `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: auto, max 16). Also enables that mode when set explicitly |
-| `--compression-threads N` | CRAM block compression workers (default: auto, max 8) |
+| `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: auto, max 8; `0` = serial; explicit counts capped at 16). Also enables that mode when set explicitly |
+| `--compression-threads N` | CRAM block compression workers (default: auto, max 8; `0` = serial) |
 | `--block-compression METHOD` | Default CRAM block method |
 | `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
@@ -84,8 +84,8 @@ external merge sort (spill to temp run files, then a bounded-fan-in k-way merge 
 multi-pass when the run count exceeds the open-file limit).
 
 ```sh
-pbsamoa sort -o sorted.bam input.bam
-pbsamoa sort --order queryname -o byname.bam input.bam
+pbsamoa sort input.bam sorted.bam
+pbsamoa sort --order queryname input.bam byname.bam
 ```
 
 Options:

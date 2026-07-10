@@ -38,14 +38,14 @@ std::expected<std::vector<CigarOp>, std::string> ParseCigar(std::string_view tex
 
     while (pos < end) {
         std::uint32_t length{0};
-        const std::from_chars_result parseResult{std::from_chars(pos, end, length)};
-        if (parseResult.ec != std::errc{}) {
+        const auto [ptr, ec]{std::from_chars(pos, end, length)};
+        if (ec != std::errc{}) {
             return std::unexpected{"Invalid CIGAR: bad integer"};
         }
-        if (parseResult.ptr == end) {
+        if (ptr == end) {
             return std::unexpected{"Invalid CIGAR: missing op character"};
         }
-        const char* const opPos{parseResult.ptr};
+        const char* const opPos{ptr};
 
         const std::optional<CigarOpType> opType{CharToCigarOp(*opPos)};
         if (!opType) {

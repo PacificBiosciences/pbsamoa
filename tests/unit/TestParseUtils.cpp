@@ -1,6 +1,12 @@
-#include "../../src/tools/ParseUtils.hpp"
+#include "../../src/tools/CliUtils.hpp"
 
 #include <gtest/gtest.h>
+
+#include <limits>
+#include <stdexcept>
+#include <string_view>
+
+#include <cstddef>
 
 namespace PacBio {
 namespace Samoa {
@@ -94,6 +100,21 @@ TEST(ParseUtils, ParseRegionAcceptsSingleBaseRange)
     ASSERT_TRUE(region);
     EXPECT_EQ(region->Beg, 99);
     EXPECT_EQ(region->End, 100);
+}
+
+TEST(CliUtils, ParseMemoryAppliesBinarySuffix)
+{
+    EXPECT_EQ(ParseMemory("2G").Value(), std::size_t{2} * 1024 * 1024 * 1024);
+}
+
+TEST(CliUtils, ParseMemoryRejectsMultiplicationOverflow)
+{
+    try {
+        static_cast<void>(ParseMemory("18446744073709551615K"));
+        FAIL() << "expected overflow rejection";
+    } catch (const std::runtime_error& error) {
+        EXPECT_EQ(std::string_view{error.what()}, "--memory is too large: 18446744073709551615K");
+    }
 }
 
 }  // namespace Tools

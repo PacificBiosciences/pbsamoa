@@ -16,9 +16,9 @@ template <typename Integer>
 Integer ParseOrZero(std::string_view text, int base = 10)
 {
     Integer value{0};
-    const std::from_chars_result parseResult{
-        std::from_chars(std::data(text), std::data(text) + std::size(text), value, base)};
-    if (parseResult.ec != std::errc{}) {
+    const char* const end{std::data(text) + std::size(text)};
+    const auto [ptr, ec]{std::from_chars(std::data(text), end, value, base)};
+    if ((ec != std::errc{}) || (ptr != end)) {
         return 0;
     }
     return value;

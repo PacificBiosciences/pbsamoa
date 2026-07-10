@@ -133,8 +133,8 @@ Integer ParseInteger(std::string_view value, std::string_view context)
     Integer parsed{};
     const char* const begin{std::data(value)};
     const char* const end{begin + std::size(value)};
-    const std::from_chars_result parseResult{std::from_chars(begin, end, parsed)};
-    if ((parseResult.ec != std::errc{}) || (parseResult.ptr != end)) {
+    const auto [ptr, ec]{std::from_chars(begin, end, parsed)};
+    if ((ec != std::errc{}) || (ptr != end)) {
         throw std::runtime_error{std::format("{}: not numeric: '{}'", context, value)};
     }
     return parsed;

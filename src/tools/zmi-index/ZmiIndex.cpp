@@ -110,6 +110,9 @@ int Runner(const CLI_v2::Results& results)
 {
     // Exact-width read: never read into std::size_t (ambiguous conversion).
     const std::int32_t threads{results[Threads]};
+    if (threads < 0) {
+        throw std::runtime_error{"--threads must be >= 0"};
+    }
     // Bool flags use copy-init.
     const bool quiet = results[Quiet];
 

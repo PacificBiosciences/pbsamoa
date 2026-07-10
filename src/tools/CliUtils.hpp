@@ -7,6 +7,7 @@
 
 #include <array>
 #include <format>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 
@@ -75,6 +76,9 @@ inline ByteLimit ParseMemory(std::string_view text, std::string_view option = "-
     }
 
     const std::uint64_t value{ParseIntegerOrThrow<std::uint64_t>(digits, option)};
+    if (value > (std::numeric_limits<std::size_t>::max() / multiplier)) {
+        throw std::runtime_error{std::format("{} is too large: {}", option, text)};
+    }
     return ByteLimit{value * multiplier};
 }
 

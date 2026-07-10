@@ -105,6 +105,7 @@ inline const TagKey RG_TAG{'R', 'G'};
 // --- Tag parsing and serialization (defined in Tags.cpp) ---
 
 /// \brief Parse auxiliary tags from raw BAM bytes.
+/// \throws std::runtime_error if \p data contains malformed or unsupported tag data.
 TagMap ParseTagsFromBam(std::span<const std::byte> data);
 
 /// \brief Parse a single tag from SAM text (e.g., "NM:i:5").
@@ -119,6 +120,7 @@ std::string SerializeTagToSam(TagKey key, const TagValue& value);
 /// \brief Serialize raw BAM auxiliary bytes directly to SAM text.
 /// Walks binary tag data and appends tab-prefixed SAM tag fields to out.
 /// Avoids creating TagMap/TagValue intermediaries for zero-allocation output.
+/// \throws std::runtime_error if \p auxData contains malformed or unsupported tag data.
 void SerializeRawTagsToSam(std::span<const std::byte> auxData, std::string& out);
 
 // --- Tag filters for ToOwned() ---

@@ -78,6 +78,8 @@ CLI_v2::Interface CreateInterface()
     CLI_v2::Interface interface{"pbsamoa chunk",
                                 "Dump a chunk of BAM records as SAM text on stdout.",
                                 LibraryFormattedVersion()};
+    // Chunking is process-level parallelism; this tool performs no threaded work.
+    interface.DisableNumThreadsOption();
     interface.AddOptions({Mode, Tile, Seed});
     interface.AddPositionalArguments({Input, ChunkNum, Total});
     return interface;

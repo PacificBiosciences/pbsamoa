@@ -41,14 +41,14 @@ const CLI_v2::Option RecordsPerSlice{
     "names" : ["records-per-slice"],
     "description" : "Number of records per CRAM slice.",
     "type" : "integer",
-    "default" : 0
+    "default" : 10000
 })"};
 
 // Thread counts use -1 as a sentinel meaning "not user-provided / auto-detect".
 const CLI_v2::Option BgzfThreads{
     R"({
     "names" : ["bgzf-threads"],
-    "description" : "BGZF decompression threads; 0 = auto.",
+    "description" : "BGZF decompression threads; -1 = auto, 0 = serial.",
     "type" : "integer",
     "default" : -1
 })"};
@@ -56,7 +56,7 @@ const CLI_v2::Option BgzfThreads{
 const CLI_v2::Option DecodeThreads{
     R"({
     "names" : ["decode-threads"],
-    "description" : "BAM record decode threads; 0 = auto.",
+    "description" : "BAM record decode threads; -1 = auto, 0 = serial.",
     "type" : "integer",
     "default" : -1
 })"};
@@ -70,7 +70,7 @@ const CLI_v2::Option ConvertToBamRecord{
 const CLI_v2::Option CompressionThreads{
     R"({
     "names" : ["compression-threads"],
-    "description" : "CRAM compression threads; 0 = auto.",
+    "description" : "CRAM compression threads; -1 = auto, 0 = serial.",
     "type" : "integer",
     "default" : -1
 })"};
@@ -260,8 +260,8 @@ int Runner(const CLI_v2::Results& results)
 {
     CramWriterConfig config;
 
-    // --records-per-slice (optional; default 0 = use library default).
-    // Use IsUserProvided() to distinguish "not given" (skip) from "user gave 0" (must throw).
+    // --records-per-slice (optional; --help shows the library default of 10000). Override the
+    // config only when the user supplies a value, rejecting a non-positive count.
     if (results[RecordsPerSlice].IsUserProvided()) {
         const std::int32_t v{results[RecordsPerSlice]};
         if (v < 1) {
@@ -270,23 +270,23 @@ int Runner(const CLI_v2::Results& results)
         config.RecordsPerSlice = v;
     }
 
-    // Thread counts: -1 sentinel = not provided / auto; validate only user-supplied values.
+    // Thread counts: -1 = auto (also the default), 0 = serial, >=1 = explicit worker count.
     const std::int32_t bgzfThreadsOpt{results[BgzfThreads]};
-    if (results[BgzfThreads].IsUserProvided() && (bgzfThreadsOpt < 0)) {
-        throw std::runtime_error{"bgzf-threads must be >= 0"};
+    if (bgzfThreadsOpt < -1) {
+        throw std::runtime_error{"bgzf-threads must be >= -1"};
     }
 
     const std::int32_t decodeThreadsOpt{results[DecodeThreads]};
-    if (results[DecodeThreads].IsUserProvided() && (decodeThreadsOpt < 0)) {
-        throw std::runtime_error{"decode-threads must be >= 0"};
+    if (decodeThreadsOpt < -1) {
+        throw std::runtime_error{"decode-threads must be >= -1"};
     }
 
     // Copy-init (not brace-init): Result's bool conversion is ambiguous with brace-init.
     const bool convertToBamRecord = results[ConvertToBamRecord];
 
     const std::int32_t compressionThreadsOpt{results[CompressionThreads]};
-    if (results[CompressionThreads].IsUserProvided() && (compressionThreadsOpt < 0)) {
-        throw std::runtime_error{"compression-threads must be >= 0"};
+    if (compressionThreadsOpt < -1) {
+        throw std::runtime_error{"compression-threads must be >= -1"};
     }
 
     // --block-compression (default "rans4x8" matches the library's default).

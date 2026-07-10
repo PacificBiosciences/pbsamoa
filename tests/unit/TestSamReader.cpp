@@ -290,6 +290,42 @@ TEST_F(SamReaderTempFile, NegativeTlen)
     EXPECT_EQ(record->Tlen(), -39);
 }
 
+TEST_F(SamReaderTempFile, RejectsNegativePosition)
+{
+    const auto path = WriteTempSam("negative_pos.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t-1\t30\t3M\t*\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, RejectsNegativeMatePosition)
+{
+    const auto path = WriteTempSam("negative_pnext.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t10\t30\t3M\tref\t-1\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
+}
+
+TEST_F(SamReaderTempFile, ZeroPositionMapsToUnsetPositionWithoutForcingFlags)
+{
+    // POS=0 carries no mapping coordinate, so it maps to Pos -1, but RNAME and FLAG are
+    // preserved verbatim: parsing does not synthesize the unmapped flag (htslib fidelity).
+    const auto path = WriteTempSam("zero_pos.sam",
+                                   "@HD\tVN:1.6\n"
+                                   "@SQ\tSN:ref\tLN:100\n"
+                                   "read1\t0\tref\t0\t30\t3M\t*\t0\t0\tACG\t!!!\n");
+    SamReader reader{path};
+    const auto record{reader.ReadRecord()};
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->Pos(), -1);
+    EXPECT_EQ(record->RefId(), 0);
+    EXPECT_EQ(record->Flag() & 0x4U, 0U);
+}
+
 TEST_F(SamReaderTempFile, ThrowsOnMapqOutOfRange)
 {
     const auto path = WriteTempSam("bad_mapq.sam",
