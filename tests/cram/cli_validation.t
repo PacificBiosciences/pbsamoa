@@ -20,9 +20,10 @@ Chunk help does not advertise the unused built-in thread option:
 Convert help distinguishes auto-detection from serial execution and shows the
 effective records-per-slice default:
 
-  $ "${PBSAMOA}" convert --help | grep -c -- '-1 = auto, 0 = serial'
+  $ "${PBSAMOA}" convert --help > convert-help.txt
+  $ tr '\n' ' ' < convert-help.txt | tr -s ' ' | grep -o -- '-1 = auto, 0 = serial' | wc -l | awk '{ print $1 }'
   3
-  $ "${PBSAMOA}" convert --help | grep -c '\[10000\]'
+  $ grep -c '\[10000\]' convert-help.txt
   1
 
 Convert accepts the documented -1 auto sentinel it advertises in --help:
