@@ -175,17 +175,6 @@ std::expected<PacBio::Samoa::ReferenceSequence, std::string> ParseReferenceSeque
     return ref;
 }
 
-template <typename Record>
-std::expected<void, std::string> AppendParsedRecord(std::vector<Record>& records,
-                                                    std::expected<Record, std::string> parsed)
-{
-    if (!parsed) {
-        return std::unexpected{std::move(parsed.error())};
-    }
-    records.push_back(std::move(*parsed));
-    return {};
-}
-
 }  // namespace
 
 namespace PacBio {
@@ -354,7 +343,7 @@ constexpr std::string_view ReverseSuffix{"//rev"};
 std::string MakeReadGroupId(std::string_view movieName, std::string_view readType,
                             std::optional<Data::Strand> strand)
 {
-    std::string content{std::string{movieName} + "//" + std::string{readType}};
+    std::string content{std::format("{}//{}", movieName, readType)};
     const Data::Strand resolvedStrand{strand.value_or(Data::Strand::UNMAPPED)};
     if (resolvedStrand == Data::Strand::FORWARD) {
         content += ForwardSuffix;
@@ -427,8 +416,7 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
                 return std::unexpected{"Multiple @HD lines in sam header"};
             }
             seenHd = true;
-            for (const std::string_view field :
-                 std::span<const std::string_view>{fields}.subspan(1)) {
+            for (const std::string_view field : std::span{fields}.subspan(1)) {
                 const auto [tag, value] = ParseTagValue(field);
                 if (tag == "VN") {
                     header.version_ = std::string{value};

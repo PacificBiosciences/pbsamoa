@@ -14,6 +14,7 @@
 #include <pbcopper/cli2/Results.h>
 #include <pbcopper/parallel/ThreadPool.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
@@ -30,7 +31,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -72,8 +72,8 @@ std::size_t ResolveThreadCount(std::int32_t requested)
     if (requested >= 1) {
         return static_cast<std::size_t>(requested);
     }
-    const unsigned hw{std::thread::hardware_concurrency()};
-    return (hw == 0U) ? std::size_t{1U} : static_cast<std::size_t>(hw);
+    const std::size_t hw{std::thread::hardware_concurrency()};
+    return (hw == 0U) ? std::size_t{1U} : hw;
 }
 
 DecompressedBlock DecompressOne(std::vector<std::byte> compressed, BgzfBlockInfo info,
@@ -165,7 +165,7 @@ int Runner(const CLI_v2::Results& results)
                 }
 
                 std::vector<std::byte> blockBytes(info->blockSize);
-                std::memcpy(std::data(blockBytes), std::data(headerBytes), BGZF_HEADER_PREFIX);
+                std::ranges::copy(headerBytes, std::data(blockBytes));
                 const std::size_t remaining{info->blockSize - BGZF_HEADER_PREFIX};
                 if (remaining > 0U) {
                     input.read(reinterpret_cast<char*>(std::data(blockBytes) + BGZF_HEADER_PREFIX),

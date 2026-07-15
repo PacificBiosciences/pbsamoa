@@ -47,8 +47,6 @@ private:
     std::size_t skipped_{0};
 };
 
-// --- inline constexpr definitions ---
-
 constexpr ByteLimit::ByteLimit() : bytes_{std::size_t{256} * 1024 * 1024} {}
 
 constexpr ByteLimit::ByteLimit(std::size_t bytes) : bytes_{bytes} {}

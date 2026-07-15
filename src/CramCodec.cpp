@@ -48,12 +48,10 @@ CramEncodingDescriptor ParseNestedEncodingDescriptor(std::span<const std::byte> 
 {
     CramEncodingDescriptor desc;
     std::size_t bytesRead = 0;
-    desc.CodecId = static_cast<CramCodecId>(
-        ReadItf8(std::span<const std::byte>{parameters}.subspan(pos), bytesRead));
+    desc.CodecId = static_cast<CramCodecId>(ReadItf8(parameters.subspan(pos), bytesRead));
     pos += bytesRead;
 
-    const auto parameterLength =
-        ReadItf8(std::span<const std::byte>{parameters}.subspan(pos), bytesRead);
+    const auto parameterLength = ReadItf8(parameters.subspan(pos), bytesRead);
     pos += bytesRead;
 
     desc.Parameters.assign(std::begin(parameters) + pos,
@@ -241,9 +239,7 @@ std::byte CramExternalBlockStore::ReadByte(std::int32_t contentId)
         throw std::runtime_error{
             std::format("CramExternalBlockStore: read past end of block {}", contentId)};
     }
-    const std::size_t readPos{state->readPos};
-    ++state->readPos;
-    return state->data[readPos];
+    return state->data[state->readPos++];
 }
 
 std::int32_t CramExternalBlockStore::ReadItf8(std::int32_t contentId)
@@ -918,8 +914,7 @@ void ByteArrayStopCodec::EncodeByteArray(std::span<const std::byte> data,
                                          CramExternalBlockStore& extBlocks)
 {
     extBlocks.WriteBytes(blockContentId_, data);
-    const std::array<std::byte, 1> arr{stopByte_};
-    extBlocks.WriteBytes(blockContentId_, arr);
+    extBlocks.WriteByte(blockContentId_, stopByte_);
 }
 
 // ---------------------------------------------------------------------------

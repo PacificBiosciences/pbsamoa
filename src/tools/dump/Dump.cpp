@@ -606,20 +606,11 @@ int Runner(const CLI_v2::Results& results)
         if (hasIndex && !hasRegion) {
             throw std::runtime_error{"--index requires --region for CRAM input"};
         }
-        std::filesystem::path referencePath{};
-        if (!referenceStr.empty()) {
-            referencePath = referenceStr;
-        }
-
-        std::optional<std::string> region{};
-        if (hasRegion) {
-            region.emplace(regionStr);
-        }
-
-        std::optional<std::filesystem::path> indexPath{};
-        if (hasIndex) {
-            indexPath.emplace(indexStr);
-        }
+        const std::filesystem::path referencePath{referenceStr};
+        const std::optional<std::string> region{hasRegion ? std::make_optional(regionStr)
+                                                          : std::nullopt};
+        const std::optional<std::filesystem::path> indexPath{
+            hasIndex ? std::make_optional<std::filesystem::path>(indexStr) : std::nullopt};
 
         DumpCram(path, referencePath, region, indexPath, bgzfWorkers, headerMode);
         return EXIT_SUCCESS;
@@ -629,11 +620,9 @@ int Runner(const CLI_v2::Results& results)
         throw std::runtime_error{"--region/--index are only supported for CRAM input"};
     }
 
-    std::size_t formatWorkers{
-        static_cast<std::size_t>(std::ranges::max(std::thread::hardware_concurrency(), 4U))};
-    if (formatOpt > 0) {
-        formatWorkers = static_cast<std::size_t>(formatOpt);
-    }
+    const std::size_t formatWorkers{formatOpt > 0 ? static_cast<std::size_t>(formatOpt)
+                                                  : static_cast<std::size_t>(std::ranges::max(
+                                                        std::thread::hardware_concurrency(), 4U))};
     DumpBam(path, bgzfWorkers, formatWorkers, headerMode);
     return EXIT_SUCCESS;
 }

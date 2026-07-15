@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <concepts>
 #include <expected>
 #include <format>
 #include <limits>
@@ -10,7 +11,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <type_traits>
 
 #include <cstddef>
 #include <cstdint>
@@ -26,11 +26,10 @@ struct ParsedRegion
     std::int32_t End{0};
 };
 
-template <typename IntType>
-std::expected<IntType, std::string> ParseInteger(std::string_view text, std::string_view name)
+template <std::integral IntType>
+[[nodiscard]] std::expected<IntType, std::string> ParseInteger(std::string_view text,
+                                                               std::string_view name)
 {
-    static_assert(std::is_integral_v<IntType>, "ParseInteger requires an integral target type");
-
     IntType value{};
     const char* const begin{text.data()};
     const char* const end{text.data() + text.size()};
@@ -49,7 +48,7 @@ struct ParsedRegionFields
     std::string_view EndText;
 };
 
-inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
+[[nodiscard]] inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
     std::string_view text, std::string_view /*expectedFormat*/)
 {
     // Split on the rightmost colon so reference names that themselves contain ':'
@@ -75,7 +74,8 @@ inline std::expected<ParsedRegionFields, std::string> SplitRegionFields(
     };
 }
 
-inline std::expected<ParsedRegion, std::string> BuildParsedRegion(const ParsedRegionFields& fields)
+[[nodiscard]] inline std::expected<ParsedRegion, std::string> BuildParsedRegion(
+    const ParsedRegionFields& fields)
 {
     // Open-ended end runs to the end of the reference (htslib uses HTS_POS_MAX; here the
     // coordinate type is 32-bit, so INT32_MAX is the sentinel Query treats as "no upper bound").
@@ -113,8 +113,8 @@ inline std::expected<ParsedRegion, std::string> BuildParsedRegion(const ParsedRe
     return ParsedRegion{.RefName = std::string{fields.RefName}, .Beg = beg, .End = end};
 }
 
-inline std::expected<ParsedRegion, std::string> ParseRegion(std::string_view text,
-                                                            std::string_view expectedFormat)
+[[nodiscard]] inline std::expected<ParsedRegion, std::string> ParseRegion(
+    std::string_view text, std::string_view expectedFormat)
 {
     return SplitRegionFields(text, expectedFormat).and_then(BuildParsedRegion);
 }

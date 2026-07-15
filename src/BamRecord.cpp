@@ -644,12 +644,12 @@ std::optional<Data::Frames> OptionalFramesTag(const TagMap& tags, TagKey key,
 
 }  // namespace
 
-std::string BamRecord::FullName() const { return std::string{name_}; }
+std::string BamRecord::FullName() const { return name_; }
 
 std::string BamRecord::MovieName() const
 {
     const std::size_t firstSlash{name_.find('/')};
-    return std::string{name_.substr(0, firstSlash)};
+    return name_.substr(0, firstSlash);
 }
 
 std::int32_t BamRecord::HoleNumber() const

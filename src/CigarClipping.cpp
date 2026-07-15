@@ -23,15 +23,6 @@ PacBio::Samoa::ClipResult MakeQueryClipResult(std::vector<PacBio::Samoa::CigarOp
     };
 }
 
-std::vector<PacBio::Samoa::CigarOp> RemainingOps(std::span<const PacBio::Samoa::CigarOp> cigar,
-                                                 std::size_t first)
-{
-    return {
-        std::begin(cigar) + static_cast<std::ptrdiff_t>(first),
-        std::end(cigar),
-    };
-}
-
 void TrimBack(std::vector<PacBio::Samoa::CigarOp>& ops, std::int32_t count)
 {
     while (!std::empty(ops) && (count > 0)) {
@@ -220,11 +211,11 @@ ClipResult ClipCigarToQuery(std::span<const CigarOp> cigar, std::int32_t querySt
             frontRemove = 0;
 
             // Build result starting with the partial op
-            const std::vector<CigarOp> remaining{RemainingOps(cigar, idx + 1)};
+            const auto sub{cigar.subspan(idx + 1)};
             std::vector<CigarOp> result;
-            result.reserve(1 + std::size(remaining));
+            result.reserve(1 + sub.size());
             result.emplace_back(type, remainder);
-            result.insert(std::end(result), std::begin(remaining), std::end(remaining));
+            result.insert(std::end(result), sub.begin(), sub.end());
 
             // --- Back trim ---
             TrimBack(result, backRemove);
@@ -242,7 +233,7 @@ ClipResult ClipCigarToQuery(std::span<const CigarOp> cigar, std::int32_t querySt
     queryOffset += frontRemove;
 
     // Copy remaining ops from idx onward.
-    std::vector<CigarOp> result{RemainingOps(cigar, idx)};
+    std::vector<CigarOp> result{cigar.begin() + static_cast<std::ptrdiff_t>(idx), cigar.end()};
 
     // --- Back trim ---
     TrimBack(result, backRemove);

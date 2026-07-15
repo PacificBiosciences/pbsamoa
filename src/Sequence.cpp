@@ -22,7 +22,8 @@ constexpr std::array<char, 256> MakeComplementTable()
     table['g'] = 'c';
     table['n'] = 'n';
     table['='] = '=';  // '=' (match-to-reference) is self-complementary; keep it lossless
-    // IUPAC ambiguity codes (upper + lower case, matching htslib's case-preserving revcomp)
+    // IUPAC ambiguity codes (upper + lower case, matching htslib's
+    // case-preserving revcomp)
     table['M'] = 'K';
     table['K'] = 'M';
     table['R'] = 'Y';
@@ -46,23 +47,7 @@ constexpr std::array<char, 256> MakeComplementTable()
     return table;
 }
 
-inline constexpr std::array<char, 256> COMPLEMENT_TABLE = MakeComplementTable();
-
-void PackSequenceIntoImpl(std::string_view seq, std::byte* dest)
-{
-    const std::size_t len{std::size(seq)};
-    std::size_t packedIndex{0};
-    std::size_t i{0};
-    for (; (i + 1) < len; i += 2, ++packedIndex) {
-        const std::uint8_t hi{BASE_TO_CODE[static_cast<unsigned char>(seq[i])]};
-        const std::uint8_t lo{BASE_TO_CODE[static_cast<unsigned char>(seq[i + 1])]};
-        dest[packedIndex] = static_cast<std::byte>((hi << 4) | lo);
-    }
-    if (i < len) {
-        dest[packedIndex] =
-            static_cast<std::byte>(BASE_TO_CODE[static_cast<unsigned char>(seq[i])] << 4);
-    }
-}
+constexpr std::array<char, 256> COMPLEMENT_TABLE = MakeComplementTable();
 
 void DecodePackedInto(std::span<const std::byte> packed, std::uint32_t seqLength, char* dest)
 {
@@ -80,16 +65,29 @@ void DecodePackedInto(std::span<const std::byte> packed, std::uint32_t seqLength
 }
 }  // namespace
 
-std::vector<std::byte> PackSequence(std::string_view seq)
+void PackSequenceInto(std::string_view seq, std::byte* dest)
 {
     const std::size_t len{std::size(seq)};
-    const std::size_t packedSize{(len + 1) / 2};
-    std::vector<std::byte> result(packedSize);
-    PackSequenceIntoImpl(seq, std::data(result));
-    return result;
+    std::size_t packedIndex{0};
+    std::size_t i{0};
+    for (; (i + 1) < len; i += 2, ++packedIndex) {
+        const std::uint8_t hi{BASE_TO_CODE[static_cast<unsigned char>(seq[i])]};
+        const std::uint8_t lo{BASE_TO_CODE[static_cast<unsigned char>(seq[i + 1])]};
+        dest[packedIndex] = static_cast<std::byte>((hi << 4) | lo);
+    }
+    if (i < len) {
+        dest[packedIndex] =
+            static_cast<std::byte>(BASE_TO_CODE[static_cast<unsigned char>(seq[i])] << 4);
+    }
 }
 
-void PackSequenceInto(std::string_view seq, std::byte* dest) { PackSequenceIntoImpl(seq, dest); }
+std::vector<std::byte> PackSequence(std::string_view seq)
+{
+    const std::size_t packedSize{(std::size(seq) + 1) / 2};
+    std::vector<std::byte> result(packedSize);
+    PackSequenceInto(seq, std::data(result));
+    return result;
+}
 
 std::string UnpackSequence(std::span<const std::byte> packed, std::uint32_t seqLength)
 {

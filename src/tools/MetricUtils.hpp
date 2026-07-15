@@ -5,19 +5,19 @@ namespace PacBio {
 namespace Samoa {
 namespace Tools {
 
-inline constexpr double BytesPerMiB{1024.0 * 1024.0};
-inline constexpr double NsPerMs{1e6};
+inline constexpr double BYTES_PER_MIB{1024.0 * 1024.0};
+inline constexpr double NS_PER_MS{1e6};
 
 template <typename T>
 double ToMiB(T bytes)
 {
-    return static_cast<double>(bytes) / BytesPerMiB;
+    return static_cast<double>(bytes) / BYTES_PER_MIB;
 }
 
 template <typename T>
 double ToMs(T nanoseconds)
 {
-    return static_cast<double>(nanoseconds) / NsPerMs;
+    return static_cast<double>(nanoseconds) / NS_PER_MS;
 }
 
 template <typename T>

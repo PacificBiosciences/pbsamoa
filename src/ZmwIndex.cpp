@@ -53,9 +53,6 @@ ZmwIndex& ZmwIndex::operator=(ZmwIndex&& other) noexcept
 
 namespace {
 
-constexpr std::size_t ZMI_ENTRY_MIN_SIZE{16};  // rgId(4) + zmw(4) + virtualOffset(8)
-constexpr std::size_t BGZF_MAX_BLOCK_SIZE{65536};
-
 // PBI format constants
 constexpr std::size_t PBI_HEADER_SIZE{32};
 constexpr std::array<char, 4> PBI_MAGIC{'P', 'B', 'I', '\1'};
@@ -79,7 +76,7 @@ std::size_t CheckedAdd(std::size_t lhs, std::size_t rhs, std::string_view what)
 std::vector<std::byte> ReadAllBgzfData(BgzfReader& reader)
 {
     std::vector<std::byte> data;
-    std::array<std::byte, BGZF_MAX_BLOCK_SIZE> blockBuf{};
+    std::array<std::byte, MAX_DECOMPRESSED_BLOCK_SIZE> blockBuf{};
 
     while (true) {
         const std::optional<std::size_t> bytesRead{reader.ReadBlock(blockBuf)};
@@ -178,7 +175,7 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
 
     // Read entrySize from offset 8 (2 bytes LE)
     const std::uint16_t entrySize{ReadU16LE(std::data(data) + 8)};
-    if (entrySize < ZMI_ENTRY_MIN_SIZE) {
+    if (entrySize < detail::ZMI_ENTRY_SIZE) {
         throw std::runtime_error{std::format("ZMI entrySize too small: {}", entrySize)};
     }
     const std::uint64_t numRecordsHeader{ReadU64LE(std::data(data) + 12)};

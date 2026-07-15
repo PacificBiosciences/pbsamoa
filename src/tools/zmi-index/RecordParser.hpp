@@ -57,12 +57,11 @@ inline std::optional<std::size_t> AuxValueLength(std::byte typeByte,
             return 8U;
         case 'Z':
         case 'H': {
-            for (std::size_t i{0}; i < std::size(data); ++i) {
-                if (data[i] == std::byte{0}) {
-                    return i + 1U;
-                }
+            const auto it{std::ranges::find(data, std::byte{0})};
+            if (it == std::ranges::end(data)) {
+                return std::nullopt;
             }
-            return std::nullopt;
+            return static_cast<std::size_t>(it - std::ranges::begin(data)) + 1U;
         }
         case 'B': {
             if (std::size(data) < 5U) {

@@ -1,6 +1,7 @@
 #include <pbsamoa/index/ZmwWhitelist.hpp>
 
 #include <algorithm>
+#include <iterator>
 #include <variant>
 #include <vector>
 
@@ -31,8 +32,7 @@ std::vector<std::int64_t> ZmwWhitelist::Resolve(const ZmwIndex& index) const
     if (const std::vector<std::int32_t>* zmws{std::get_if<std::vector<std::int32_t>>(&data_)};
         zmws) {
         for (const std::int32_t zmw : *zmws) {
-            const auto offsets{index.Find(zmw)};
-            result.insert(result.end(), offsets.begin(), offsets.end());
+            std::ranges::copy(index.Find(zmw), std::back_inserter(result));
         }
     } else {
         result = index.Find(std::get<std::vector<ZmwIdentity>>(data_));

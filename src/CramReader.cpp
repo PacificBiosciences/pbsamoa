@@ -466,12 +466,11 @@ std::vector<std::byte> ResolveSliceReferenceWindow(
                                 referenceLabel, spanLabel, std::size(fullReference))};
             }
 
-            std::vector<std::byte> window;
-            window.reserve(windowLength);
-            for (std::size_t i = 0; i < windowLength; ++i) {
-                window.push_back(static_cast<std::byte>(
-                    static_cast<std::uint8_t>(fullReference[windowStart + i])));
-            }
+            const auto src = std::string_view{fullReference}.substr(windowStart, windowLength);
+            std::vector<std::byte> window(windowLength);
+            std::ranges::transform(src, window.begin(), [](char c) {
+                return static_cast<std::byte>(static_cast<unsigned char>(c));
+            });
             return window;
         }
     }
@@ -485,12 +484,10 @@ std::vector<std::byte> ResolveSliceReferenceWindow(
 
 std::vector<std::byte> UppercaseBases(std::span<const std::byte> bases)
 {
-    std::vector<std::byte> normalized;
-    normalized.reserve(std::size(bases));
-    for (const std::byte b : bases) {
-        const auto asChar = std::to_integer<unsigned char>(b);
-        normalized.push_back(static_cast<std::byte>(std::toupper(asChar)));
-    }
+    std::vector<std::byte> normalized(std::size(bases));
+    std::ranges::transform(bases, normalized.begin(), [](std::byte b) {
+        return static_cast<std::byte>(std::toupper(std::to_integer<unsigned char>(b)));
+    });
     return normalized;
 }
 
@@ -1534,10 +1531,7 @@ struct CramReader::Impl
                         break;
                     }
                     case 'I': {
-                        std::int32_t insLen = static_cast<std::int32_t>(std::size(feature.Data));
-                        if (feature.Length > 0) {
-                            insLen = feature.Length;
-                        }
+                        const std::int32_t insLen{feature.Length};
                         if (insLen > 0) {
                             WriteFeatureData(sequence, currentReadPos, feature.Data);
                             AppendCigarOp(cigar, CigarOpType::I, insLen);
@@ -1662,9 +1656,7 @@ std::optional<BamRecord> TakePendingRecord(std::vector<BamRecord>& pendingRecord
         return std::nullopt;
     }
 
-    const std::size_t idx{pendingIdx};
-    ++pendingIdx;
-    return std::move(pendingRecords[idx]);
+    return std::move(pendingRecords[pendingIdx++]);
 }
 
 }  // namespace

@@ -44,12 +44,7 @@ std::int32_t ParseZmwFromName(std::string_view name)
 
     const std::size_t secondSlash{name.find('/', firstSlash + 1)};
     const std::size_t zmwStart{firstSlash + 1};
-    std::string_view zmwField{};
-    if (secondSlash == std::string_view::npos) {
-        zmwField = name.substr(zmwStart);
-    } else {
-        zmwField = name.substr(zmwStart, secondSlash - zmwStart);
-    }
+    const std::string_view zmwField{name.substr(zmwStart, secondSlash - zmwStart)};
     if (zmwField.empty()) {
         return 0;
     }

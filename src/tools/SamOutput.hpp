@@ -22,22 +22,14 @@ namespace Samoa {
 inline void WriteReferenceName(const SamHeader& header, std::int32_t refId)
 {
     const std::string_view sentinel{RnameSentinel(refId)};
-    if (!sentinel.empty()) {
-        std::print("{}", sentinel);
-        return;
-    }
-    std::print("{}", header.ReferenceName(refId));
+    std::print("{}", sentinel.empty() ? header.ReferenceName(refId) : sentinel);
 }
 
 inline void WriteNextReferenceName(const SamHeader& header, std::int32_t refId,
                                    std::int32_t nextRefId)
 {
     const std::string_view sentinel{RnextSentinel(refId, nextRefId)};
-    if (!sentinel.empty()) {
-        std::print("{}", sentinel);
-        return;
-    }
-    std::print("{}", header.ReferenceName(nextRefId));
+    std::print("{}", sentinel.empty() ? header.ReferenceName(nextRefId) : sentinel);
 }
 
 inline void WriteQualities(std::span<const std::uint8_t> qualities)
@@ -47,11 +39,9 @@ inline void WriteQualities(std::span<const std::uint8_t> qualities)
         return;
     }
 
-    std::string encodedQualities;
-    encodedQualities.reserve(std::size(qualities));
-    for (const std::uint8_t quality : qualities) {
-        encodedQualities.push_back(static_cast<char>(quality + 33));
-    }
+    std::string encodedQualities(std::size(qualities), '\0');
+    std::ranges::transform(qualities, std::begin(encodedQualities),
+                           [](std::uint8_t q) { return static_cast<char>(q + 33); });
     std::print("{}", encodedQualities);
 }
 

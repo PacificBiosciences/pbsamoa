@@ -6,6 +6,7 @@
 
 #include <pbcopper/json/JSON.h>
 
+#include <algorithm>
 #include <array>
 #include <iterator>
 #include <map>
@@ -137,31 +138,24 @@ TagArray EncodeIntArray(char elementType, const std::vector<std::int64_t>& value
 std::vector<std::uint8_t> RawBytes(const TagArray& array)
 {
     const std::span<const std::byte> data{array.Data()};
-    std::vector<std::uint8_t> out;
-    out.reserve(std::size(data));
-    for (const std::byte b : data) {
-        out.push_back(static_cast<std::uint8_t>(b));
-    }
+    std::vector<std::uint8_t> out(std::size(data));
+    std::memcpy(std::data(out), std::data(data), std::size(data));
     return out;
 }
 
 std::string FastqFromQualities(std::span<const std::uint8_t> quals)
 {
-    std::string fastq;
-    fastq.reserve(std::size(quals));
-    for (const std::uint8_t qv : quals) {
-        fastq.push_back(static_cast<char>(qv + 33));
-    }
+    std::string fastq(std::size(quals), '\0');
+    std::ranges::transform(quals, std::begin(fastq),
+                           [](std::uint8_t qv) { return static_cast<char>(qv + 33); });
     return fastq;
 }
 
 std::vector<std::uint8_t> QualitiesFromFastq(std::string_view fastq)
 {
-    std::vector<std::uint8_t> quals;
-    quals.reserve(std::size(fastq));
-    for (const char c : fastq) {
-        quals.push_back(static_cast<std::uint8_t>(c - 33));
-    }
+    std::vector<std::uint8_t> quals(std::size(fastq));
+    std::ranges::transform(fastq, std::begin(quals),
+                           [](char c) { return static_cast<std::uint8_t>(c - 33); });
     return quals;
 }
 
@@ -427,9 +421,8 @@ void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t 
 
     const std::vector<std::uint8_t> packed{JSON::Json::to_msgpack(root)};
     TagArray lsArray{'C'};
-    for (const std::uint8_t byte : packed) {
-        lsArray.AppendUInt8(byte);
-    }
+    lsArray.Resize(static_cast<std::uint32_t>(std::size(packed)));
+    std::memcpy(std::data(lsArray.MutableData()), std::data(packed), std::size(packed));
     record.MutableTags().Set(LS_TAG, lsArray);
 
     record.Clip(ClipType::CLIP_TO_QUERY, clipLeft, clipRight);

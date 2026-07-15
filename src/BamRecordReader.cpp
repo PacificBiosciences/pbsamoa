@@ -199,9 +199,7 @@ struct BamRecordReader::Impl
 
         counters_.consumerStalls.fetch_add(1, std::memory_order_relaxed);
         std::unique_lock lock{readyMutex_};
-        while (!QueueReady()) {
-            readyCv_.wait(lock);
-        }
+        readyCv_.wait(lock, [this] { return QueueReady(); });
         return queue_.front();
     }
 
@@ -305,10 +303,9 @@ struct BamRecordReader::QueryRange::Impl
 
     std::vector<Source> sources_;
     std::priority_queue<Source*, std::vector<Source*>, SourceCompare> ready_;
-    std::variant<std::monostate, DropTags, KeepTags> tagFilter_;
+    TagFilter tagFilter_;
 
-    Impl(BamCollection collection, const GenomicInterval& interval,
-         std::variant<std::monostate, DropTags, KeepTags> tagFilter)
+    Impl(BamCollection collection, const GenomicInterval& interval, TagFilter tagFilter)
         : tagFilter_{std::move(tagFilter)}
     {
         const std::int32_t refId{collection.Header().ReferenceId(interval.Name())};
@@ -328,10 +325,6 @@ struct BamRecordReader::QueryRange::Impl
             const BaiIndex index{BaiIndex::FromFile(baiPath)};
             sources_.push_back(Source{
                 .reader = std::make_unique<BamRawReader>(file.Filename()),
-                .range = std::nullopt,
-                .iter = std::nullopt,
-                .end = std::nullopt,
-                .current = std::nullopt,
                 .order = i,
             });
             Source& source{sources_.back()};

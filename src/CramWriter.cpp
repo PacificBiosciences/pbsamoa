@@ -423,7 +423,7 @@ void WriteQualities(CramExternalBlockStore& extStore, std::span<const std::uint8
         return;
     }
     for (std::int32_t qi = 0; qi < expectedLength; ++qi) {
-        std::uint8_t q = static_cast<std::uint8_t>(0xFF);
+        std::uint8_t q{0xFF};
         if (qi < static_cast<std::int32_t>(std::size(qualities))) {
             q = qualities[qi];
         }
@@ -1022,8 +1022,6 @@ struct CramWriter::Impl
         CramBlock coreBlock;
         coreBlock.ContentType = CramBlockContentType::CORE_DATA;
         coreBlock.ContentId = 0;
-        coreBlock.Data = {};
-        coreBlock.RawSize = static_cast<std::int32_t>(std::size(coreBlock.Data));
         dataBlockMethods.push_back(ResolveBlockMethod(coreBlock.ContentType, coreBlock.ContentId,
                                                       dataSeriesMethods, nonDataSeriesMethod));
         dataBlocks.push_back(std::move(coreBlock));

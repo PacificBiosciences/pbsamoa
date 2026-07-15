@@ -92,6 +92,34 @@ constexpr std::size_t BLOCKS_PER_BATCH{32};
     return libdeflate_crc32(0, output, outputSize) == expectedCrc;
 }
 
+// Build the 18-byte BGZF gzip frame header for a block whose total size is
+// bsize+1. Layout: ID1 ID2 CM FLG MTIME(4) XFL OS XLEN(2=6) SI1 SI2 SLEN(2=2)
+// BSIZE(2).
+[[nodiscard]] constexpr std::array<std::uint8_t, 18> MakeBgzfFrameHeader(
+    std::uint16_t bsize) noexcept
+{
+    return {
+        GZIP_ID1,
+        GZIP_ID2,
+        GZIP_CM_DEFLATE,
+        GZIP_FLG_FEXTRA,
+        0U,
+        0U,
+        0U,
+        0U,  // MTIME
+        0U,
+        0U,  // XFL, OS
+        6U,
+        0U,  // XLEN = 6 (little-endian)
+        BGZF_SI1,
+        BGZF_SI2,
+        2U,
+        0U,  // BC subfield
+        static_cast<std::uint8_t>(bsize & 0xFFU),
+        static_cast<std::uint8_t>(bsize >> 8U),
+    };
+}
+
 }  // namespace
 
 // =============================================================================
@@ -226,7 +254,6 @@ std::vector<std::byte> CompressBgzfBlock(std::span<const std::byte> input, const
         throw std::runtime_error{"CompressBgzfBlock: libdeflate_deflate_compress failed"};
     }
 
-    const std::uint16_t xlen{6U};
     const std::size_t blockSize{18U + compressedSize + 8U};
     if (blockSize > BGZF_MAX_BLOCK_SIZE) {
         throw std::runtime_error{"CompressBgzfBlock: framed block exceeds BGZF maximum"};
@@ -236,26 +263,7 @@ std::vector<std::byte> CompressBgzfBlock(std::span<const std::byte> input, const
     const std::uint32_t crc{libdeflate_crc32(0, std::data(input), std::size(input))};
     const std::uint32_t isize{static_cast<std::uint32_t>(std::size(input))};
 
-    const std::array<std::uint8_t, 18> frameHeader{
-        GZIP_ID1,
-        GZIP_ID2,
-        GZIP_CM_DEFLATE,
-        GZIP_FLG_FEXTRA,  // ID1, ID2, CM, FLG
-        0U,
-        0U,
-        0U,
-        0U,  // MTIME
-        0U,
-        0U,  // XFL, OS
-        static_cast<std::uint8_t>(xlen & 0xFFU),
-        static_cast<std::uint8_t>(xlen >> 8U),
-        BGZF_SI1,
-        BGZF_SI2,
-        2U,
-        0U,  // BC subfield ID + length
-        static_cast<std::uint8_t>(bsize & 0xFFU),
-        static_cast<std::uint8_t>(bsize >> 8U),
-    };
+    const auto frameHeader{MakeBgzfFrameHeader(bsize)};
 
     std::vector<std::byte> frame{};
     frame.reserve(blockSize);
@@ -796,8 +804,7 @@ struct BgzfWriter::Impl
         if (std::empty(batch)) {
             return;
         }
-        std::vector<detail::UncompressedBlock> blocks{};
-        blocks.swap(batch);
+        auto blocks{std::move(batch)};
         batch.reserve(batchLimit);
 
         pool->Submit(CompressBatchTask{std::move(blocks), &compressors, &counters});
@@ -906,34 +913,14 @@ struct BgzfWriter::Impl
     {
         const ScopedTimer timer{counters.ioWriteNs};
 
-        const std::uint16_t xlen{6U};
-        const std::uint32_t blockSize{10U + 2U + xlen +
+        const std::uint32_t blockSize{static_cast<std::uint32_t>(BGZF_HEADER_SIZE) +
                                       static_cast<std::uint32_t>(std::size(block.cdata)) + 8U};
         if (blockSize > 65536U) {
             throw std::runtime_error{"BgzfWriter: block size exceeds BGZF maximum"};
         }
         const std::uint16_t bsize = blockSize - 1U;
 
-        const std::array<std::uint8_t, 18> frameHeader{
-            GZIP_ID1,
-            GZIP_ID2,
-            GZIP_CM_DEFLATE,
-            GZIP_FLG_FEXTRA,  // ID1, ID2, CM, FLG
-            0U,
-            0U,
-            0U,
-            0U,  // MTIME
-            0U,
-            0U,  // XFL, OS
-            static_cast<std::uint8_t>(xlen & 0xFFU),
-            static_cast<std::uint8_t>(xlen >> 8U),
-            BGZF_SI1,
-            BGZF_SI2,
-            2U,
-            0U,  // BC subfield ID + length
-            static_cast<std::uint8_t>(bsize & 0xFFU),
-            static_cast<std::uint8_t>(bsize >> 8U),
-        };
+        const auto frameHeader{MakeBgzfFrameHeader(bsize)};
         file.write(reinterpret_cast<const char*>(std::data(frameHeader)),
                    static_cast<std::streamsize>(std::size(frameHeader)));
         file.write(reinterpret_cast<const char*>(std::data(block.cdata)),

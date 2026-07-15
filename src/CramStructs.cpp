@@ -1087,10 +1087,8 @@ CramContainer ParseContainer(const CramContainerHeader& header, std::span<const 
         if (std::size(header.Landmarks) != std::size(observedLandmarks)) {
             throw std::runtime_error("ParseContainer: landmark count mismatch");
         }
-        for (std::size_t i = 0; i < std::size(observedLandmarks); ++i) {
-            if (header.Landmarks[i] != observedLandmarks[i]) {
-                throw std::runtime_error("ParseContainer: landmark offset mismatch");
-            }
+        if (!std::ranges::equal(header.Landmarks, observedLandmarks)) {
+            throw std::runtime_error("ParseContainer: landmark offset mismatch");
         }
     }
 

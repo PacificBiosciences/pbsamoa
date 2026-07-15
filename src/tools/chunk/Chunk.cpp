@@ -98,8 +98,7 @@ int Runner(const CLI_v2::Results& results)
         throw std::runtime_error{"invalid --mode: " + mode};
     }
 
-    const std::int32_t tile{results[Tile]};
-    readerConfig.ChunkTileZmws = tile;
+    readerConfig.ChunkTileZmws = results[Tile];
 
     const std::string seedStr = results[Seed];
     readerConfig.ChunkSeed = Tools::ParseIntegerOrThrow<std::uint64_t>(seedStr, "seed");

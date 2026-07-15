@@ -168,7 +168,7 @@ std::optional<CramDataSeries> ParseDataSeries(std::string_view arg)
         CramDataSeries::IN, CramDataSeries::RS, CramDataSeries::PD, CramDataSeries::HC,
         CramDataSeries::SC, CramDataSeries::MQ, CramDataSeries::BA, CramDataSeries::QS,
     };
-    if (std::ranges::find(KNOWN, candidate) != std::ranges::end(KNOWN)) {
+    if (std::ranges::contains(KNOWN, candidate)) {
         return candidate;
     }
     return std::nullopt;
@@ -319,8 +319,7 @@ int Runner(const CLI_v2::Results& results)
         config.DataSeriesCompressionMethods[series] = method;
     }
 
-    const bool writeCrai = results[WriteCrai];
-    config.WriteCrai = writeCrai;
+    config.WriteCrai = results[WriteCrai];
 
     // CLIv2 does not enforce required positional count — guard before indexing.
     const std::vector<std::string>& positional{results.PositionalArguments()};

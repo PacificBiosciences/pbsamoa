@@ -24,8 +24,8 @@ struct ZmiBamWriter::Impl
         , bam{bamPath, header, cfg,
               [this](std::int64_t virtualOffset, std::span<const std::byte> rawData) {
                   const RawRecord rawRecord{rawData};
-                  const TagMap tags{rawRecord.ParseTags()};
-                  const ZmwIdentity identity{ParseZmwIdentity(rawRecord.Name(), tags)};
+                  const ZmwIdentity identity{
+                      ParseZmwIdentity(rawRecord.Name(), rawRecord.ParseTags())};
                   zmi.AddRecord(identity.rgId, identity.zmw, virtualOffset);
               }}
     {

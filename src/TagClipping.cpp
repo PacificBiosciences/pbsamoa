@@ -6,7 +6,6 @@
 #include "PulseBitset.hpp"
 
 #include <algorithm>
-#include <array>
 #include <iterator>
 #include <numeric>
 #include <ranges>
@@ -183,6 +182,7 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
         }
 
         // Build the retained ML values per type, then concatenate.
+        const auto srcData{arr->Data()};
         std::vector<std::byte> retainedBytes;
         std::size_t qvOffset{0};  // running offset into the original ML array
 
@@ -195,7 +195,6 @@ bool BasemodClipStrategy::Clip(TagValue& value, std::size_t clipOffset, std::siz
             // Copy retained QVs for this modification type
             const std::size_t srcByteOffset{(qvOffset + window.FrontRemoved * stride) * elemSize};
             const std::size_t srcByteLength{window.Retained * stride * elemSize};
-            const auto srcData{arr->Data()};
             retainedBytes.insert(std::end(retainedBytes), std::cbegin(srcData) + srcByteOffset,
                                  std::cbegin(srcData) + srcByteOffset + srcByteLength);
 

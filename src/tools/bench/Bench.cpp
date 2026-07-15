@@ -305,10 +305,7 @@ int Runner(const CLI_v2::Results& results)
     const std::filesystem::path path{pos[0]};
 
     const std::size_t bgzfWorkers{Tools::ResolveNumWorkers(bgzfOpt, /*explicitCap=*/10)};
-    std::size_t decodeWorkers{4U};
-    if (decodeOpt >= 0) {
-        decodeWorkers = static_cast<std::size_t>(decodeOpt);
-    }
+    const std::size_t decodeWorkers{static_cast<std::size_t>(decodeOpt)};
 
     std::println("=== pbsamoa benchmark: {} ===", path.filename().string());
     std::println("    bgzf-threads={}, decode-threads={}\n", bgzfWorkers, decodeWorkers);

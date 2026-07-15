@@ -61,8 +61,7 @@ GzipMemberResult DecompressGzipMember(const LibdeflateDecompressorPtr& decompres
             return GzipMemberResult{consumed, produced};
         }
         if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
-            if (outCapacity >
-                std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(2)) {
+            if (outCapacity > std::numeric_limits<std::size_t>::max() / 2) {
                 throw CraiGzipError(path);
             }
             outCapacity *= 2;

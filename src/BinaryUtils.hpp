@@ -38,9 +38,9 @@ inline void AppendLE(std::vector<std::byte>& out, T value)
 
 inline constexpr std::size_t MAX_DECOMPRESSED_BLOCK_SIZE{65536U};
 
-[[noreturn]] inline void ThrowReadFileError(const std::string& pathText)
+[[noreturn]] inline void ThrowReadFileError(std::string_view pathText)
 {
-    throw std::runtime_error{"failed to read file: " + pathText};
+    throw std::runtime_error{std::format("failed to read file: {}", pathText)};
 }
 
 /// \brief Compute total BAM header size from binary data.
@@ -127,7 +127,7 @@ inline std::vector<std::byte> ReadAllBytes(const std::filesystem::path& path)
 ///
 /// \param[in] value      The string to parse.
 /// \param[in] context    Human-readable context for error messages.
-template <typename Integer>
+template <std::integral Integer>
 Integer ParseInteger(std::string_view value, std::string_view context)
 {
     Integer parsed{};

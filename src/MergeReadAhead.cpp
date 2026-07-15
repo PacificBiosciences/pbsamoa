@@ -50,13 +50,6 @@ constexpr std::size_t BATCH_TARGET_BYTES{std::size_t{256} * 1024};
 /// Per-record bookkeeping slack added to the raw byte count for the budget meter.
 constexpr std::size_t RECORD_SLACK{64};
 
-std::uint32_t ReadLE32(const std::byte* p)
-{
-    return std::to_integer<std::uint32_t>(p[0]) | (std::to_integer<std::uint32_t>(p[1]) << 8U) |
-           (std::to_integer<std::uint32_t>(p[2]) << 16U) |
-           (std::to_integer<std::uint32_t>(p[3]) << 24U);
-}
-
 std::uint64_t ElapsedNs(std::chrono::steady_clock::time_point start)
 {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -259,7 +252,7 @@ struct MergeReadAhead::Impl
                 batch.Bytes = pendingBytes;
 
                 carry = std::move(tail);
-                extents = std::vector<Extent>{};
+                extents.clear();
                 pendingBytes = 0;
                 framedEnd = 0;
                 return PublishBatch(source, std::move(batch));
@@ -326,7 +319,7 @@ struct MergeReadAhead::Impl
                     // Frame complete records from where we left off into extents.
                     std::size_t pos{framedEnd};
                     while ((std::size(carry) - pos) >= 4) {
-                        const std::uint32_t recordLen{ReadLE32(std::data(carry) + pos)};
+                        const std::uint32_t recordLen{ReadU32LE(std::data(carry) + pos)};
                         if ((std::size(carry) - pos - 4) < recordLen) {
                             break;  // record continues into a later block
                         }

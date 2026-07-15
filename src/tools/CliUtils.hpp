@@ -54,26 +54,23 @@ inline ByteLimit ParseMemory(std::string_view text, std::string_view option = "-
     }
 
     std::uint64_t multiplier{1};
-    std::string_view digits{text};
     switch (text.back()) {
         case 'k':
         case 'K':
             multiplier = std::uint64_t{1024};
-            digits = text.substr(0, std::size(text) - 1);
             break;
         case 'm':
         case 'M':
             multiplier = std::uint64_t{1024} * 1024;
-            digits = text.substr(0, std::size(text) - 1);
             break;
         case 'g':
         case 'G':
             multiplier = std::uint64_t{1024} * 1024 * 1024;
-            digits = text.substr(0, std::size(text) - 1);
             break;
         default:
             break;
     }
+    const std::string_view digits{multiplier != 1 ? text.substr(0, std::size(text) - 1) : text};
 
     const std::uint64_t value{ParseIntegerOrThrow<std::uint64_t>(digits, option)};
     if (value > (std::numeric_limits<std::size_t>::max() / multiplier)) {

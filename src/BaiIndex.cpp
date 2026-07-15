@@ -23,6 +23,7 @@
 #include <span>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <cassert>
@@ -99,12 +100,7 @@ template <typename T>
     requires std::is_integral_v<T>
 std::int32_t CheckedInt32(T value, std::string_view fieldName)
 {
-    using Int32Limits = std::numeric_limits<std::int32_t>;
-    if constexpr (std::is_signed_v<T>) {
-        if ((value < Int32Limits::min()) || (value > Int32Limits::max())) {
-            throw std::runtime_error{std::format("Invalid BAI value for {}: {}", fieldName, value)};
-        }
-    } else if (value > static_cast<std::uint64_t>(Int32Limits::max())) {
+    if (!std::in_range<std::int32_t>(value)) {
         throw std::runtime_error{std::format("Invalid BAI value for {}: {}", fieldName, value)};
     }
     return static_cast<std::int32_t>(value);
@@ -136,11 +132,6 @@ std::vector<Chunk> MergeChunks(std::vector<Chunk> chunks)
     }
 
     return merged;
-}
-
-bool ConsumesReference(std::uint8_t opCode)
-{
-    return (opCode == 0) || (opCode == 2) || (opCode == 3) || (opCode == 7) || (opCode == 8);
 }
 
 VirtualOffset VirtualOffsetAt(std::span<const BlockSegment> segments, std::size_t accumPos)
@@ -783,7 +774,7 @@ void BaiStreamBuilder::Observe(VirtualOffset recordBeginVo, std::span<const std:
             const std::uint32_t cigarVal{ReadU32LE(rec + cigarOffset + ci * 4)};
             const std::uint8_t opCode{static_cast<std::uint8_t>(cigarVal & 0xFU)};
             const std::uint32_t opLen{cigarVal >> 4};
-            if (ConsumesReference(opCode)) {
+            if (ConsumesReference(static_cast<CigarOpType>(opCode))) {
                 refLen += opLen;
             }
         }

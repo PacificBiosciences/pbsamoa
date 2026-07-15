@@ -19,8 +19,7 @@ LibraryInfo GetLibraryInfo()
 
 std::string LibraryFormattedVersion()
 {
-    const LibraryInfo libraryInfo{GetLibraryInfo()};
-    return std::format("{} (commit {})", libraryInfo.Release, libraryInfo.GitSha1);
+    return std::format("{} (commit {})", RELEASE_VERSION, LIBRARY_GIT_SHA1);
 }
 
 }  // namespace Samoa

@@ -245,19 +245,21 @@ char SmallestIntType(std::int64_t v)
         throw std::runtime_error{
             std::format("Tags: integer tag value {} out of BAM-representable 32-bit range", v)};
     }
-    if ((v >= 0) && (v <= 255)) {
+    if ((v >= 0) && (v <= std::numeric_limits<std::uint8_t>::max())) {
         return 'C';
     }
-    if ((v >= -128) && (v <= 127)) {
+    if ((v >= std::numeric_limits<std::int8_t>::min()) &&
+        (v <= std::numeric_limits<std::int8_t>::max())) {
         return 'c';
     }
-    if ((v >= 0) && (v <= 65535)) {
+    if ((v >= 0) && (v <= std::numeric_limits<std::uint16_t>::max())) {
         return 'S';
     }
-    if ((v >= -32768) && (v <= 32767)) {
+    if ((v >= std::numeric_limits<std::int16_t>::min()) &&
+        (v <= std::numeric_limits<std::int16_t>::max())) {
         return 's';
     }
-    if ((v >= 0) && (v <= 4294967295LL)) {
+    if ((v >= 0) && (v <= std::numeric_limits<std::uint32_t>::max())) {
         return 'I';
     }
     return 'i';
@@ -828,8 +830,7 @@ std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text
                 return std::nullopt;
             }
             const char elemType{valueStr[0]};
-            if ((elemType != 'c') && (elemType != 'C') && (elemType != 's') && (elemType != 'S') &&
-                (elemType != 'i') && (elemType != 'I') && (elemType != 'f')) {
+            if (TagArrayElementSize(elemType) == 0) {
                 return std::nullopt;
             }
             if (valueStr[1] != ',') {

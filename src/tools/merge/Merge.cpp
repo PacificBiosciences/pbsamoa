@@ -338,8 +338,7 @@ int Runner(const CLI_v2::Results& results)
     }
 
     // --concat
-    const bool concat = results[Concat];
-    config.Concat = concat;
+    config.Concat = results[Concat];
 
     // --tag (optional; required when --order tag is set)
     const std::string tag = results[Tag];
@@ -352,14 +351,9 @@ int Runner(const CLI_v2::Results& results)
 
     // Thread knobs: read as uint32_t (no exact size_t converter in Results), assign
     // to size_t fields.
-    const std::uint32_t threads{results[Threads]};
-    config.NumThreads = threads;
-
-    const std::uint32_t decodeThreads{results[DecodeThreads]};
-    config.DecodeThreads = decodeThreads;
-
-    const std::uint32_t compressThreads{results[CompressThreads]};
-    config.CompressThreads = compressThreads;
+    config.NumThreads = static_cast<std::uint32_t>(results[Threads]);
+    config.DecodeThreads = static_cast<std::uint32_t>(results[DecodeThreads]);
+    config.CompressThreads = static_cast<std::uint32_t>(results[CompressThreads]);
 
     // --memory
     const std::string memory = results[Memory];
@@ -399,11 +393,7 @@ int Runner(const CLI_v2::Results& results)
         config.BaiOutput = SidecarPath(output, ".bai");
     }
 
-    std::vector<std::filesystem::path> inputs{};
-    inputs.reserve(positional.size() - 1);
-    for (std::size_t i{1}; i < positional.size(); ++i) {
-        inputs.emplace_back(positional[i]);
-    }
+    std::vector<std::filesystem::path> inputs{positional.begin() + 1, positional.end()};
 
     config.CommandLine = std::string{"pbsamoa "} + results.InputCommandLine();
 

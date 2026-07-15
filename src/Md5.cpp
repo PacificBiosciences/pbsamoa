@@ -127,10 +127,7 @@ std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
     std::copy_n(std::data(bytes) + fullBytes, remaining, std::data(buffer));
     buffer[remaining] = 0x80;
 
-    std::size_t padded{64U};
-    if (remaining >= 56) {
-        padded = 128U;
-    }
+    const std::size_t padded{remaining >= 56 ? 128U : 64U};
     std::memcpy(std::data(buffer) + padded - 8, &bitLen, 8);
 
     const std::span<const std::uint8_t, 128> padSpan{buffer};

@@ -47,9 +47,8 @@ std::size_t ResolveThreads(std::size_t requested)
     if (requested != 0) {
         return requested;
     }
-    const std::uint32_t hardware{std::thread::hardware_concurrency()};
-    const std::size_t available{(hardware == 0) ? std::size_t{1} : hardware};
-    return std::min<std::size_t>(available, 8);
+    const std::size_t hw{std::ranges::max(std::thread::hardware_concurrency(), 1U)};
+    return std::ranges::min(hw, std::size_t{8});
 }
 
 }  // namespace

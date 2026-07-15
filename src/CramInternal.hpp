@@ -27,7 +27,7 @@ struct TagTriple
     auto operator<=>(const TagTriple&) const = default;
 };
 
-inline constexpr std::int32_t TagContentByte(const char value)
+inline constexpr std::int32_t TagContentByte(char value)
 {
     return static_cast<std::int32_t>(static_cast<std::uint8_t>(value));
 }

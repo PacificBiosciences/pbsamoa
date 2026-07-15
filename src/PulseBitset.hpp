@@ -29,8 +29,7 @@ public:
     /// \param[in] pulseCalls  The `pc` tag value where uppercase = basecalled.
     explicit PulseBitset(std::string_view pulseCalls) : size_{std::size(pulseCalls)}
     {
-        const std::size_t numBlocks{(size_ + (BITS_PER_BLOCK - 1)) / BITS_PER_BLOCK};
-        blocks_.resize(numBlocks, 0);
+        blocks_.resize((size_ + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK, 0);
 
         for (std::size_t i{0}; i < size_; ++i) {
             if (std::isupper(static_cast<unsigned char>(pulseCalls[i]))) {
@@ -76,7 +75,7 @@ public:
 
 private:
     std::vector<std::uint64_t> blocks_;
-    std::size_t size_;
+    std::size_t size_{0};
     std::size_t count_{0};
 };
 

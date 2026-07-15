@@ -25,7 +25,7 @@ namespace Samoa {
 template <typename IndexType, typename Fn>
 auto MakeWorkStealingTask(std::atomic<IndexType>* next, IndexType total, Fn fn)
 {
-    return [next, total, fn](std::int32_t) {
+    return [next, total, fn = std::move(fn)](std::int32_t) {
         while (true) {
             const IndexType idx = next->fetch_add(1, std::memory_order_relaxed);
             if (idx >= total) {

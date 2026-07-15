@@ -11,6 +11,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cstdint>
@@ -51,7 +52,7 @@ std::uint8_t ParseUInt8(std::string_view text, std::string_view context)
 std::int32_t ParseSamPosition(std::string_view text, std::string_view context)
 {
     const std::uint32_t oneBasedPos{ParseInteger<std::uint32_t>(text, context)};
-    if (oneBasedPos > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+    if (std::cmp_greater(oneBasedPos, std::numeric_limits<std::int32_t>::max())) {
         throw std::runtime_error{std::format("{}: value out of range (0-{}): '{}'", context,
                                              std::numeric_limits<std::int32_t>::max(), text)};
     }
@@ -128,7 +129,6 @@ struct SamReader::Impl
     SamHeader header;
     std::string currentLine;
     std::uint64_t lineNumber{0};
-    bool hasBufferedLine{false};
 
     explicit Impl(const std::filesystem::path& path)
     {
@@ -149,7 +149,6 @@ struct SamReader::Impl
             } else {
                 // First non-header line — buffer it
                 currentLine = std::move(line);
-                hasBufferedLine = !std::empty(currentLine);
                 break;
             }
         }
@@ -212,7 +211,8 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
     record.Flag(ParseInteger<std::uint16_t>(fields[1], "FLAG"));
 
-    record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME", /*requireSqLines=*/true));
+    record.RefId(ParseReferenceId(fields[2], header, lineNumber, "RNAME",
+                                  /*requireSqLines=*/true));
 
     record.Pos(ParseSamPosition(fields[3], "POS"));
 
@@ -227,8 +227,8 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
     if (fields[6] == "=") {
         record.NextRefId(record.RefId());
     } else {
-        record.NextRefId(
-            ParseReferenceId(fields[6], header, lineNumber, "RNEXT", /*requireSqLines=*/false));
+        record.NextRefId(ParseReferenceId(fields[6], header, lineNumber, "RNEXT",
+                                          /*requireSqLines=*/false));
     }
 
     record.NextPos(ParseSamPosition(fields[7], "PNEXT"));
@@ -276,9 +276,9 @@ BamRecord ParseAlignmentLine(std::string_view line, const SamHeader& header,
 
 std::optional<BamRecord> SamReader::ReadRecord()
 {
-    if (impl_->hasBufferedLine) {
-        impl_->hasBufferedLine = false;
-        return ParseAlignmentLine(impl_->currentLine, impl_->header, impl_->lineNumber);
+    if (!impl_->currentLine.empty()) {
+        std::string line{std::move(impl_->currentLine)};
+        return ParseAlignmentLine(line, impl_->header, impl_->lineNumber);
     }
 
     std::string line;

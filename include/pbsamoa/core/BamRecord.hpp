@@ -103,7 +103,7 @@ public:
                    std::uint8_t mapQ);
 
     /// \brief Serialize to BAM binary layout (excludes block_size prefix).
-    std::vector<std::byte> SerializeToBam() const;
+    [[nodiscard]] std::vector<std::byte> SerializeToBam() const;
 
     // --- clipping ---
 
@@ -114,10 +114,11 @@ public:
                     bool exciseFlankingInserts = false);
 
     /// \brief Return a clipped copy of this record.
-    BamRecord Clipped(ClipType type, std::int32_t start, std::int32_t end,
-                      bool exciseFlankingInserts = false) const;
-    BamRecord Clipped(ClipType type, std::int32_t start, std::int32_t end,
-                      const TagClipper& clipper, bool exciseFlankingInserts = false) const;
+    [[nodiscard]] BamRecord Clipped(ClipType type, std::int32_t start, std::int32_t end,
+                                    bool exciseFlankingInserts = false) const;
+    [[nodiscard]] BamRecord Clipped(ClipType type, std::int32_t start, std::int32_t end,
+                                    const TagClipper& clipper,
+                                    bool exciseFlankingInserts = false) const;
 
     /// \brief Mutable access to the tag map.
     TagMap& MutableTags();
@@ -143,7 +144,7 @@ public:
     std::string ReadGroupId() const;
 
     /// \brief Local context flags from the 'cx' tag. Returns nullopt if absent.
-    std::optional<Data::LocalContextFlags> LocalContextFlags() const;
+    [[nodiscard]] std::optional<Data::LocalContextFlags> LocalContextFlags() const;
 
     /// \brief Set local context flags in the 'cx' tag.
     void LocalContextFlags(Data::LocalContextFlags flags);
@@ -155,16 +156,16 @@ public:
     Data::Accuracy ReadAccuracy() const;
 
     /// \brief Pulse widths from the 'pw' tag. Returns nullopt if absent.
-    std::optional<Data::Frames> PulseWidth() const;
+    [[nodiscard]] std::optional<Data::Frames> PulseWidth() const;
 
     /// \brief Inter-pulse durations from the 'ip' tag. Returns nullopt if absent.
-    std::optional<Data::Frames> IPD() const;
+    [[nodiscard]] std::optional<Data::Frames> IPD() const;
 
     /// \brief Wall-clock start time from the 'ws' tag. Returns nullopt if absent.
-    std::optional<std::int32_t> WallStart() const;
+    [[nodiscard]] std::optional<std::int32_t> WallStart() const;
 
     /// \brief Wall-clock end time from the 'we' tag. Returns nullopt if absent.
-    std::optional<std::int32_t> WallEnd() const;
+    [[nodiscard]] std::optional<std::int32_t> WallEnd() const;
 
 private:
     std::string name_;

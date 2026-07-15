@@ -151,9 +151,12 @@ inline std::int32_t RawRecord::RefId() const { return ReadI32LE(std::data(data_)
 
 inline std::int32_t RawRecord::Pos() const { return ReadI32LE(std::data(data_) + 4); }
 
-inline std::uint8_t RawRecord::NameLength() const { return static_cast<std::uint8_t>(data_[8]); }
+inline std::uint8_t RawRecord::NameLength() const
+{
+    return std::to_integer<std::uint8_t>(data_[8]);
+}
 
-inline std::uint8_t RawRecord::MapQ() const { return static_cast<std::uint8_t>(data_[9]); }
+inline std::uint8_t RawRecord::MapQ() const { return std::to_integer<std::uint8_t>(data_[9]); }
 
 inline std::uint16_t RawRecord::Bin() const { return ReadU16LE(std::data(data_) + 10); }
 

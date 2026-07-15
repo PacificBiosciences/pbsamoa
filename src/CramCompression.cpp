@@ -113,34 +113,16 @@ std::vector<std::byte> CheckedCompress(std::span<const std::byte> data, std::str
     return CopyAndFree(out, static_cast<std::size_t>(outSize), context);
 }
 
-unsigned char* Rans4x8DecompressBytes(unsigned char* input, unsigned int inputSize,
-                                      unsigned int* outSize)
-{
-    return rans_uncompress(input, inputSize, outSize);
-}
-
 unsigned char* Rans4x8CompressBytes(unsigned char* input, unsigned int inputSize,
                                     unsigned int* outSize)
 {
     return rans_compress(input, inputSize, outSize, 1);
 }
 
-unsigned char* Rans4x16DecompressBytes(unsigned char* input, unsigned int inputSize,
-                                       unsigned int* outSize)
-{
-    return rans_uncompress_4x16(input, inputSize, outSize);
-}
-
 unsigned char* Rans4x16CompressBytes(unsigned char* input, unsigned int inputSize,
                                      unsigned int* outSize)
 {
     return rans_compress_4x16(input, inputSize, outSize, 1);
-}
-
-unsigned char* AdaptiveArithDecompressBytes(unsigned char* input, unsigned int inputSize,
-                                            unsigned int* outSize)
-{
-    return arith_uncompress(input, inputSize, outSize);
 }
 
 unsigned char* AdaptiveArithCompressBytes(unsigned char* input, unsigned int inputSize,
@@ -151,8 +133,7 @@ unsigned char* AdaptiveArithCompressBytes(unsigned char* input, unsigned int inp
 
 std::vector<std::byte> CramRans4x8Decompress(std::span<const std::byte> data, std::size_t rawSize)
 {
-    return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x8Decompress",
-                                           Rans4x8DecompressBytes);
+    return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x8Decompress", rans_uncompress);
 }
 
 std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data)
@@ -163,7 +144,7 @@ std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data)
 std::vector<std::byte> CramRans4x16Decompress(std::span<const std::byte> data, std::size_t rawSize)
 {
     return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x16Decompress",
-                                           Rans4x16DecompressBytes);
+                                           rans_uncompress_4x16);
 }
 
 std::vector<std::byte> CramRans4x16Compress(std::span<const std::byte> data)
@@ -175,7 +156,7 @@ std::vector<std::byte> CramAdaptiveArithDecompress(std::span<const std::byte> da
                                                    std::size_t rawSize)
 {
     return CheckedDecompress<unsigned int>(data, rawSize, "CramAdaptiveArithDecompress",
-                                           AdaptiveArithDecompressBytes);
+                                           arith_uncompress);
 }
 
 std::vector<std::byte> CramAdaptiveArithCompress(std::span<const std::byte> data)
@@ -279,10 +260,8 @@ std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
     const std::uint32_t inputSize{CheckedSizeCast<std::uint32_t>(
         std::size(data), "CramFqzcompCompress", "input size too large")};
 
-    std::uint64_t totalLength = 0;
-    for (const std::uint32_t length : recordLengths) {
-        totalLength += length;
-    }
+    const std::uint64_t totalLength =
+        std::ranges::fold_left(recordLengths, std::uint64_t{0}, std::plus{});
     if (totalLength != std::size(data)) {
         throw std::runtime_error("CramFqzcompCompress: record lengths do not match input size");
     }
@@ -392,14 +371,11 @@ std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data,
 #ifdef PBSAMOA_HAVE_BZIP2
 std::vector<std::byte> CramBzip2Decompress(std::span<const std::byte> data, std::size_t rawSize)
 {
-    if (rawSize > std::numeric_limits<unsigned int>::max() ||
-        std::size(data) > std::numeric_limits<unsigned int>::max()) {
-        throw std::runtime_error("CramBzip2Decompress: input/output size too large");
-    }
-
     std::vector<std::byte> output(rawSize);
-    unsigned int destLen = static_cast<unsigned int>(rawSize);
-    const unsigned int srcLen = static_cast<unsigned int>(std::size(data));
+    unsigned int destLen = CheckedSizeCast<unsigned int>(rawSize, "CramBzip2Decompress",
+                                                         "input/output size too large");
+    const unsigned int srcLen = CheckedSizeCast<unsigned int>(
+        std::size(data), "CramBzip2Decompress", "input/output size too large");
 
     const auto rc = BZ2_bzBuffToBuffDecompress(
         reinterpret_cast<char*>(output.data()), &destLen,
@@ -415,10 +391,8 @@ std::vector<std::byte> CramBzip2Compress(std::span<const std::byte> data)
     if (std::empty(data)) {
         return {};
     }
-    if (std::size(data) > std::numeric_limits<unsigned int>::max()) {
-        throw std::runtime_error("CramBzip2Compress: input size too large");
-    }
-    const auto srcLen = static_cast<unsigned int>(std::size(data));
+    const auto srcLen =
+        CheckedSizeCast<unsigned int>(std::size(data), "CramBzip2Compress", "input size too large");
     // bzip2 manual: destination buffer should be source + 1% + 600.
     unsigned int destLen = srcLen + (srcLen / 100) + 601;
     std::vector<std::byte> output(destLen);

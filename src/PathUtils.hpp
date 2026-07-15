@@ -11,7 +11,7 @@ namespace Samoa {
 inline std::filesystem::path SidecarPath(const std::filesystem::path& path, std::string_view suffix)
 {
     std::filesystem::path sidecarPath{path};
-    sidecarPath += std::string{suffix};
+    sidecarPath += suffix;
     return sidecarPath;
 }
 

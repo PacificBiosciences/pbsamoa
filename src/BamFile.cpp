@@ -39,8 +39,7 @@ const std::filesystem::path& BamFile::Filename() const { return fileName_; }
 
 void BamFile::CreateStandardIndex() const
 {
-    const BaiIndex index{BaiIndex::Build(fileName_)};
-    index.ToFile(StandardIndexFilename());
+    BaiIndex::Build(fileName_).ToFile(StandardIndexFilename());
 }
 
 void BamFile::EnsureStandardIndexExists() const

@@ -26,8 +26,7 @@ std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> raw
 
     const std::uint32_t blockSize{static_cast<std::uint32_t>(std::size(rawData))};
 
-    std::vector<std::byte> combined{};
-    combined.resize(BAM_BLOCK_SIZE_PREFIX_BYTES + std::size(rawData));
+    std::vector<std::byte> combined(BAM_BLOCK_SIZE_PREFIX_BYTES + std::size(rawData));
     combined[0] = static_cast<std::byte>(blockSize & 0xFFU);
     combined[1] = static_cast<std::byte>((blockSize >> 8U) & 0xFFU);
     combined[2] = static_cast<std::byte>((blockSize >> 16U) & 0xFFU);
@@ -53,16 +52,13 @@ void WriteRawRecord(BgzfWriter& bgzf, std::atomic<std::uint64_t>& recordsWritten
                     std::vector<std::byte>&& rawData)
 {
     std::vector<std::byte> combined{BuildCombinedRecordPayload(rawData)};
-    PendingCallback callback{};
-    callback.rawData = std::move(rawData);
-    callback.active = true;
-    EmitRawRecord(bgzf, recordsWritten, std::move(combined), std::move(callback));
+    EmitRawRecord(bgzf, recordsWritten, std::move(combined),
+                  PendingCallback{.rawData = std::move(rawData), .active = true});
 }
 
 void WriteHeaderBlock(BgzfWriter& bgzf, const SamHeader& header)
 {
-    const std::vector<std::byte> headerBlock{header.ToBamHeaderBlock()};
-    bgzf.Write(headerBlock);
+    bgzf.Write(header.ToBamHeaderBlock());
 }
 
 }  // namespace
@@ -82,7 +78,7 @@ struct BamWriter::Impl
     }
 
     Impl(const std::filesystem::path& path, const SamHeader& header, const BamWriterConfig& cfg)
-        : bgzf{path, MergeBgzfConfig(cfg)}, callbacksEnabled{false}
+        : bgzf{path, MergeBgzfConfig(cfg)}
     {
         WriteHeaderBlock(bgzf, header);
     }
@@ -126,8 +122,7 @@ void BamWriter::Write(const BamRecord& record)
         return;
     }
 
-    WriteRawRecord(impl_->bgzf, impl_->recordsWritten, std::span<const std::byte>{serialized},
-                   PendingCallback{});
+    WriteRawRecord(impl_->bgzf, impl_->recordsWritten, serialized, PendingCallback{});
 }
 
 void BamWriter::Write(std::span<const std::byte> rawData)

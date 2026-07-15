@@ -30,12 +30,8 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
 
     // RNAME
     {
-        const std::string_view sentinel{RnameSentinel(refId)};
-        if (!sentinel.empty()) {
-            buf.append(sentinel);
-        } else {
-            buf.append(header.ReferenceName(refId));
-        }
+        const std::string_view rname{RnameSentinel(refId)};
+        buf.append(rname.empty() ? header.ReferenceName(refId) : rname);
     }
     buf += '\t';
 
@@ -44,7 +40,7 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
     buf += '\t';
 
     // MAPQ
-    std::format_to(std::back_inserter(buf), "{}", static_cast<unsigned>(mapq));
+    std::format_to(std::back_inserter(buf), "{}", static_cast<std::uint32_t>(mapq));
     buf += '\t';
 
     // CIGAR
@@ -57,12 +53,8 @@ void FormatFields(std::string& buf, const SamHeader& header, std::string_view na
 
     // RNEXT
     {
-        const std::string_view sentinel{RnextSentinel(refId, nextRefId)};
-        if (!sentinel.empty()) {
-            buf.append(sentinel);
-        } else {
-            buf.append(header.ReferenceName(nextRefId));
-        }
+        const std::string_view rnext{RnextSentinel(refId, nextRefId)};
+        buf.append(rnext.empty() ? header.ReferenceName(nextRefId) : rnext);
     }
     buf += '\t';
 

@@ -79,9 +79,7 @@ void MergeComments(SamHeader& merged, const SamHeader& incoming)
     for (const std::string_view comment : incoming.Comments()) {
         // AddComment may reallocate the underlying comment storage, so re-fetch
         // the span on each iteration instead of caching it across insertions.
-        const auto mergedComments{merged.Comments()};
-        const auto it{std::ranges::find(mergedComments, comment)};
-        if (it == std::ranges::end(mergedComments)) {
+        if (!std::ranges::contains(merged.Comments(), comment)) {
             merged.AddComment(std::string{comment});
         }
     }
@@ -111,12 +109,11 @@ SamHeader MergeHeaders(std::span<const BamFile> files)
     }
 
     SamHeader merged{files.front().Header()};
-    const std::size_t numFiles{std::size(files)};
-    for (std::size_t fileIndex{1}; fileIndex < numFiles; ++fileIndex) {
-        MergeHeader(merged, files[fileIndex].Header());
+    for (const BamFile& file : files.subspan(1)) {
+        MergeHeader(merged, file.Header());
     }
 
-    if (numFiles > 1) {
+    if (std::size(files) > 1) {
         // A concatenated multi-file stream should not claim a stronger global
         // ordering guarantee than the collection layer can prove.
         merged.SetSortOrder("unknown");

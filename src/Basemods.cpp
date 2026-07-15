@@ -76,8 +76,8 @@ std::vector<BasemodRecord> ParseBasemodString(std::string_view mm)
             // Letter mod code: consume the whole run, e.g. "C+mh" carries two modifications
             // sharing one delta list (spec SAMtags: 'C+mh,5;' == 'C+m,5;C+h,5;').
             while ((prefixLen < std::size(segment)) &&
-                   ((((segment[prefixLen] >= 'a') && (segment[prefixLen] <= 'z'))) ||
-                    (((segment[prefixLen] >= 'A') && (segment[prefixLen] <= 'Z'))))) {
+                   (((segment[prefixLen] >= 'a') && (segment[prefixLen] <= 'z')) ||
+                    ((segment[prefixLen] >= 'A') && (segment[prefixLen] <= 'Z')))) {
                 ++prefixLen;
             }
         }

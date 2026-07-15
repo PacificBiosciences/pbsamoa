@@ -81,8 +81,8 @@ TEST(SamReader, TagsParsed)
     SamReader reader{tests::DataDir / "spec_example.sam"};
 
     // Skip r001, r002 to reach r003 (3rd record)
-    reader.ReadRecord();
-    reader.ReadRecord();
+    (void)reader.ReadRecord();
+    (void)reader.ReadRecord();
     const auto record{reader.ReadRecord()};
     ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "r003");
@@ -100,7 +100,7 @@ TEST(SamReader, UnmappedNextRef)
     SamReader reader{tests::DataDir / "spec_example.sam"};
 
     // r002 is the 2nd record, RNEXT=* → nextRefId=-1
-    reader.ReadRecord();
+    (void)reader.ReadRecord();
     const auto record{reader.ReadRecord()};
     ASSERT_TRUE(record);
     EXPECT_EQ(record->Name(), "r002");
@@ -333,7 +333,7 @@ TEST_F(SamReaderTempFile, ThrowsOnMapqOutOfRange)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tref\t10\t300\t3M\t*\t0\t0\tACG\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnTrailingJunkInNumericField)
@@ -343,7 +343,7 @@ TEST_F(SamReaderTempFile, ThrowsOnTrailingJunkInNumericField)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t99x\tref\t10\t30\t3M\t*\t0\t0\tACG\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnInvalidOptionalTag)
@@ -353,7 +353,7 @@ TEST_F(SamReaderTempFile, ThrowsOnInvalidOptionalTag)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t!!!\tNM:i:5x\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnSeqQualLengthMismatch)
@@ -363,7 +363,7 @@ TEST_F(SamReaderTempFile, ThrowsOnSeqQualLengthMismatch)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tref\t10\t30\t4M\t*\t0\t0\tACGT\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnQualityWithoutSequence)
@@ -373,7 +373,7 @@ TEST_F(SamReaderTempFile, ThrowsOnQualityWithoutSequence)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t4\t*\t0\t0\t*\t*\t0\t0\t*\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnInvalidQualityCharacter)
@@ -383,7 +383,7 @@ TEST_F(SamReaderTempFile, ThrowsOnInvalidQualityCharacter)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tref\t10\t30\t3M\t*\t0\t0\tACG\t! !\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnUnknownRnameWithHeaderDictionary)
@@ -393,7 +393,7 @@ TEST_F(SamReaderTempFile, ThrowsOnUnknownRnameWithHeaderDictionary)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tchrX\t10\t30\t3M\t*\t0\t0\tACG\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, ThrowsOnUnknownRnextWithHeaderDictionary)
@@ -403,7 +403,7 @@ TEST_F(SamReaderTempFile, ThrowsOnUnknownRnextWithHeaderDictionary)
                                    "@SQ\tSN:ref\tLN:100\n"
                                    "read1\t0\tref\t10\t30\t3M\tchrY\t0\t0\tACG\t!!!\n");
     SamReader reader{path};
-    EXPECT_THROW(reader.ReadRecord(), std::runtime_error);
+    EXPECT_THROW((void)reader.ReadRecord(), std::runtime_error);
 }
 
 TEST_F(SamReaderTempFile, RangeInterfaceEmptyFile)

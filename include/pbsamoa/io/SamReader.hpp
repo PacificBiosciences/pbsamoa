@@ -25,7 +25,7 @@ public:
 
     const SamHeader& Header() const;
 
-    std::optional<BamRecord> ReadRecord();
+    [[nodiscard]] std::optional<BamRecord> ReadRecord();
 
     class RecordRange : public std::ranges::view_interface<RecordRange>
     {

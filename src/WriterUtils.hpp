@@ -35,10 +35,9 @@ inline std::filesystem::path TemporaryWritePath(const std::filesystem::path& fin
     static std::atomic<std::uint64_t> counter{0};
     thread_local std::mt19937_64 rng{std::random_device{}()};
 
-    const std::uint64_t nowNs{
-        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::system_clock::now().time_since_epoch())
-                                       .count())};
+    const std::int64_t nowNs{std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count()};
     const std::uint64_t nonce{rng() ^ counter.fetch_add(1, std::memory_order_relaxed)};
 
     std::filesystem::path candidate{finalPath};

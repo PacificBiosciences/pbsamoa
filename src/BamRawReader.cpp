@@ -25,14 +25,13 @@ namespace Samoa {
 namespace {
 
 void AppendRecordToBatch(const RawRecord& record, std::vector<std::byte>& batchBuffer,
-                         std::vector<RawRecordBatch::RecordExtent>& extents, std::size_t& batchSize)
+                         std::vector<RawRecordBatch::RecordExtent>& extents)
 {
     const auto raw{record.RawData()};
     const auto offset{static_cast<std::uint32_t>(std::size(batchBuffer))};
     batchBuffer.insert(std::ranges::end(batchBuffer), std::ranges::begin(raw),
                        std::ranges::end(raw));
     extents.emplace_back(offset, static_cast<std::uint32_t>(std::size(raw)));
-    batchSize += std::size(raw);
 }
 
 template <typename Reader>
@@ -44,14 +43,13 @@ std::optional<RawRecordBatch> ReadBatchFromReader(Reader& reader, ByteLimit limi
     std::vector<std::byte> batchBuffer;
     batchBuffer.reserve(byteLimit);
     std::vector<RawRecordBatch::RecordExtent> extents;
-    std::size_t batchBytes{0};
 
     if (recordCount) {
         *recordCount = 0;
     }
 
     while (std::size(extents) < remaining) {
-        if ((!std::empty(extents)) && (batchBytes >= byteLimit)) {
+        if ((!std::empty(extents)) && (std::size(batchBuffer) >= byteLimit)) {
             break;
         }
 
@@ -59,7 +57,7 @@ std::optional<RawRecordBatch> ReadBatchFromReader(Reader& reader, ByteLimit limi
         if (!record) {
             break;
         }
-        AppendRecordToBatch(*record, batchBuffer, extents, batchBytes);
+        AppendRecordToBatch(*record, batchBuffer, extents);
     }
 
     if (std::empty(extents)) {
@@ -432,9 +430,20 @@ struct BamRawReader::Impl
         }
 
         scatterActive = true;
-        scatterIdx = 0;
         scatterRemaining = scatterPlan.front().Count;
         bgzf->Seek(scatterPlan.front().Begin);
+    }
+
+    // Advances to the next scatter tile. Returns false when no more tiles remain.
+    bool AdvanceToNextTile()
+    {
+        if ((scatterIdx + 1) >= std::size(scatterPlan)) {
+            return false;
+        }
+        ++scatterIdx;
+        bgzf->Seek(scatterPlan[scatterIdx].Begin);
+        scatterRemaining = scatterPlan[scatterIdx].Count;
+        return true;
     }
 
     // Reads the next record in the scatter plan, hopping (Seek) to the next tile
@@ -444,12 +453,9 @@ struct BamRawReader::Impl
     {
         while (true) {
             if (scatterRemaining == 0) {
-                if ((scatterIdx + 1) >= std::size(scatterPlan)) {
+                if (!AdvanceToNextTile()) {
                     return std::nullopt;
                 }
-                ++scatterIdx;
-                bgzf->Seek(scatterPlan[scatterIdx].Begin);
-                scatterRemaining = scatterPlan[scatterIdx].Count;
                 continue;
             }
             std::optional<RawRecord> record{bgzf->ReadRecord()};
@@ -468,12 +474,9 @@ struct BamRawReader::Impl
     std::optional<RawRecordBatch> ReadBatchScattered(ByteLimit limit)
     {
         while (scatterRemaining == 0) {
-            if ((scatterIdx + 1) >= std::size(scatterPlan)) {
+            if (!AdvanceToNextTile()) {
                 return std::nullopt;
             }
-            ++scatterIdx;
-            bgzf->Seek(scatterPlan[scatterIdx].Begin);
-            scatterRemaining = scatterPlan[scatterIdx].Count;
         }
         std::size_t recordCount{0};
         std::optional<RawRecordBatch> batch{

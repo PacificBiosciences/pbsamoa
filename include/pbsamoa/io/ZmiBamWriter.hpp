@@ -9,8 +9,6 @@
 #include <filesystem>
 #include <memory>
 
-#include <cstddef>
-
 namespace PacBio {
 namespace Samoa {
 

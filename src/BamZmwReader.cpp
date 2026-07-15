@@ -42,8 +42,6 @@ struct BamZmwReader::Impl
     bool done_{false};
     ZmwReaderMetrics metrics_{};
 
-    static void RunProducerLoop(std::stop_token stopToken, Impl* self);
-
     explicit Impl(BamRecordReader reader, BamZmwReaderConfig config)
         : reader_{std::move(reader)}
         , header_{reader_.Header()}
@@ -53,7 +51,7 @@ struct BamZmwReader::Impl
             throw std::invalid_argument{"BamZmwReader prefetch capacity must be at least 1"};
         }
         metrics_.ConfiguredCapacity = capacity_;
-        producer_ = std::jthread{&Impl::RunProducerLoop, this};
+        producer_ = std::jthread{[this](std::stop_token st) { ProducerLoop(st); }};
     }
 
     ~Impl()
@@ -173,11 +171,6 @@ struct BamZmwReader::Impl
         FinishProduction();
     }
 };
-
-void BamZmwReader::Impl::RunProducerLoop(std::stop_token stopToken, Impl* self)
-{
-    self->ProducerLoop(stopToken);
-}
 
 BamZmwReader::BamZmwReader(BamRecordReader reader, BamZmwReaderConfig config)
     : impl_{std::make_unique<Impl>(std::move(reader), std::move(config))}

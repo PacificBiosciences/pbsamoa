@@ -16,7 +16,6 @@ namespace Samoa {
 struct ZmiWriter::Impl
 {
     BgzfWriter bgzf;
-    bool closed{false};
 
     explicit Impl(const std::filesystem::path& path, const ZmiWriterConfig& config)
         : bgzf{path, BgzfWriterConfig{
@@ -29,8 +28,7 @@ struct ZmiWriter::Impl
     {
         std::array<std::byte, detail::ZMI_HEADER_SIZE> header{};
 
-        std::ranges::copy_n(std::begin(detail::ZMI_MAGIC), std::size(detail::ZMI_MAGIC),
-                            std::begin(header));
+        std::ranges::copy(detail::ZMI_MAGIC, std::begin(header));
 
         WriteLE(std::data(header) + 4, detail::ZMI_VERSION);
 
@@ -50,7 +48,7 @@ ZmiWriter::ZmiWriter(const std::filesystem::path& path, const ZmiWriterConfig& c
 
 ZmiWriter::~ZmiWriter()
 {
-    if (!impl_ || impl_->closed) {
+    if (!impl_) {
         return;
     }
     Close();
@@ -69,15 +67,7 @@ void ZmiWriter::AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virt
     impl_->bgzf.Write(entry);
 }
 
-void ZmiWriter::Close()
-{
-    if (impl_->closed) {
-        return;
-    }
-
-    impl_->bgzf.Close();
-    impl_->closed = true;
-}
+void ZmiWriter::Close() { impl_->bgzf.Close(); }
 
 }  // namespace Samoa
 }  // namespace PacBio

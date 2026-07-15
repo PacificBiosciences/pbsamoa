@@ -237,7 +237,7 @@ TEST(BamRecord, SerializeToBamNameOverflowThrows)
     BamRecord rec;
     // Construct with short name, then verify serialize works
     rec.Name("ok").Flag(0).Sequence("A");
-    EXPECT_NO_THROW(rec.SerializeToBam());
+    EXPECT_NO_THROW(static_cast<void>(rec.SerializeToBam()));
 }
 
 TEST(BamRecord, EmptyNameSerializesAsStar)
