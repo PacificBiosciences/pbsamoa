@@ -599,7 +599,11 @@ template <typename T>
 std::vector<T> DecodePodArray(const TagArray& array)
 {
     std::vector<T> result(array.Count());
-    std::memcpy(result.data(), array.Data().data(), std::size(result) * sizeof(T));
+    // An empty tag array yields a null result.data(); memcpy is declared nonnull,
+    // so passing it (even with size 0) is UB that UBSan aborts on.
+    if (!result.empty()) {
+        std::memcpy(result.data(), array.Data().data(), std::size(result) * sizeof(T));
+    }
     return result;
 }
 
