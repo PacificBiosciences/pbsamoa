@@ -55,8 +55,9 @@ BamRecord Mapped(std::string name, std::int32_t refId, std::int32_t pos, bool re
     return record;
 }
 
-BamRecord Unmapped(std::string name)
+BamRecord Unmapped(std::string name, std::string sequence = "ACGT")
 {
+    const std::size_t sequenceLength{std::size(sequence)};
     BamRecord record;
     record.Name(std::move(name))
         .Flag(0x4)
@@ -66,8 +67,8 @@ BamRecord Unmapped(std::string name)
         .NextRefId(-1)
         .NextPos(-1)
         .Tlen(0)
-        .Sequence("ACGT")
-        .Qualities({30, 30, 30, 30});
+        .Sequence(std::move(sequence))
+        .Qualities(std::vector<std::uint8_t>(sequenceLength, std::uint8_t{30}));
     return record;
 }
 
@@ -239,6 +240,37 @@ TEST_F(BamSortTest, MultiRunMergeEqualsInMemoryAndIsMonotonic)
         EXPECT_GE(key, previous);
         previous = key;
     }
+}
+
+TEST_F(BamSortTest, MinimiserClustersUnmappedReadsLikeSamtoolsForwardStrand)
+{
+    const std::filesystem::path destinationDir{tempDir_.File("destination")};
+    std::filesystem::create_directories(destinationDir);
+    const std::filesystem::path memoryOutput{destinationDir / "memory.bam"};
+    const std::filesystem::path spilledOutput{destinationDir / "spilled.bam"};
+    tests::WriteBam(
+        In(), MakeHeader(1),
+        {Mapped("mapped", 0, 10, false), Unmapped("polyA", "AAAAAAAAAAAAAAAAAAAA"),
+         Unmapped("likeA", "AAAAAAAAAAAAAAAAAAAC"), Unmapped("polyC", "CCCCCCCCCCCCCCCCCCCC"),
+         Unmapped("mixed", "ACGTACGTACGTACGTACGT"), Unmapped("short", "ACGT")});
+
+    const SortStats memoryStats{SortBam(
+        In(), memoryOutput,
+        SortConfig{.Order = SortOrder::COORDINATE, .TempDir = destinationDir, .Minimise = true})};
+    const SortStats spilledStats{SortBam(In(), spilledOutput,
+                                         SortConfig{.Order = SortOrder::COORDINATE,
+                                                    .MaxMemory = ByteLimit{1},
+                                                    .TempDir = destinationDir,
+                                                    .Minimise = true})};
+
+    EXPECT_EQ(memoryStats.NumRuns, 0U);
+    EXPECT_GT(spilledStats.NumRuns, 0U);
+    const std::vector<std::string> expected{"mapped", "short", "polyC", "mixed", "polyA", "likeA"};
+    EXPECT_EQ(tests::ReadNames(memoryOutput), expected);
+    EXPECT_EQ(tests::ReadNames(spilledOutput), expected);
+    const BamRawReader reader{spilledOutput};
+    EXPECT_EQ(reader.Header().SortOrder(), "coordinate");
+    EXPECT_EQ(reader.Header().SubSort(), "coordinate:minhash");
 }
 
 // --- Tag order: missing-tag-first; numeric and string tag values ---

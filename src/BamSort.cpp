@@ -22,6 +22,7 @@
 #include <format>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -30,6 +31,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -143,6 +145,7 @@ struct SortContext
     SortOrder Order{SortOrder::COORDINATE};
     TagKey Tag{};
     std::int32_t NumReferences{0};
+    bool Minimise{false};
 };
 
 /// A record paired with its precomputed comparison keys. Computed once per
@@ -152,8 +155,54 @@ struct Item
 {
     RawRecord Record;
     std::uint64_t CoordKey{0};
+    std::uint64_t MinHash{0};
+    std::int32_t MinHashPosition{0};
     std::optional<TagValue> TagSortValue{};
 };
+
+std::pair<std::uint64_t, std::int32_t> MinimiserKey(const RawRecord& record)
+{
+    constexpr std::uint32_t KMER{20};
+    constexpr std::int32_t KMER_OFFSET{19};
+    constexpr std::uint64_t MASK{(std::uint64_t{1} << (2 * KMER)) - 1};
+    constexpr std::uint64_t XOR{0xdead7878beef7878ULL};
+
+    const SequenceView sequence{record.Seq()};
+    const auto base = [](const char nucleotide) {
+        switch (nucleotide) {
+            case 'C':
+                return std::uint64_t{1};
+            case 'G':
+                return std::uint64_t{2};
+            case 'T':
+                return std::uint64_t{3};
+            default:
+                return std::uint64_t{0};
+        }
+    };
+
+    std::uint64_t hash{0};
+    std::uint64_t minimum{std::numeric_limits<std::uint64_t>::max()};
+    std::int32_t minimumPosition{0};
+    std::uint32_t i{0};
+    for (; (i < (KMER - 1)) && (i < sequence.Size()); ++i) {
+        hash = (hash << 2U) | base(sequence[i]);
+    }
+    for (; i < sequence.Size(); ++i) {
+        hash = (hash << 2U) | base(sequence[i]);
+        const std::uint64_t candidate{(hash ^ XOR) & MASK};
+        if (candidate < minimum) {
+            minimum = candidate;
+            // i indexes into the sequence, whose length is BAM l_qseq (std::int32_t),
+            // so it never exceeds INT32_MAX.
+            minimumPosition = static_cast<std::int32_t>(i);
+        }
+    }
+
+    minimum += std::uint64_t{1} << 30U;
+    minimumPosition -= KMER_OFFSET;
+    return {minimum, minimumPosition <= 65535 ? 65535 - minimumPosition : 0};
+}
 
 /// samtools coordinate key: (refAdj << 32) | ((pos+1) << 1) | rev, with the
 /// unmapped reference id mapped to NumReferences so unmapped records sort last
@@ -172,6 +221,11 @@ std::uint64_t CoordinateSortKey(const RawRecord& record, std::int32_t numReferen
 Item MakeItem(RawRecord record, const SortContext& ctx)
 {
     const std::uint64_t coordKey{CoordinateSortKey(record, ctx.NumReferences)};
+    std::uint64_t minHash{0};
+    std::int32_t minHashPosition{0};
+    if (ctx.Minimise && (record.RefId() < 0)) {
+        std::tie(minHash, minHashPosition) = MinimiserKey(record);
+    }
     std::optional<TagValue> tagValue{};
     if (ctx.Order == SortOrder::TAG) {
         const TagMap tags{record.ParseTags()};
@@ -182,6 +236,8 @@ Item MakeItem(RawRecord record, const SortContext& ctx)
     return Item{
         .Record = std::move(record),
         .CoordKey = coordKey,
+        .MinHash = minHash,
+        .MinHashPosition = minHashPosition,
         .TagSortValue = std::move(tagValue),
     };
 }
@@ -240,9 +296,17 @@ int CompareTagValues(const TagValue& a, const TagValue& b)
 
 /// Three-way record comparison under the active order. Reads precomputed keys;
 /// reads Name()/Flag() live (alloc-free) for query-name order.
-int RecordCompare(SortOrder order, const Item& a, const Item& b)
+int RecordCompare(const SortContext& ctx, const Item& a, const Item& b)
 {
-    switch (order) {
+    if (ctx.Minimise && (a.Record.RefId() < 0) && (b.Record.RefId() < 0)) {
+        if (a.MinHash != b.MinHash) {
+            return a.MinHash < b.MinHash ? -1 : 1;
+        }
+        if (a.MinHashPosition != b.MinHashPosition) {
+            return a.MinHashPosition > b.MinHashPosition ? -1 : 1;
+        }
+    }
+    switch (ctx.Order) {
         case SortOrder::COORDINATE:
             return (a.CoordKey < b.CoordKey) ? -1 : (a.CoordKey > b.CoordKey) ? 1 : 0;
         case SortOrder::QUERY_NAME: {
@@ -400,7 +464,7 @@ std::int64_t MergeSourcesIntoWriter(std::vector<MergeSource>& sources, BamWriter
     };
 
     const auto heapLess = [&ctx](const HeapEntry& a, const HeapEntry& b) {
-        const int c{RecordCompare(ctx.Order, a.Value, b.Value)};
+        const int c{RecordCompare(ctx, a.Value, b.Value)};
         if (c != 0) {
             return c > 0;
         }
@@ -802,15 +866,26 @@ struct MergeView
 {
     std::span<const std::byte> Bytes;
     std::uint64_t CoordKey{0};
+    std::uint64_t MinHash{0};
+    std::int32_t MinHashPosition{0};
     std::optional<TagValue> TagSortValue{};
 };
 
 MergeView MakeMergeView(std::span<const std::byte> bytes, const SortContext& ctx)
 {
+    std::optional<RawRecord> record{};
+    if (ctx.Minimise || (ctx.Order == SortOrder::TAG)) {
+        record.emplace(bytes);
+    }
+    std::uint64_t minHash{0};
+    std::int32_t minHashPosition{0};
+    if (ctx.Minimise && (record->RefId() < 0)) {
+        std::tie(minHash, minHashPosition) = MinimiserKey(*record);
+    }
     std::optional<TagValue> tagValue{};
     if (ctx.Order == SortOrder::TAG) {
         // Tag order is rare; materialize a RawRecord only to parse the tag map.
-        const TagMap tags{RawRecord{bytes}.ParseTags()};
+        const TagMap tags{record->ParseTags()};
         if (const TagValue* value{tags.Get(ctx.Tag)}; value != nullptr) {
             tagValue = *value;
         }
@@ -818,15 +893,26 @@ MergeView MakeMergeView(std::span<const std::byte> bytes, const SortContext& ctx
     return MergeView{
         .Bytes = bytes,
         .CoordKey = CoordinateSortKeyFromBytes(bytes, ctx.NumReferences),
+        .MinHash = minHash,
+        .MinHashPosition = minHashPosition,
         .TagSortValue = std::move(tagValue),
     };
 }
 
 /// Three-way comparison of two MergeViews under the active order; mirrors
 /// RecordCompare but reads name/flag live from the record bytes.
-int MergeViewCompare(SortOrder order, const MergeView& a, const MergeView& b)
+int MergeViewCompare(const SortContext& ctx, const MergeView& a, const MergeView& b)
 {
-    switch (order) {
+    if (ctx.Minimise && (ReadI32LE(std::data(a.Bytes)) < 0) &&
+        (ReadI32LE(std::data(b.Bytes)) < 0)) {
+        if (a.MinHash != b.MinHash) {
+            return a.MinHash < b.MinHash ? -1 : 1;
+        }
+        if (a.MinHashPosition != b.MinHashPosition) {
+            return a.MinHashPosition > b.MinHashPosition ? -1 : 1;
+        }
+    }
+    switch (ctx.Order) {
         case SortOrder::COORDINATE:
             return (a.CoordKey < b.CoordKey) ? -1 : (a.CoordKey > b.CoordKey) ? 1 : 0;
         case SortOrder::QUERY_NAME: {
@@ -870,7 +956,7 @@ std::int64_t MergeReadAheadIntoWriter(MergeReadAhead& readAhead, BamWriter& writ
     };
 
     const auto heapLess = [&ctx](const HeapEntry& a, const HeapEntry& b) {
-        const int c{MergeViewCompare(ctx.Order, a.View, b.View)};
+        const int c{MergeViewCompare(ctx, a.View, b.View)};
         if (c != 0) {
             return c > 0;
         }
@@ -1045,6 +1131,9 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         throw std::runtime_error{
             std::format("SortBam: input file does not exist: {}", input.string())};
     }
+    if (config.Minimise && (config.Order != SortOrder::COORDINATE)) {
+        throw std::runtime_error{"SortBam: minimiser clustering requires coordinate order"};
+    }
 
     const std::size_t numThreads{ResolveThreads(config.NumThreads)};
     const int finalLevel{std::clamp(config.CompressionLevel, 1, 12)};
@@ -1072,10 +1161,9 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         .Order = config.Order,
         .Tag = TagKey{config.Tag[0], config.Tag[1]},
         .NumReferences = 0,
+        .Minimise = config.Minimise,
     };
-    const auto less = [&ctx](const Item& a, const Item& b) {
-        return RecordCompare(ctx.Order, a, b) < 0;
-    };
+    const auto less = [&ctx](const Item& a, const Item& b) { return RecordCompare(ctx, a, b) < 0; };
 
     const BamWriterConfig runWriterConfig{
         .BgzfConfig = {.CompressionLevel = 1, .BgzfWorkers = numThreads},
@@ -1096,6 +1184,7 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         runHeader.SetSortOrder("unsorted");
 
         std::size_t runBytes{0};
+        bool hasMapped{false};
         const auto spill = [&]() {
             std::ranges::stable_sort(run, less);
             std::filesystem::path path{runBase};
@@ -1112,6 +1201,7 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         };
 
         while (std::optional<RawRecord> record{reader.ReadRecord()}) {
+            hasMapped = hasMapped || (record->RefId() >= 0);
             Item item{MakeItem(std::move(*record), ctx)};
             const std::size_t footprint{Footprint(item)};
             if (!run.empty() && ((runBytes + footprint) > maxMemory)) {
@@ -1123,7 +1213,13 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         }
 
         outHeader = inputHeader;
-        outHeader.SetSortOrder(SortOrderText(config.Order));
+        if (config.Minimise) {
+            outHeader.SetSortOrder(hasMapped ? "coordinate" : "unsorted");
+            outHeader.SetSubSort(hasMapped ? "coordinate:minhash" : "unsorted:minhash");
+        } else {
+            outHeader.SetSortOrder(SortOrderText(config.Order));
+            outHeader.SetSubSort("");  // drop any stale sub-sort; this order has none
+        }
         outHeader.SetGroupOrder("");  // drop any stale group-order
         AppendProgramRecord(outHeader, "pbsamoa.sort", config.CommandLine);
     }  // input reader closed here; its BGZF worker threads are released

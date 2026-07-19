@@ -45,6 +45,10 @@ struct SortConfig
     /// Directory for temporary run files. Default: directory of the output file.
     std::optional<std::filesystem::path> TempDir{};
 
+    /// Cluster unmapped reads by their forward-strand minimiser, equivalent to
+    /// `samtools sort -M -R`. Requires coordinate order.
+    bool Minimise{false};
+
     /// Command line recorded in the appended @PG CL field (CLI passes argv).
     /// Spec lists @PG CL but the locked SortConfig had no carrier; added here so
     /// the library can populate it without re-deriving the invocation.
