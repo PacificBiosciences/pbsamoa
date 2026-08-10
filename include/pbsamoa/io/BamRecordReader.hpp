@@ -26,7 +26,8 @@ struct BamRecordReaderConfig
     BamRawReaderConfig RawReaderConfig{};
     std::size_t DecodeWorkers{4};
     ByteLimit BatchBudget{ByteLimit{4 * 1024 * 1024}};
-    std::size_t OutputCapacity{4096};
+    /// Each slot owns a decoded BamRecord; peak memory also includes one decoded batch.
+    std::size_t OutputCapacity{1024};
     std::variant<std::monostate, DropTags, KeepTags> TagFilter{};
 };
 

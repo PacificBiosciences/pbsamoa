@@ -64,7 +64,7 @@ struct CramWriterConfig
     bool UseTempFile{false};
 };
 
-/// \brief Writes CRAM files from BamRecord and RawRecord inputs.
+/// \brief Writes CRAM files from BamRecord, RawRecordView, and RawRecord inputs.
 ///
 /// Follows the BamWriter pattern: pimpl, Write(...), Close().
 /// Encodes records into CRAM containers with configurable compression.
@@ -86,7 +86,10 @@ public:
     /// \brief Write a single record (move overload).
     void Write(BamRecord&& record);
 
-    /// \brief Write a single raw record view.
+    /// \brief Write a single non-owning raw record view.
+    void Write(const RawRecordView& record);
+
+    /// \brief Write a single owning raw record.
     void Write(const RawRecord& record);
 
     /// \brief Write a batch of raw records.

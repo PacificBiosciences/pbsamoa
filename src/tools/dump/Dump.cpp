@@ -1,6 +1,7 @@
 #include "Dump.hpp"
 #include "../../BinaryUtils.hpp"
 #include "../../CramInternal.hpp"
+#include "../../ParallelUtils.hpp"
 #include "../../SamFieldUtils.hpp"
 #include "../../WriterUtils.hpp"
 #include "../MetricUtils.hpp"
@@ -196,13 +197,15 @@ void AppendQualities(std::string& out, std::span<const std::uint8_t> qual)
     }
 
     const std::size_t startPos{std::size(out)};
-    out.resize(startPos + std::size(qual));
-    for (std::size_t qi{0}; qi < std::size(qual); ++qi) {
-        out[startPos + qi] = static_cast<char>(qual[qi] + 33);
-    }
+    out.resize_and_overwrite(startPos + std::size(qual), [&](char* buf, std::size_t size) {
+        for (std::size_t qi{0}; qi < std::size(qual); ++qi) {
+            buf[startPos + qi] = static_cast<char>(qual[qi] + 33);
+        }
+        return size;
+    });
 }
 
-void AppendSequenceField(std::string& out, const RawRecord& view)
+void AppendSequenceField(std::string& out, const RawRecordView& view)
 {
     if (view.SeqLength() == 0) {
         out += '*';
@@ -220,7 +223,7 @@ void AppendSequenceField(std::string& out, const BamRecord& record)
     out.append(record.Sequence());
 }
 
-void AppendTagFields(std::string& out, const RawRecord& view)
+void AppendTagFields(std::string& out, const RawRecordView& view)
 {
     SerializeRawTagsToSam(view.AuxData(), out);
 }
@@ -259,13 +262,12 @@ void AppendCommonSamFields(std::string& out, const SamHeader& header, std::strin
 }
 
 template <typename Record>
-void FormatRecordImpl(const Record& record, const SamHeader& header, std::string& buf,
+void AppendRecordImpl(const Record& record, const SamHeader& header, std::string& buf,
                       std::string_view name, std::uint16_t flag, std::int32_t refId,
                       std::int32_t pos, std::uint8_t mapQ, CigarView cigar, std::int32_t nextRefId,
                       std::int32_t nextPos, std::int32_t tlen,
                       std::span<const std::uint8_t> qualities)
 {
-    buf.clear();
     AppendCommonSamFields(buf, header, name, flag, refId, pos, mapQ, cigar, nextRefId, nextPos,
                           tlen);
     AppendSequenceField(buf, record);
@@ -290,16 +292,18 @@ void WriteStdout(const std::string& output)
     std::fwrite(std::data(output), 1, std::size(output), stdout);
 }
 
-void FormatRecord(const RawRecord& view, const SamHeader& header, std::string& buf);
-void FormatRecord(const BamRecord& record, const SamHeader& header, std::string& buf);
+void AppendRecord(const RawRecordView& view, const SamHeader& header, std::string& buf);
+void AppendRecord(const BamRecord& record, const SamHeader& header, std::string& buf);
 void PrintMetricsLine(const BgzfMetrics& m, const BgzfMetrics& prev, double elapsedSec);
 
-std::string FormatBatchRecord(std::shared_ptr<const RawRecordBatch> batch, const SamHeader& header,
-                              std::size_t recordIdx)
+std::string FormatBatchChunk(std::shared_ptr<const RawRecordBatch> batch, const SamHeader& header,
+                             std::size_t first, std::size_t last)
 {
     std::string output;
-    const RawRecord view{batch->RecordData(recordIdx)};
-    FormatRecord(view, header, output);
+    for (std::size_t i{first}; i < last; ++i) {
+        const RawRecordView view{batch->View(i)};
+        AppendRecord(view, header, output);
+    }
     return output;
 }
 
@@ -307,7 +311,8 @@ template <typename Records>
 void WriteFormattedRecords(Records&& records, const SamHeader& header, std::string& buffer)
 {
     for (const auto& record : records) {
-        FormatRecord(record, header, buffer);
+        buffer.clear();
+        AppendRecord(record, header, buffer);
         std::fwrite(std::data(buffer), 1, std::size(buffer), stdout);
     }
 }
@@ -346,17 +351,17 @@ void ConsumeFormattedOutput(std::stop_token, PacBio::Parallel::ThreadPool<std::s
     }
 }
 
-void FormatRecord(const RawRecord& view, const SamHeader& header, std::string& buf)
+void AppendRecord(const RawRecordView& view, const SamHeader& header, std::string& buf)
 {
     const std::int32_t refId{view.RefId()};
-    FormatRecordImpl(view, header, buf, view.Name(), view.Flag(), refId, view.Pos(), view.MapQ(),
+    AppendRecordImpl(view, header, buf, view.Name(), view.Flag(), refId, view.Pos(), view.MapQ(),
                      view.CigarOps(), view.NextRefId(), view.NextPos(), view.Tlen(), view.Qual());
 }
 
-void FormatRecord(const BamRecord& record, const SamHeader& header, std::string& buf)
+void AppendRecord(const BamRecord& record, const SamHeader& header, std::string& buf)
 {
     const std::int32_t refId{record.RefId()};
-    FormatRecordImpl(record, header, buf, record.Name(), record.Flag(), refId, record.Pos(),
+    AppendRecordImpl(record, header, buf, record.Name(), record.Flag(), refId, record.Pos(),
                      record.MapQ(), record.Cigar(), record.NextRefId(), record.NextPos(),
                      record.Tlen(), record.Qualities());
 }
@@ -500,8 +505,11 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
                 std::async(std::launch::async, &BamRawReader::ReadBatch, &reader, ByteLimit{})};
 
             const auto batch{std::make_shared<RawRecordBatch>(std::move(*currentBatch))};
-            for (std::size_t recordIdx{0}; recordIdx < batch->RecordCount(); ++recordIdx) {
-                formatPool.Submit(FormatBatchRecord, batch, std::cref(header), recordIdx);
+            const std::size_t recordCount{batch->RecordCount()};
+            const std::size_t chunkSize{detail::ParallelChunkSize(recordCount, numFormatThreads)};
+            for (std::size_t first{0}; first < recordCount; first += chunkSize) {
+                formatPool.Submit(FormatBatchChunk, batch, std::cref(header), first,
+                                  std::min(recordCount, first + chunkSize));
             }
 
             currentBatch = nextBatchFuture.get();

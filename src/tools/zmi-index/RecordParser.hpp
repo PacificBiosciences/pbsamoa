@@ -7,13 +7,11 @@
 
 #include "../../ZmwUtils.hpp"
 
-#include <algorithm>
 #include <deque>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include <cstddef>
@@ -31,139 +29,9 @@ struct RecordEntry
     VirtualOffset virtualOffset;
 };
 
-namespace detail {
-
-/// \brief Compute length in bytes of the value portion of a BAM aux field by
-/// type code. \p data must point at the first byte of the value (after the
-/// 2-byte tag key and 1-byte type code). Returns the consumed value length, or
-/// std::nullopt on unknown type / truncated buffer.
-inline std::optional<std::size_t> AuxValueLength(std::byte typeByte,
-                                                 std::span<const std::byte> data)
-{
-    const char type{static_cast<char>(typeByte)};
-    switch (type) {
-        case 'A':
-        case 'c':
-        case 'C':
-            return 1U;
-        case 's':
-        case 'S':
-            return 2U;
-        case 'i':
-        case 'I':
-        case 'f':
-            return 4U;
-        case 'd':
-            return 8U;
-        case 'Z':
-        case 'H': {
-            const auto it{std::ranges::find(data, std::byte{0})};
-            if (it == std::ranges::end(data)) {
-                return std::nullopt;
-            }
-            return static_cast<std::size_t>(it - std::ranges::begin(data)) + 1U;
-        }
-        case 'B': {
-            if (std::size(data) < 5U) {
-                return std::nullopt;
-            }
-            const char subtype{static_cast<char>(data[0])};
-            const std::uint32_t count{ReadU32LE(std::data(data) + 1U)};
-            std::size_t elemSize{0};
-            switch (subtype) {
-                case 'c':
-                case 'C':
-                    elemSize = 1U;
-                    break;
-                case 's':
-                case 'S':
-                    elemSize = 2U;
-                    break;
-                case 'i':
-                case 'I':
-                case 'f':
-                    elemSize = 4U;
-                    break;
-                default:
-                    return std::nullopt;
-            }
-            return 5U + (static_cast<std::size_t>(count) * elemSize);
-        }
-        default:
-            return std::nullopt;
-    }
-}
-
-/// \brief Walk a BAM aux block and return the value of the \p target tag as a
-/// string_view (only meaningful when target is a Z-typed tag, e.g., RG). Returns
-/// nullopt if not found / malformed.
-inline std::optional<std::string_view> FindZTag(std::span<const std::byte> aux, TagKey target)
-{
-    std::size_t i{0};
-    while ((i + 3U) <= std::size(aux)) {
-        const TagKey key{static_cast<char>(aux[i]), static_cast<char>(aux[i + 1U])};
-        const std::byte typeByte{aux[i + 2U]};
-        const std::span<const std::byte> rest{aux.subspan(i + 3U)};
-        const std::optional<std::size_t> valueLen{AuxValueLength(typeByte, rest)};
-        if (!valueLen) {
-            return std::nullopt;
-        }
-        if (key == target) {
-            if (static_cast<char>(typeByte) != 'Z') {
-                return std::nullopt;
-            }
-            if (*valueLen == 0U) {
-                return std::string_view{};
-            }
-            return std::string_view{reinterpret_cast<const char*>(std::data(rest)), *valueLen - 1U};
-        }
-        i += 3U + *valueLen;
-    }
-    return std::nullopt;
-}
-
-/// \brief Parse (rgId, zmw) for a BAM record body. \p recordBody is the bytes
-/// following the 4-byte block_size prefix; its size equals block_size value.
-inline std::pair<std::int32_t, std::int32_t> ParseRecordIdentity(
-    std::span<const std::byte> recordBody)
-{
-    constexpr std::size_t FIXED_FIELDS_SIZE{32U};
-    if (std::size(recordBody) < FIXED_FIELDS_SIZE) {
-        throw std::runtime_error{"zmi-index: BAM record smaller than fixed header"};
-    }
-
-    const std::uint8_t nameLen{static_cast<std::uint8_t>(recordBody[8])};
-    const std::uint16_t cigarOpCount{ReadU16LE(std::data(recordBody) + 12U)};
-    const std::uint32_t seqLength{ReadU32LE(std::data(recordBody) + 16U)};
-
-    if (nameLen == 0U) {
-        throw std::runtime_error{"zmi-index: BAM record has zero l_read_name"};
-    }
-
-    const std::size_t nameOffset{FIXED_FIELDS_SIZE};
-    const std::size_t cigarOffset{nameOffset + nameLen};
-    const std::size_t seqOffset{cigarOffset + (std::size_t{4U} * cigarOpCount)};
-    const std::size_t qualOffset{seqOffset + ((seqLength + 1U) / 2U)};
-    const std::size_t auxOffset{qualOffset + seqLength};
-
-    if (auxOffset > std::size(recordBody)) {
-        throw std::runtime_error{"zmi-index: BAM record variable-length fields exceed block_size"};
-    }
-    if (recordBody[nameOffset + nameLen - 1U] != std::byte{0}) {
-        throw std::runtime_error{"zmi-index: BAM record name not NUL-terminated"};
-    }
-
-    const std::string_view name{reinterpret_cast<const char*>(std::data(recordBody) + nameOffset),
-                                static_cast<std::size_t>(nameLen) - 1U};
-    const std::span<const std::byte> aux{recordBody.subspan(auxOffset)};
-
-    const std::optional<std::string_view> rgText{FindZTag(aux, RG_TAG)};
-    const std::int32_t rgId{rgText ? ParseReadGroupId(*rgText) : 0};
-    const std::int32_t zmw{ParseZmwFromName(name)};
-    return {rgId, zmw};
-}
-
-}  // namespace detail
+// AuxValueLength, FindZTag, and ParseRecordIdentity now live in ZmwUtils.hpp. The ZMI
+// writer needs the same walker functions. An unqualified detail:: reference here
+// resolves to the enclosing PacBio::Samoa::detail namespace.
 
 /// \brief Streams decompressed BGZF bytes (BAM header + records) and emits
 /// per-record `(rgId, zmw, virtualOffset)` index entries.

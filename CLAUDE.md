@@ -21,9 +21,9 @@ Cram tests resolve tool paths via env vars in `tests/meson.build` — run via `m
 
 **Compression** — `VirtualOffset`, `BgzfReader` (sync or parallel via `numWorkers`, 3-stage pipeline internally), `BgzfWriter`.
 
-**Record** — `RawRecord` (owning, copies raw BAM bytes, inline decode-on-demand), `RawRecordBatch` (owns decompressed buffers, indexed access), `BamRecord` (structured fields, zero-cost mutation, serialize once in writer), `CigarOp`, `TagMap`.
+**Record** — `RawRecordView` (non-owning, inline decode-on-demand over borrowed bytes), `RawRecord` (owns a copy of the record bytes; borrow via `View()`), `RawRecordBatch` (owns decompressed buffers; `View(i)` for copy-free access), `BamRecord` (structured fields, zero-cost mutation, serialize once in writer), `CigarOp`, `TagMap`.
 
-**BAM/SAM API** — `BamRawReader` (zero-copy iteration, sync/parallel BGZF, range + batch + whitelist interfaces, region queries via BAI), `BamRecordReader` (wraps BamRawReader, pre-decodes to `BamRecord` via background producer thread + optional thread pool), `SamReader`, `BamWriter`, `SamWriter`, `BaiIndex`. Memory-budget sizing via `ByteLimit`.
+**BAM/SAM API** — `BamRawReader` (sync/parallel BGZF, range + batch + whitelist interfaces, region queries via BAI; `Records()` yields owning `RawRecord`, `ReadBatch()` + `View(i)` is the copy-free path), `BamRecordReader` (wraps BamRawReader, pre-decodes to `BamRecord` via background producer thread + optional thread pool), `SamReader`, `BamWriter`, `SamWriter`, `BaiIndex`. Memory-budget sizing via `ByteLimit`.
 
 **CRAM v3** — `CramReader`, `CramWriter`, `CraiIndex` (CRAI interop), `CramCodec`/`CramCompression` (configurable block + data-series codecs incl. FQZ slices), `CramStructs`, `CramMd5`. Reference-based; round-trips with `BamRecord`.
 

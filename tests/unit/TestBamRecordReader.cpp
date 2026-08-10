@@ -1,3 +1,4 @@
+#include "../../src/ParallelUtils.hpp"
 #include "TestData.hpp"
 
 #include <pbsamoa/io/BamRawReader.hpp>
@@ -48,6 +49,14 @@ TEST(BamRecordReader, ReadRecordsMatchViewReaderToOwned)
     }
     EXPECT_FALSE(recordReader.ReadRecord());
     EXPECT_GT(count, 0U);
+}
+
+TEST(BamRecordReader, ParallelChunkSizeClampsAndRoundsUp)
+{
+    EXPECT_EQ(detail::ParallelChunkSize(0, 0), 1U);
+    EXPECT_EQ(detail::ParallelChunkSize(4, 1), 1U);
+    EXPECT_EQ(detail::ParallelChunkSize(5, 1), 2U);
+    EXPECT_EQ(detail::ParallelChunkSize(1025, 1), 256U);
 }
 
 TEST(BamRecordReader, HeaderForwarded)
@@ -137,6 +146,43 @@ TEST(BamRecordReader, ManyRecordsParallel)
         ++count;
     }
     EXPECT_EQ(count, 500u);
+}
+
+TEST(BamRecordReader, ChunkedDecodeMatchesSerialAcrossWorkerCounts)
+{
+    // The fixture and small batch budget exercise non-divisible tail chunks across worker counts.
+    const auto path{tests::DataDir / "benchmark.bam"};
+
+    std::vector<BamRecord> expected;
+    BamRecordReader serial{path, BamRecordReaderConfig{.DecodeWorkers = 0}};
+    for (const auto& rec : serial.Records()) {
+        expected.push_back(rec);
+    }
+    ASSERT_EQ(std::size(expected), 10000U);
+
+    for (const std::size_t workers : {1U, 2U, 3U, 5U, 8U}) {
+        for (const ByteLimit budget : {ByteLimit{4 * 1024 * 1024}, ByteLimit{64 * 1024}}) {
+            BamRecordReader parallel{path, BamRecordReaderConfig{
+                                               .DecodeWorkers = workers,
+                                               .BatchBudget = budget,
+                                           }};
+
+            std::size_t i{0};
+            for (const auto& rec : parallel.Records()) {
+                ASSERT_LT(i, std::size(expected))
+                    << "extra record at " << i << ", workers=" << workers;
+                EXPECT_EQ(rec.Name(), expected[i].Name()) << "at " << i << ", workers=" << workers;
+                EXPECT_EQ(rec.Flag(), expected[i].Flag()) << "at " << i << ", workers=" << workers;
+                EXPECT_EQ(rec.Pos(), expected[i].Pos()) << "at " << i << ", workers=" << workers;
+                EXPECT_EQ(rec.RefId(), expected[i].RefId())
+                    << "at " << i << ", workers=" << workers;
+                EXPECT_EQ(rec.Sequence(), expected[i].Sequence())
+                    << "at " << i << ", workers=" << workers;
+                ++i;
+            }
+            EXPECT_EQ(i, std::size(expected)) << "missing records, workers=" << workers;
+        }
+    }
 }
 
 TEST(BamRecordReader, TagFilterDropTags)

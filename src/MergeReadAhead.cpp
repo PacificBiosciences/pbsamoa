@@ -169,22 +169,52 @@ struct MergeReadAhead::Impl
     void DecompressInto(const std::vector<std::vector<std::byte>>& blocks,
                         const std::vector<BgzfBlockInfo>& infos, std::vector<std::byte>& carry)
     {
-        const std::int32_t n{static_cast<std::int32_t>(std::size(blocks))};
-        std::vector<std::vector<std::byte>> outputs(std::size(blocks));
+        const std::size_t blockCount{std::size(blocks)};
+        const std::size_t carryStart{std::size(carry)};
+
+        // Lay out checked ISIZE-sized spans so workers decompress directly into carry.
+        std::vector<std::size_t> offsets(blockCount + 1U);
+        std::size_t total{0};
+        for (std::size_t i{0}; i < blockCount; ++i) {
+            offsets[i] = total;
+            if ((infos[i].blockSize < 4U) || (std::size(blocks[i]) < infos[i].blockSize)) {
+                throw std::runtime_error{"MergeReadAhead: truncated BGZF block"};
+            }
+            const std::size_t isize{ReadU32LE(std::data(blocks[i]) + infos[i].blockSize - 4U)};
+            if (isize > MAX_DECOMPRESSED_BLOCK_SIZE) {
+                throw std::runtime_error{"MergeReadAhead: BGZF ISIZE exceeds maximum block size"};
+            }
+            total += isize;
+        }
+        offsets[blockCount] = total;
+        carry.resize(carryStart + total);
+
+        std::vector<std::size_t> produced(blockCount);
         const auto worker{[&](std::int32_t i) {
-            std::vector<std::byte> buffer(MAX_DECOMPRESSED_BLOCK_SIZE);
-            const std::optional<std::size_t> produced{DecompressBgzfBlock(
-                blocks[static_cast<std::size_t>(i)], infos[static_cast<std::size_t>(i)], buffer)};
-            if (!produced) {
+            const std::size_t index{static_cast<std::size_t>(i)};
+            const std::size_t length{offsets[index + 1U] - offsets[index]};
+            const std::span<std::byte> output{
+                std::span<std::byte>{carry}.subspan(carryStart + offsets[index], length)};
+            const std::optional<std::size_t> actual{
+                DecompressBgzfBlock(blocks[index], infos[index], output)};
+            if (!actual) {
                 throw std::runtime_error{"MergeReadAhead: BGZF decompression failed"};
             }
-            buffer.resize(*produced);
-            outputs[static_cast<std::size_t>(i)] = std::move(buffer);
+            produced[index] = *actual;
         }};
-        PacBio::Parallel::Dispatch(Pool, worker, n);
-        for (std::vector<std::byte>& output : outputs) {
-            carry.insert(std::end(carry), std::begin(output), std::end(output));
+        PacBio::Parallel::Dispatch(Pool, worker, static_cast<std::int32_t>(blockCount));
+
+        // htslib accepts blocks that inflate short of ISIZE, so close any gaps in place.
+        std::size_t writePos{carryStart};
+        for (std::size_t i{0}; i < blockCount; ++i) {
+            const std::size_t readPos{carryStart + offsets[i]};
+            if (writePos != readPos) {
+                std::copy_n(std::begin(carry) + static_cast<std::ptrdiff_t>(readPos), produced[i],
+                            std::begin(carry) + static_cast<std::ptrdiff_t>(writePos));
+            }
+            writePos += produced[i];
         }
+        carry.resize(writePos);
     }
 
     /// Block on the budget, then publish \p batch to \p source. Returns false if

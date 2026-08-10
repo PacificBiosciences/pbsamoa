@@ -165,7 +165,7 @@ TEST(BamRawReader, BatchModeSpanningBlocks)
     std::size_t total{0};
     while (const auto batch = reader.ReadBatch(ByteLimit{4096})) {
         for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-            const RawRecord view{batch->RecordData(i)};
+            const RawRecordView view{batch->View(i)};
             EXPECT_FALSE(std::empty(view.Name()));
         }
         total += batch->RecordCount();
@@ -282,13 +282,13 @@ TEST(BamRawReader, PipelineMatchesSyncReadBatch)
 
     while (const auto batch = syncReader.ReadBatch()) {
         for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-            const RawRecord rec{batch->RecordData(i)};
+            const RawRecordView rec{batch->View(i)};
             syncFlags.push_back(rec.Flag());
         }
     }
     while (const auto batch = pipeReader.ReadBatch()) {
         for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-            const RawRecord rec{batch->RecordData(i)};
+            const RawRecordView rec{batch->View(i)};
             pipeFlags.push_back(rec.Flag());
         }
     }

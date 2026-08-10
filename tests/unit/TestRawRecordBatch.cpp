@@ -94,9 +94,12 @@ TEST(RawRecordBatch, ConstructAndIterate)
     const RawRecordBatch batch{std::move(buffer), std::move(extents)};
 
     ASSERT_EQ(batch.RecordCount(), 3U);
-    const RawRecord view0{batch.RecordData(0)};
-    const RawRecord view1{batch.RecordData(1)};
-    const RawRecord view2{batch.RecordData(2)};
+    const RawRecordView view0{batch.View(0)};
+    const RawRecordView view1{batch.View(1)};
+    const RawRecordView view2{batch.View(2)};
+    EXPECT_EQ(std::data(view0.RawData()), std::data(batch.RecordData(0)));
+    EXPECT_EQ(std::data(view1.RawData()), std::data(batch.RecordData(1)));
+    EXPECT_EQ(std::data(view2.RawData()), std::data(batch.RecordData(2)));
     EXPECT_EQ(view0.Name(), "read1");
     EXPECT_EQ(view1.Name(), "read2");
     EXPECT_EQ(view2.Name(), "read3");
@@ -117,9 +120,9 @@ TEST(RawRecordBatch, RecordFieldAccess)
 
     const RawRecordBatch batch{std::move(buffer), std::move(extents)};
 
-    const RawRecord view0{batch.RecordData(0)};
-    const RawRecord view1{batch.RecordData(1)};
-    const RawRecord view2{batch.RecordData(2)};
+    const RawRecordView view0{batch.View(0)};
+    const RawRecordView view1{batch.View(1)};
+    const RawRecordView view2{batch.View(2)};
 
     EXPECT_EQ(view0.Pos(), 100);
     EXPECT_TRUE(view0.IsMapped());

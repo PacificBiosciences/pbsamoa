@@ -34,7 +34,10 @@ public:
     /// \brief Write an owned record.
     void Write(const BamRecord& record);
 
-    /// \brief Write an owning byte view.
+    /// \brief Write a non-owning raw record view.
+    void Write(const RawRecordView& view);
+
+    /// \brief Write an owning raw record.
     void Write(const RawRecord& view);
 
     /// \brief Write a batch of records.

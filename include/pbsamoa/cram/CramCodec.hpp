@@ -179,6 +179,12 @@ public:
     /// \brief Decode a single byte value.
     virtual std::byte DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks) = 0;
 
+    /// \brief Decode std::size(dest) consecutive byte values into \p dest.
+    ///
+    /// EXTERNAL overrides the per-byte fallback with one contiguous block read.
+    virtual void DecodeBytesInto(std::span<std::byte> dest, CramBitReader& coreReader,
+                                 CramExternalBlockStore& extBlocks);
+
     /// \brief Decode a byte array.
     virtual std::vector<std::byte> DecodeByteArray(CramBitReader& coreReader,
                                                    CramExternalBlockStore& extBlocks) = 0;
@@ -243,6 +249,8 @@ public:
     CramCodecDecodeKind DecodeKind() const override;
     std::int32_t DecodeInt(CramBitReader& coreReader, CramExternalBlockStore& extBlocks) override;
     std::byte DecodeByte(CramBitReader& coreReader, CramExternalBlockStore& extBlocks) override;
+    void DecodeBytesInto(std::span<std::byte> dest, CramBitReader& coreReader,
+                         CramExternalBlockStore& extBlocks) override;
     std::vector<std::byte> DecodeByteArray(CramBitReader& coreReader,
                                            CramExternalBlockStore& extBlocks) override;
     void EncodeInt(std::int32_t value, CramBitWriter& coreWriter,

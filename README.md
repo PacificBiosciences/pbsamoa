@@ -40,19 +40,21 @@ with:
 using namespace PacBio::Samoa;
 ```
 
-### `RawRecord` vs `BamRecord`
+### `RawRecordView`, `RawRecord`, and `BamRecord`
 
-_pbsamoa_ provides two record types with different trade-offs:
+_pbsamoa_ provides three record types with different trade-offs:
 
+- **`RawRecordView`** borrows raw BAM bytes and decodes fields on demand. Use
+  `RawRecordBatch::View()` while the batch remains alive, because `View()` does not copy record bytes.
 - **`RawRecord`** owns the raw BAM bytes and decodes fields on demand. Ideal for high-throughput
-  scanning where you only inspect a few fields per record (filtering, counting, indexing).
+  single-record APIs or whenever the record must outlive its source buffer.
 - **`BamRecord`** stores pre-decoded C++ types (`std::string`, `TagMap`, etc.). Use it when you need
   structured access to many fields, mutation, clipping, or writing records back out.
 
-### BamRawReader – zero-copy iteration
+### BamRawReader – decode-on-demand iteration
 
-`BamRawReader` yields `RawRecord` references directly from decompressed BGZF
-blocks with no up-front decoding.
+`BamRawReader` yields owning `RawRecord` references with no up-front field decoding.
+Its batch API provides non-owning `RawRecordView`s without per-record byte copies.
 
 ```cpp
 BamRawReader reader{"input.bam"};
@@ -155,8 +157,10 @@ consumer thread parses the decompressed bytes into `RawRecord`s. With `BgzfWorke
 runs synchronously on the caller thread.
 
 **Layer 2 – Batching (BamRawReader).** `ReadBatch(ByteLimit)` drains records from Layer 1 into a
-contiguous `RawRecordBatch` – one allocation, N extents – up to a memory budget (default 256 MiB).
-This amortises allocation overhead and gives Layer 3 a batch-sized unit of work.
+contiguous `RawRecordBatch` – one record-byte allocation plus N extents – up to a memory budget
+(default 256 MiB).
+`RawRecordBatch::View()` decodes directly from that buffer and does not allocate a byte copy. This
+amortises allocation overhead and gives Layer 3 a batch-sized unit of work.
 
 **Layer 3 – Decoding (BamRecordReader).** A background producer thread calls `ReadBatch`, then fans
 out record-level decoding across `DecodeWorkers` (default

@@ -35,10 +35,22 @@ TEST(SamHeaderValidation, RejectsDuplicateReadGroupId)
     EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@RG\tID:rg1\n@RG\tID:rg1\n").has_value());
 }
 
-TEST(SamHeaderValidation, RejectsDuplicateProgramId)
+TEST(SamHeaderValidation, KeepsDuplicateProgramId)
 {
-    // SAMv1 §1.3: each @PG ID must be unique.
-    EXPECT_FALSE(SamHeader::FromText("@HD\tVN:1.6\n@PG\tID:p1\n@PG\tID:p1\n").has_value());
+    // SAMv1 §1.3 asks for unique @PG IDs, but a file that breaks the rule must stay
+    // readable: pbsamoa builds before the UniqueProgramId fix wrote such files, and
+    // samtools reads them. Both lines survive, in file order, with their own tags.
+    const auto header{SamHeader::FromText(
+        "@HD\tVN:1.6\n@PG\tID:p1\tPN:first\n@PG\tID:p1\tPN:second\n@PG\tID:p2\n")};
+    ASSERT_TRUE(header.has_value());
+    ASSERT_EQ(std::ssize(header->ProgramRecords()), 3);
+    EXPECT_EQ(header->ProgramRecords()[0].Id(), "p1");
+    ASSERT_NE(header->ProgramRecords()[0].GetTag("PN"), nullptr);
+    EXPECT_EQ(*header->ProgramRecords()[0].GetTag("PN"), "first");
+    EXPECT_EQ(header->ProgramRecords()[1].Id(), "p1");
+    ASSERT_NE(header->ProgramRecords()[1].GetTag("PN"), nullptr);
+    EXPECT_EQ(*header->ProgramRecords()[1].GetTag("PN"), "second");
+    EXPECT_EQ(header->ProgramRecords()[2].Id(), "p2");
 }
 
 TEST(SamHeaderValidation, RejectsMultipleHdLines)

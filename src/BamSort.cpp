@@ -160,7 +160,7 @@ struct Item
     std::optional<TagValue> TagSortValue{};
 };
 
-std::pair<std::uint64_t, std::int32_t> MinimiserKey(const RawRecord& record)
+std::pair<std::uint64_t, std::int32_t> MinimiserKey(const RawRecordView& record)
 {
     constexpr std::uint32_t KMER{20};
     constexpr std::int32_t KMER_OFFSET{19};
@@ -207,7 +207,7 @@ std::pair<std::uint64_t, std::int32_t> MinimiserKey(const RawRecord& record)
 /// samtools coordinate key: (refAdj << 32) | ((pos+1) << 1) | rev, with the
 /// unmapped reference id mapped to NumReferences so unmapped records sort last
 /// and forward precedes reverse at equal position.
-std::uint64_t CoordinateSortKey(const RawRecord& record, std::int32_t numReferences)
+std::uint64_t CoordinateSortKey(const RawRecordView& record, std::int32_t numReferences)
 {
     const std::int32_t refId{record.RefId()};
     const std::uint64_t refAdj{(refId < 0) ? static_cast<std::uint64_t>(numReferences)
@@ -220,11 +220,12 @@ std::uint64_t CoordinateSortKey(const RawRecord& record, std::int32_t numReferen
 
 Item MakeItem(RawRecord record, const SortContext& ctx)
 {
-    const std::uint64_t coordKey{CoordinateSortKey(record, ctx.NumReferences)};
+    const RawRecordView& view{record.View()};
+    const std::uint64_t coordKey{CoordinateSortKey(view, ctx.NumReferences)};
     std::uint64_t minHash{0};
     std::int32_t minHashPosition{0};
     if (ctx.Minimise && (record.RefId() < 0)) {
-        std::tie(minHash, minHashPosition) = MinimiserKey(record);
+        std::tie(minHash, minHashPosition) = MinimiserKey(view);
     }
     std::optional<TagValue> tagValue{};
     if (ctx.Order == SortOrder::TAG) {
@@ -255,10 +256,15 @@ bool TagAsNumber(const TagValue& value, double& out)
     return false;
 }
 
-bool TagAsText(const TagValue& value, std::string& out)
+/// \note \p out aliases the storage inside \p value. It does not copy
+/// the string, so \p out stays valid only as long as \p value stays
+/// valid. Both callers each pass an lvalue `TagSortValue` member. That
+/// member outlives the call to CompareTagValues in which the code uses
+/// the view.
+bool TagAsText(const TagValue& value, std::string_view& out)
 {
     if (const auto* p{std::get_if<char>(&value)}) {
-        out.assign(1, *p);
+        out = std::string_view{p, 1};
         return true;
     }
     if (const auto* p{std::get_if<std::string>(&value)}) {
@@ -284,8 +290,8 @@ int CompareTagValues(const TagValue& a, const TagValue& b)
         return (na < nb) ? -1 : (na > nb) ? 1 : 0;
     }
 
-    std::string sa{};
-    std::string sb{};
+    std::string_view sa{};
+    std::string_view sb{};
     if (TagAsText(a, sa) && TagAsText(b, sb)) {
         const int c{sa.compare(sb)};
         return (c < 0) ? -1 : (c > 0) ? 1 : 0;
@@ -426,11 +432,30 @@ std::string SortOrderText(SortOrder order)
     std::unreachable();
 }
 
+/// Return \p id, or `id.N` for the smallest N >= 1 that no existing @PG claims.
+std::string UniqueProgramId(const SamHeader& header, std::string id)
+{
+    const auto taken{[&header](std::string_view candidate) {
+        return std::ranges::any_of(header.ProgramRecords(), [candidate](const ProgramRecord& pg) {
+            return pg.Id() == candidate;
+        });
+    }};
+    if (!taken(id)) {
+        return id;
+    }
+    for (std::int64_t suffix{1};; ++suffix) {
+        std::string candidate{std::format("{}.{}", id, suffix)};
+        if (!taken(candidate)) {
+            return candidate;
+        }
+    }
+}
+
 /// Append a chained @PG describing this tool invocation (PP = current last @PG).
 void AppendProgramRecord(SamHeader& header, std::string id,
                          const std::optional<std::string>& commandLine)
 {
-    ProgramRecord program{std::move(id)};
+    ProgramRecord program{UniqueProgramId(header, std::move(id))};
     program.SetTag("PN", "pbsamoa");
     program.SetTag("VN", std::string{GetLibraryInfo().Release});
     if (commandLine) {
@@ -873,7 +898,7 @@ struct MergeView
 
 MergeView MakeMergeView(std::span<const std::byte> bytes, const SortContext& ctx)
 {
-    std::optional<RawRecord> record{};
+    std::optional<RawRecordView> record{};
     if (ctx.Minimise || (ctx.Order == SortOrder::TAG)) {
         record.emplace(bytes);
     }
@@ -884,7 +909,7 @@ MergeView MakeMergeView(std::span<const std::byte> bytes, const SortContext& ctx
     }
     std::optional<TagValue> tagValue{};
     if (ctx.Order == SortOrder::TAG) {
-        // Tag order is rare; materialize a RawRecord only to parse the tag map.
+        // Tag order is rare, so the code builds a decoder only to parse the tag map.
         const TagMap tags{record->ParseTags()};
         if (const TagValue* value{tags.Get(ctx.Tag)}; value != nullptr) {
             tagValue = *value;

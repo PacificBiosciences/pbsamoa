@@ -47,8 +47,11 @@ constexpr std::size_t BAM_FIXED_FIELDS_SIZE{32};
 constexpr std::size_t BGZF_BLOCK_HEADER_SIZE{18U};
 constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U};  // BSIZE is 16-bit: blockSize <= 65536
 // Compressed blocks inflated per worker before the consumer drains the window.
-// Bounds memory to numWorkers * WINDOW_BLOCKS_PER_WORKER * (64 KiB + 64 KiB).
-constexpr std::size_t WINDOW_BLOCKS_PER_WORKER{4U};
+// Bounds memory to numWorkers * WINDOW_BLOCKS_PER_WORKER * (64 KiB + 64 KiB),
+// or about 128 MiB at 64 workers.
+//
+// Larger windows reduce pool creation overhead but increase per-worker memory.
+constexpr std::size_t WINDOW_BLOCKS_PER_WORKER{16U};
 
 struct BlockSegment
 {

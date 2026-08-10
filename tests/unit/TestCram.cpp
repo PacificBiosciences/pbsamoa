@@ -774,6 +774,29 @@ TEST(CramCompressionHeader, TruncatedDataThrows)
     EXPECT_THROW(ParseCompressionHeader(truncated), std::runtime_error);
 }
 
+TEST(CramCompressionHeader, DuplicateDataSeriesThrows)
+{
+    CramCompressionHeader hdr;
+
+    CramEncodingDescriptor first;
+    first.CodecId = CramCodecId::EXTERNAL;
+    WriteItf8(first.Parameters, 1);
+    hdr.DataSeriesEncodings.emplace_back(CramDataSeries::BF, std::move(first));
+
+    CramEncodingDescriptor second;
+    second.CodecId = CramCodecId::EXTERNAL;
+    WriteItf8(second.Parameters, 2);
+    hdr.DataSeriesEncodings.emplace_back(CramDataSeries::BF, std::move(second));
+
+    const auto serialized = SerializeCompressionHeader(hdr);
+    try {
+        ParseCompressionHeader(serialized);
+        FAIL() << "duplicate data-series entries must be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "compression header: duplicate data series encoding");
+    }
+}
+
 // ===========================================================================
 // Bit Reader / Writer Tests
 // ===========================================================================

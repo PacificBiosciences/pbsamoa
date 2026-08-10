@@ -27,7 +27,7 @@ required.
 
 PacBio::Samoa::BamRawReader reader{"input.bam"};
 
-// Print every read name (zero-copy views)
+// Print every read name (decode on demand)
 for (const auto& view : reader.Records()) {
     std::println("{}", view.Name());
 }
@@ -59,7 +59,7 @@ PacBio::Samoa::BamRawReader reader{"input.bam",
 
 while (auto batch = reader.ReadBatch(128_MiB)) {
     for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-        const PacBio::Samoa::RawRecord view{batch->RecordData(i)};
+        const PacBio::Samoa::RawRecordView view{batch->View(i)};
         // process view
     }
 }

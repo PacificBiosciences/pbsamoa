@@ -151,7 +151,7 @@ void SamWriter::Write(const BamRecord& record)
     FlushLine(impl_->buf, impl_->stream);
 }
 
-void SamWriter::Write(const RawRecord& view)
+void SamWriter::Write(const RawRecordView& view)
 {
     FormatFields(impl_->buf, impl_->header, view.Name(), view.Flag(), view.RefId(), view.Pos(),
                  view.MapQ(), view.CigarOps(), view.NextRefId(), view.NextPos(), view.Tlen(),
@@ -162,12 +162,13 @@ void SamWriter::Write(const RawRecord& view)
     FlushLine(impl_->buf, impl_->stream);
 }
 
+void SamWriter::Write(const RawRecord& view) { Write(view.View()); }
+
 void SamWriter::WriteBatch(const RawRecordBatch& batch)
 {
     const std::size_t recordCount{batch.RecordCount()};
     for (std::size_t i{0}; i < recordCount; ++i) {
-        const RawRecord view{batch.RecordData(i)};
-        Write(view);
+        Write(batch.View(i));
     }
 }
 

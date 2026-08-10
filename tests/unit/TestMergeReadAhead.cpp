@@ -11,8 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <span>
 #include <string>
@@ -184,6 +186,46 @@ TEST_F(MergeReadAheadTest, PropagatesErrorOnTruncatedInput)
     MergeReadAhead ra{inputs, /*decodeWorkers=*/4, ByteLimit{std::size_t{64} * 1024 * 1024}};
 
     // Valid leading records may be delivered first; draining must ultimately throw.
+    EXPECT_THROW(DrainSource(ra, 0), std::runtime_error);
+}
+
+// ISIZE is the only input that sizes the shared inflate destination. DecompressInto reads
+// ISIZE from the block trailer and adds it to the carry layout. DecompressInto resizes
+// carry to that total before it decompresses any data. No code upstream limits the ISIZE
+// value, so without the cap, a crafted file controls the allocation size. The truncation
+// test above fails earlier, in the read loop, and never reaches this check. For that
+// reason, this test uses its own file.
+TEST_F(MergeReadAheadTest, RejectsBlockWhoseIsizeExceedsTheMaximum)
+{
+    const std::filesystem::path input{File("bad_isize.bam")};
+    WriteManyRecords(input, 2000);
+
+    std::fstream file{input, std::ios::binary | std::ios::in | std::ios::out};
+    ASSERT_TRUE(file);
+
+    // BSIZE (total block size - 1) is a u16le at offset 16 of each BGZF block header.
+    const auto blockSizeAt{[&file](std::streamoff offset) -> std::size_t {
+        std::array<unsigned char, 2> bsize{};
+        file.seekg(offset + 16);
+        file.read(reinterpret_cast<char*>(std::data(bsize)), 2);
+        return (std::size_t{bsize[0]} | (std::size_t{bsize[1]} << 8U)) + 1U;
+    }};
+
+    // The test skips the header block. This way, the failure happens while the test
+    // streams records, not while it parses the header.
+    const std::streamoff target{static_cast<std::streamoff>(blockSizeAt(0))};
+    const std::size_t targetSize{blockSizeAt(target)};
+    ASSERT_GT(targetSize, 4u);
+
+    static constexpr std::array<char, 4> HUGE_ISIZE{'\xFF', '\xFF', '\xFF', '\xFF'};
+    file.seekp(target + static_cast<std::streamoff>(targetSize) - 4);
+    file.write(std::data(HUGE_ISIZE), 4);
+    ASSERT_TRUE(file);
+    file.close();
+
+    const std::vector<std::filesystem::path> inputs{input};
+    MergeReadAhead ra{inputs, /*decodeWorkers=*/4, ByteLimit{std::size_t{64} * 1024 * 1024}};
+
     EXPECT_THROW(DrainSource(ra, 0), std::runtime_error);
 }
 

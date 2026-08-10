@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <bit>
+#include <limits>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -131,6 +133,35 @@ TEST(TagMap, Contains)
 
     EXPECT_TRUE(tags.Contains(TagKey{'N', 'M'}));
     EXPECT_FALSE(tags.Contains(TagKey{'R', 'G'}));
+}
+
+// SAMv1 §1.5 forbids duplicate tags, so this test pins behaviour on invalid input, not
+// a guarantee. The test exists because Append inserts at lower_bound, and lower_bound
+// places a new equal key before the existing ones. As a result, a duplicate group
+// appears in reverse arrival order, and Get() returns the last key appended. A rewrite
+// of Append that sorts entries rather than inserts them at lower_bound — the push_back
+// plus stable_sort shape — would silently flip both the order and the returned value.
+// No BAM fixture contains duplicate tags, so the cram test suite cannot detect that
+// failure.
+TEST(TagMap, AppendPutsDuplicateKeysInReverseArrivalOrder)
+{
+    TagMap tags;
+    const TagKey key{'X', 'X'};
+    tags.Append(key, TagValue{std::int64_t{1}});
+    tags.Append(key, TagValue{std::int64_t{2}});
+    tags.Append(key, TagValue{std::int64_t{3}});
+
+    ASSERT_EQ(tags.Size(), 3U);
+
+    const auto* first{tags.Get(key)};
+    ASSERT_TRUE(first);
+    EXPECT_EQ(std::get<std::int64_t>(*first), 3);
+
+    std::vector<std::int64_t> order;
+    for (const auto& [entryKey, value] : tags.Entries()) {
+        order.push_back(std::get<std::int64_t>(value));
+    }
+    EXPECT_EQ(order, (std::vector<std::int64_t>{3, 2, 1}));
 }
 
 TEST(TagFilter, DropTags)
@@ -373,6 +404,49 @@ TEST(TagBamParse, ArrayTypeBI)
     const TagArray& arr{std::get<TagArray>(*val)};
     EXPECT_EQ(arr.ElementType(), 'I');
     EXPECT_EQ(arr.Count(), 3U);
+}
+
+// B_ARRAY_ELEM_MAX_CHARS provides exactly enough space, with no extra margin: comma +
+// digits10 + 1 + sign is precisely ",-2147483648" for int32 and ",65535" for uint16.
+// The resize_and_overwrite writer sizes the buffer with that formula, and then assumes
+// that std::to_chars cannot fail. Because of this assumption, one missing character in
+// any instantiation causes a heap overflow instead of a wrong string. This test uses
+// the widest value for each width, because only the widest value can expose a
+// one-character shortfall. No other test covers the B:s or B:S tag types.
+TEST(TagBamSerialize, BArrayIntExtremesFillTheSizedBuffer)
+{
+    const auto serialize{[](char elemType, std::uint32_t count,
+                            const std::vector<std::byte>& payload) {
+        std::vector<std::byte> data{static_cast<std::byte>('X'), static_cast<std::byte>('A'),
+                                    static_cast<std::byte>('B'), static_cast<std::byte>(elemType)};
+        AppendU32LE(data, count);
+        data.insert(std::ranges::end(data), std::ranges::begin(payload), std::ranges::end(payload));
+        std::string sam;
+        SerializeRawTagsToSam(data, sam);
+        return sam;
+    }};
+
+    std::vector<std::byte> i32;
+    AppendU32LE(i32, std::bit_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::min()));
+    AppendU32LE(i32, std::bit_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()));
+    EXPECT_EQ(serialize('i', 2, i32), "\tXA:B:i,-2147483648,2147483647");
+
+    std::vector<std::byte> u32;
+    AppendU32LE(u32, std::numeric_limits<std::uint32_t>::max());
+    EXPECT_EQ(serialize('I', 1, u32), "\tXA:B:I,4294967295");
+
+    std::vector<std::byte> i16;
+    AppendU16LE(i16, std::bit_cast<std::uint16_t>(std::numeric_limits<std::int16_t>::min()));
+    AppendU16LE(i16, std::bit_cast<std::uint16_t>(std::numeric_limits<std::int16_t>::max()));
+    EXPECT_EQ(serialize('s', 2, i16), "\tXA:B:s,-32768,32767");
+
+    std::vector<std::byte> u16;
+    AppendU16LE(u16, std::numeric_limits<std::uint16_t>::max());
+    EXPECT_EQ(serialize('S', 1, u16), "\tXA:B:S,65535");
+
+    // When count equals 0, the buffer size is zero. The writer must return startPos
+    // unchanged and must not emit a stray separator.
+    EXPECT_EQ(serialize('i', 0, {}), "\tXA:B:i");
 }
 
 TEST(TagBamParse, EmptyData)

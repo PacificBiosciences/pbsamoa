@@ -32,8 +32,8 @@ struct BamWriterConfig
 
 /// \brief Writes BAM files via BGZF compression.
 ///
-/// Accepts owned BamRecord (serializes to BAM binary), raw byte spans
-/// (zero-copy passthrough), or RawRecord (delegates to raw path).
+/// Accepts owned BamRecord (serializes to BAM binary), raw byte spans,
+/// RawRecordView, or RawRecord (all delegate to the raw path).
 class BamWriter
 {
 public:
@@ -55,7 +55,10 @@ public:
     /// \brief Write raw record bytes (zero-copy passthrough).
     void Write(std::span<const std::byte> rawData);
 
-    /// \brief Write an owning byte view (delegates to raw path).
+    /// \brief Write a non-owning raw record view (delegates to raw path).
+    void Write(const RawRecordView& byteView);
+
+    /// \brief Write an owning raw record (delegates to raw path).
     void Write(const RawRecord& byteView);
 
     /// \brief Write a batch of records (raw zero-copy path).

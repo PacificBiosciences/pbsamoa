@@ -45,7 +45,7 @@ inline void WriteQualities(std::span<const std::uint8_t> qualities)
     std::print("{}", encodedQualities);
 }
 
-inline void WriteViewAsSam(const SamHeader& header, const RawRecord& view)
+inline void WriteViewAsSam(const SamHeader& header, const RawRecordView& view)
 {
     std::print("{}\t{}\t", view.Name(), view.Flag());
 

@@ -129,7 +129,7 @@ int Runner(const CLI_v2::Results& results)
     std::print("{}", header.ToText());
 
     for (const auto& view : reader.Records()) {
-        WriteViewAsSam(header, view);
+        WriteViewAsSam(header, view.View());
     }
 
     return EXIT_SUCCESS;

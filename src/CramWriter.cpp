@@ -1451,12 +1451,14 @@ void CramWriter::Write(BamRecord&& record)
     impl_->MaybeFlush();
 }
 
-void CramWriter::Write(const RawRecord& record) { Write(record.ToOwned()); }
+void CramWriter::Write(const RawRecordView& record) { Write(record.ToOwned()); }
+
+void CramWriter::Write(const RawRecord& record) { Write(record.View()); }
 
 void CramWriter::WriteBatch(const RawRecordBatch& batch)
 {
     for (std::size_t i{0}; i < batch.RecordCount(); ++i) {
-        Write(RawRecord{batch.RecordData(i)});
+        Write(batch.View(i));
     }
 }
 

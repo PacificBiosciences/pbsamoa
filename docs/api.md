@@ -85,8 +85,8 @@ for (const auto& view : reader.Records()) {
 }
 ```
 
-Returns `RawRecord` references. Each view is valid until the next
-iteration step (views share an internal buffer).
+Returns references to iterator-owned `RawRecord`s. Each reference is valid until the next
+iteration step.
 
 ### Batch reading
 
@@ -95,7 +95,7 @@ using namespace PacBio::Samoa::Literals;
 
 while (auto batch = reader.ReadBatch(128_MiB)) {
     for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-        const RawRecord view{batch->RecordData(i)};
+        const RawRecordView view{batch->View(i)};
         // process
     }
 }
@@ -302,7 +302,7 @@ Use `refId = -1` for unmapped query rows.
 #include <pbsamoa/io/CramWriter.hpp>
 ```
 
-Writes CRAM v3.0/v3.1 files from `BamRecord` and `RawRecord` input.
+Writes CRAM v3.0/v3.1 files from `BamRecord`, `RawRecordView`, and `RawRecord` input.
 
 ### Construction
 
@@ -447,7 +447,7 @@ Index callback notes:
 ### Writing records
 
 ```cpp
-writer.Write(view);    // from RawRecord
+writer.Write(view);    // from RawRecordView or RawRecord
 writer.Write(record);  // serializes from BamRecord
 writer.Write(rawData); // raw span<const byte>
 writer.WriteBatch(batch);  // batch of records
@@ -475,7 +475,7 @@ Writes text SAM files.
 SamWriter writer{"output.sam", header, SamWriterConfig{
     .UseTempFile = true,
 }};
-writer.Write(view);         // accepts RawRecord
+writer.Write(view);         // accepts RawRecordView or RawRecord
 writer.Write(record);       // accepts BamRecord
 writer.WriteBatch(batch);   // accepts RawRecordBatch
 writer.Close();
@@ -483,15 +483,19 @@ writer.Close();
 
 ---
 
-## RawRecord
+## RawRecordView and RawRecord
 
 ```cpp
 #include <pbsamoa/core/RawRecord.hpp>
 ```
 
-Owning type that copies raw BAM bytes. CIGAR ops are eagerly copied into
-an aligned buffer on construction. Other fields decode on demand — all
-decode logic is inline in the header.
+`RawRecordView` borrows raw BAM bytes. The source buffer must outlive the view and
+the spans that its accessors return. `RawRecord` provides the same accessor API
+but owns a byte copy, so it can cross threads and outlive the source. `RawRecord`'s
+explicit `View()` accessor exposes a non-owning view and keeps the lifetime relationship
+visible. You cannot call `View()` on a temporary `RawRecord`.
+Both types copy CIGAR ops into aligned storage because BAM does not
+guarantee their alignment. Other fields decode on demand.
 
 ### Fixed fields
 
@@ -622,11 +626,12 @@ it.
 
 Owns a decompressed buffer and provides views into it.
 
-|     Method      |    Return type     |            Description            |
-| --------------- | ------------------ | --------------------------------- |
-| `RecordData(i)` | `span<const byte>` | Raw data for record `i`           |
-| `RecordCount()` | `size_t`           | Number of records                 |
-| `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes |
+|     Method      |    Return type     |              Description              |
+| --------------- | ------------------ | ------------------------------------- |
+| `View(i)`       | `RawRecordView`    | Non-owning decoder for record `i`     |
+| `RecordData(i)` | `span<const byte>` | Raw data for record `i`               |
+| `RecordCount()` | `size_t`           | Number of records                     |
+| `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes     |
 
 Views are invalidated when the batch is destroyed.
 

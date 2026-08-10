@@ -235,10 +235,8 @@ void DecodeQualityArray(std::vector<std::uint8_t>& qualities, CramCodec& codec,
                         CramBitReader& coreReader, CramExternalBlockStore& extStore,
                         std::int32_t readLength)
 {
-    qualities.reserve(readLength);
-    for (std::int32_t qi = 0; qi < readLength; ++qi) {
-        qualities.push_back(static_cast<std::uint8_t>(codec.DecodeByte(coreReader, extStore)));
-    }
+    qualities.resize(readLength);
+    codec.DecodeBytesInto(std::as_writable_bytes(std::span{qualities}), coreReader, extStore);
 }
 
 std::int32_t FeatureLengthOrOne(const DecodedFeature& feature)
@@ -346,6 +344,25 @@ CramCodec* LookupSortedCodec(std::span<const std::pair<Key, CramCodec*>> codecs,
         return it->second;
     }
     return nullptr;
+}
+
+/// \brief Dense slot for a data series in the per-container codec table.
+///
+/// Every CramDataSeries code packs two uppercase letters into a uint16 value, so
+/// 26x26 exactly covers the space. The file supplies the codes, so a malformed
+/// container can hold any byte pattern. CodecTableIndex must reject non-alphabetic
+/// codes rather than index into the table with a wrapped subtraction.
+constexpr std::size_t CODEC_TABLE_SIZE{26U * 26U};
+
+[[nodiscard]] constexpr std::optional<std::size_t> CodecTableIndex(CramDataSeries series)
+{
+    const std::size_t code{std::to_underlying(series)};
+    const std::size_t hi{(code >> 8U) & 0xFFU};
+    const std::size_t lo{code & 0xFFU};
+    if ((hi < 'A') || (hi > 'Z') || (lo < 'A') || (lo > 'Z')) {
+        return std::nullopt;
+    }
+    return ((hi - 'A') * 26U) + (lo - 'A');
 }
 
 std::array<std::array<char, 4>, 5> BuildSubstitutionMatrixLookup(
@@ -680,7 +697,7 @@ struct CramReader::Impl
     {
         CramBitReader& CoreReader;
         CramExternalBlockStore& ExtStore;
-        std::span<const std::pair<CramDataSeries, CramCodec*>> Codecs;
+        std::span<CramCodec* const> CodecTable;
         std::span<const std::pair<std::int32_t, CramCodec*>> TagCodecs;
         const std::vector<std::vector<TagTriple>>& TagDictionary;
         const CramSliceHeader& SliceHeader;
@@ -707,34 +724,68 @@ struct CramReader::Impl
     CramGzipDecompressorContext gzipContext;
     std::shared_ptr<Parallel::ThreadPool<>> decompressionPool;
 
-    static std::optional<char> ReferenceBaseAt(const DecodeRecordContext& ctx, std::int32_t refId,
-                                               std::int32_t refPos1Based)
+    /// \brief The two reference sources that a record can use for bases.
+    ///
+    /// ReferenceSources resolves everything that does not change with position before
+    /// the per-position checks run. Both sources can be active at the same time. The
+    /// embedded window covers only [AlignmentStart, AlignmentStart + size). A run of
+    /// matching bases can move past this window partway through, and then the code
+    /// must fall back to the external reference. For this reason, the per-position
+    /// checks below stay per-position, and only the position-independent part moves
+    /// outside the loop.
+    struct ReferenceSources
     {
+        // Embedded is empty when the record cannot use the embedded window.
+        std::span<const std::byte> Embedded;
+        // External is empty when the reader has not loaded an external reference for this ID.
+        std::string_view External;
+        std::int32_t EmbeddedStart{0};
+    };
+
+    static ReferenceSources ResolveReferenceSources(const DecodeRecordContext& ctx,
+                                                    std::int32_t refId)
+    {
+        ReferenceSources sources;
         if (!std::empty(ctx.EmbeddedReference) && ctx.SliceHeader.RefSeqId >= 0 && refId >= 0 &&
-            refId == ctx.SliceHeader.RefSeqId && ctx.SliceHeader.AlignmentStart > 0 &&
-            refPos1Based >= ctx.SliceHeader.AlignmentStart) {
-            const auto offset =
-                static_cast<std::size_t>(refPos1Based - ctx.SliceHeader.AlignmentStart);
-            if (offset < std::size(ctx.EmbeddedReference)) {
-                return static_cast<char>(static_cast<std::uint8_t>(ctx.EmbeddedReference[offset]));
+            refId == ctx.SliceHeader.RefSeqId && ctx.SliceHeader.AlignmentStart > 0) {
+            sources.Embedded = ctx.EmbeddedReference;
+            sources.EmbeddedStart = ctx.SliceHeader.AlignmentStart;
+        }
+        if (refId >= 0 && static_cast<std::size_t>(refId) < std::size(ctx.ExternalReferenceById)) {
+            sources.External = ctx.ExternalReferenceById[static_cast<std::size_t>(refId)];
+        }
+        return sources;
+    }
+
+    static std::optional<char> ReferenceBaseFrom(const ReferenceSources& sources,
+                                                 std::int32_t refPos1Based)
+    {
+        if (!std::empty(sources.Embedded) && refPos1Based >= sources.EmbeddedStart) {
+            const auto offset = static_cast<std::size_t>(refPos1Based - sources.EmbeddedStart);
+            if (offset < std::size(sources.Embedded)) {
+                return static_cast<char>(static_cast<std::uint8_t>(sources.Embedded[offset]));
             }
         }
 
-        if (refId >= 0 && static_cast<std::size_t>(refId) < std::size(ctx.ExternalReferenceById) &&
-            !ctx.ExternalReferenceById[static_cast<std::size_t>(refId)].empty() &&
-            refPos1Based > 0) {
+        if (!std::empty(sources.External) && refPos1Based > 0) {
             const std::size_t idx = refPos1Based - 1;
-            const auto& ref = ctx.ExternalReferenceById[static_cast<std::size_t>(refId)];
-            if (idx < std::size(ref)) {
-                return ref[idx];
+            if (idx < std::size(sources.External)) {
+                return sources.External[idx];
             }
         }
         return std::nullopt;
     }
 
+    static std::optional<char> ReferenceBaseAt(const DecodeRecordContext& ctx, std::int32_t refId,
+                                               std::int32_t refPos1Based)
+    {
+        return ReferenceBaseFrom(ResolveReferenceSources(ctx, refId), refPos1Based);
+    }
+
     static CramCodec* LookupCodec(const DecodeRecordContext& ctx, const CramDataSeries dataSeries)
     {
-        return LookupSortedCodec(ctx.Codecs, dataSeries);
+        const std::optional<std::size_t> index{CodecTableIndex(dataSeries)};
+        return index ? ctx.CodecTable[*index] : nullptr;
     }
 
     static CramCodec* LookupTagCodec(const DecodeRecordContext& ctx, const std::int32_t contentId)
@@ -753,12 +804,13 @@ struct CramReader::Impl
                                      std::int32_t refId, std::int32_t readPos1Based,
                                      std::int32_t refPos1Based, std::int32_t length)
     {
+        const ReferenceSources sources = ResolveReferenceSources(ctx, refId);
         for (std::int32_t i = 0; i < length; ++i) {
             const std::size_t readIndex = readPos1Based - 1 + i;
             if (readIndex >= std::size(sequence)) {
                 break;
             }
-            if (const auto refBase = ReferenceBaseAt(ctx, refId, refPos1Based + i); refBase) {
+            if (const auto refBase = ReferenceBaseFrom(sources, refPos1Based + i); refBase) {
                 sequence[readIndex] = *refBase;
             }
         }
@@ -1002,13 +1054,18 @@ struct CramReader::Impl
 
         std::vector<std::unique_ptr<CramCodec>> codecStorage;
         codecStorage.reserve(std::size(compressionHeader.DataSeriesEncodings));
-        std::vector<std::pair<CramDataSeries, CramCodec*>> flatCodecs;
-        flatCodecs.reserve(std::size(compressionHeader.DataSeriesEncodings));
+        // The reader builds the codec table once per container. Every record in the
+        // container uses the same encodings. Each record performs about 20 lookups, and
+        // each lookup now becomes a simple array index instead of a lower_bound search.
+        // A series that is absent from the container stays null in the table, and every
+        // call site depends on that null value.
+        std::array<CramCodec*, CODEC_TABLE_SIZE> codecTable{};
         for (const auto& [key, desc] : compressionHeader.DataSeriesEncodings) {
             codecStorage.push_back(CreateCodec(desc));
-            flatCodecs.emplace_back(key, codecStorage.back().get());
+            if (const std::optional<std::size_t> index{CodecTableIndex(key)}) {
+                codecTable[*index] = codecStorage.back().get();
+            }
         }
-        std::ranges::sort(flatCodecs, {}, &std::pair<CramDataSeries, CramCodec*>::first);
 
         const auto tagDictionary =
             ParseTagDictionary(compressionHeader.PreservationMap.TagIdsDictionary);
@@ -1114,7 +1171,7 @@ struct CramReader::Impl
             DecodeRecordContext decodeCtx{
                 .CoreReader = coreReader,
                 .ExtStore = extStore,
-                .Codecs = flatCodecs,
+                .CodecTable = codecTable,
                 .TagCodecs = flatTagCodecs,
                 .TagDictionary = tagDictionary,
                 .SliceHeader = sliceHeader,
@@ -1590,10 +1647,8 @@ struct CramReader::Impl
             // Unmapped read
             sequence.resize(readLength);
             if (auto* baCodec = LookupCodec(ctx, CramDataSeries::BA)) {
-                for (std::int32_t bi = 0; bi < readLength; ++bi) {
-                    sequence[bi] = static_cast<char>(static_cast<std::uint8_t>(
-                        baCodec->DecodeByte(ctx.CoreReader, ctx.ExtStore)));
-                }
+                baCodec->DecodeBytesInto(std::as_writable_bytes(std::span{sequence}),
+                                         ctx.CoreReader, ctx.ExtStore);
             }
 
             // QS quality scores

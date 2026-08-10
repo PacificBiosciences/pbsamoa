@@ -4,6 +4,7 @@
 // Internal Cram helpers shared between CramReader.cpp and CramWriter.cpp.
 
 #include <atomic>
+#include <utility>
 
 #include <cstdint>
 

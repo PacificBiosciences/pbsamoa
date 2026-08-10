@@ -2,6 +2,7 @@
 
 #include "BinaryUtils.hpp"
 #include "LibdeflateUtils.hpp"
+#include "ParallelUtils.hpp"
 #include "WriterUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
@@ -81,6 +82,10 @@ constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U + 256U};
 constexpr std::size_t OUTPUT_QUEUE_CAPACITY{4096};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t BLOCKS_PER_BATCH{32};
+
+// Number of spin iterations the consumer thread runs against a full output
+// queue before it yields the processor.
+constexpr std::uint32_t SPINS_BEFORE_YIELD{1024};
 
 // Verify a freshly decompressed BGZF block against its expected CRC32 (RFC1952 trailer,
 // stored 8 bytes before the block end). libdeflate_deflate_decompress decodes raw DEFLATE
@@ -305,25 +310,27 @@ struct ScopedTimer
 };
 
 /// \brief Always-on atomic counters for BGZF reader pipeline introspection.
+///
+/// Separate writer groups avoid cross-thread false sharing.
 struct PipelineCounters
 {
     // IO stage
-    std::atomic<std::uint64_t> bytesRead{0};
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> bytesRead{0};
     std::atomic<std::uint64_t> blocksRead{0};
-    std::atomic<std::uint64_t> bytesDecompressed{0};
     std::atomic<std::uint64_t> ioReadNs{0};
     std::atomic<std::uint64_t> ioStalls{0};
 
     // Decompression workers (summed across all workers)
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> bytesDecompressed{0};
     std::atomic<std::uint64_t> decompressNs{0};
 
     // Consumer thread
-    std::atomic<std::uint64_t> recordsProduced{0};
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> recordsProduced{0};
     std::atomic<std::uint64_t> consumerStalls{0};
     std::atomic<std::uint64_t> recordParseNs{0};
 
     // Reader (caller thread)
-    std::atomic<std::uint64_t> recordsConsumed{0};
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> recordsConsumed{0};
     std::atomic<std::uint64_t> readerStalls{0};
 };
 
@@ -359,11 +366,26 @@ void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
             std::data(accumulator) + pos + RECORD_BLOCK_SIZE_FIELD, blockSize}};
 
         // Push to SPSC — spin while queue is full (reader drains on another core).
+        bool notifiedWhileFull{false};
+        std::uint32_t spins{0};
         while (!outputQueue.try_push(std::move(view))) {
             if (stopToken.stop_requested()) {
                 return;
             }
+            // The reader thread can be asleep on readyCv because the queue was
+            // empty earlier. The end-of-batch call to NotifyReader() below cannot
+            // run until this push succeeds. Without a notification here, the
+            // consumer thread waits for the reader to drain the queue, and the
+            // reader waits for a notification that never comes. Both threads then
+            // stall forever.
+            if (!notifiedWhileFull) {
+                NotifyReader(readyMutex, readyCv);
+                notifiedWhileFull = true;
+            }
             counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
+            if (++spins >= SPINS_BEFORE_YIELD) {
+                std::this_thread::yield();
+            }
         }
 
         counters.recordsProduced.fetch_add(1, std::memory_order_relaxed);

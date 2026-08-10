@@ -6,10 +6,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
 #include <vector>
 
 #include <cstddef>
@@ -174,6 +177,16 @@ TEST(RawRecord, ConstructFromSpan)
     EXPECT_FALSE(view.RawData().empty());
 }
 
+TEST(RawRecordView, BorrowsData)
+{
+    std::vector<std::byte> data{MakeTestRecordBytes()};
+    const RawRecordView view{std::span<const std::byte>{data}};
+
+    EXPECT_EQ(std::data(view.RawData()), std::data(data));
+    WriteI32LE(std::data(data), 42);
+    EXPECT_EQ(view.RefId(), 42);
+}
+
 TEST(RawRecord, OwnsData)
 {
     std::vector<std::byte> data{MakeTestRecordBytes()};
@@ -226,6 +239,56 @@ TEST(RawRecord, MoveSemantics)
     const RawRecord view2{std::move(view1)};
     EXPECT_EQ(view2.Pos(), 6);
     EXPECT_EQ(view2.Name(), "r001");
+    EXPECT_TRUE(view1.RawData().empty());
+
+    const RawRecord movedFromCopy{view1};
+    EXPECT_TRUE(movedFromCopy.RawData().empty());
+}
+
+template <typename T>
+concept HasRecordView = requires(T&& record) { static_cast<T&&>(record).View(); };
+
+static_assert(!std::is_convertible_v<RawRecord, RawRecordView>);
+static_assert(HasRecordView<const RawRecord&>);
+static_assert(!HasRecordView<RawRecord>);
+// Absolute byte counts are not portable: a debug STL (-D_GLIBCXX_DEBUG) grows std::vector.
+// The invariant that matters is that ownership costs only the buffer pointer.
+static_assert(sizeof(RawRecord) <= sizeof(RawRecordView) + sizeof(void*));
+
+TEST(RawRecord, ExplicitViewBorrowsOwnedData)
+{
+    const std::vector<std::byte> data{MakeTestRecordBytes()};
+    const RawRecord record{std::span<const std::byte>{data}};
+    const RawRecordView& view{record.View()};
+
+    EXPECT_EQ(std::data(view.RawData()), std::data(record.RawData()));
+    EXPECT_EQ(view.Name(), "r001");
+}
+
+TEST(RawRecord, CopyAndMoveAssignmentRetainOwnership)
+{
+    std::vector<std::byte> data{MakeTestRecordBytes()};
+    const RawRecord source{std::span<const std::byte>{data}};
+    const RawRecord copied{source};
+    RawRecord copyAssigned{std::span<const std::byte>{data}};
+    copyAssigned = source;
+    RawRecord moveAssigned{std::span<const std::byte>{data}};
+    moveAssigned = RawRecord{std::span<const std::byte>{data}};
+
+    std::ranges::fill(data, std::byte{0xFF});
+
+    // The fixture has 5 CIGAR operations and checks that CIGAR data survives every copy
+    // and move form.
+    const std::array<const RawRecord*, 4> records{&source, &copied, &copyAssigned, &moveAssigned};
+    for (const RawRecord* record : records) {
+        EXPECT_EQ(record->RefId(), 0);
+        EXPECT_EQ(record->Pos(), 6);
+        EXPECT_EQ(record->Name(), "r001");
+        ASSERT_EQ(std::size(record->CigarOps()), 5U);
+        EXPECT_TRUE(std::ranges::equal(record->CigarOps(), source.CigarOps()));
+    }
+    EXPECT_NE(std::data(source.RawData()), std::data(copied.RawData()));
+    EXPECT_NE(std::data(source.RawData()), std::data(copyAssigned.RawData()));
 }
 
 TEST(RawRecord, TooSmallForFixedFieldsThrows)
@@ -284,6 +347,65 @@ TEST(RawRecord, FixedFieldsAndCigarDecodeFromLittleEndianBytes)
     ASSERT_EQ(std::size(cigar), 2U);
     EXPECT_EQ(cigar[0].RawValue(), 0x01020320U);
     EXPECT_EQ(cigar[1].RawValue(), 0x04050671U);
+}
+
+namespace {
+
+/// Build a record whose CIGAR string has \p opCount all-M operations that total
+/// SEQ_LENGTH query bases. All-M operations avoid the two-operation kSmN placeholder
+/// shape, so no operation count triggers CG expansion.
+std::vector<std::byte> MakeRecordWithCigarOpCount(std::uint16_t opCount)
+{
+    constexpr std::uint32_t SEQ_LENGTH{16};
+
+    std::string cigar{};
+    for (std::uint16_t i{0}; i < opCount; ++i) {
+        const std::uint32_t length{((i + 1U) == opCount) ? (SEQ_LENGTH - i) : 1U};
+        cigar += std::to_string(length) + "M";
+    }
+
+    BamRecord rec;
+    rec.Name("r")
+        .Flag(0)
+        .RefId(0)
+        .Pos(0)
+        .MapQ(30)
+        .Sequence(std::string(SEQ_LENGTH, 'A'))
+        .Qualities(std::vector<std::uint8_t>(SEQ_LENGTH, 30));
+    if (opCount > 0) {
+        rec.Cigar(*ParseCigar(cigar));
+    }
+    return rec.SerializeToBam();
+}
+
+}  // namespace
+
+TEST(RawRecord, CigarOpsAgreeAcrossCountsAndMoves)
+{
+    for (std::uint16_t opCount{0}; opCount <= 8U; ++opCount) {
+        const std::vector<std::byte> data{MakeRecordWithCigarOpCount(opCount)};
+        RawRecord view{std::span<const std::byte>{data}};
+
+        ASSERT_EQ(view.CigarOpCount(), opCount) << "opCount " << opCount;
+        ASSERT_EQ(std::size(view.CigarOps()), opCount) << "opCount " << opCount;
+
+        // Reconstruct the expected operations from the raw bytes rather than from the
+        // same accessor under test.
+        for (std::uint16_t i{0}; i < opCount; ++i) {
+            const std::uint32_t expectedLength{((i + 1U) == opCount) ? (16U - i) : 1U};
+            EXPECT_EQ(view.CigarOps()[i].Type(), CigarOpType::M) << "opCount " << opCount;
+            EXPECT_EQ(view.CigarOps()[i].Length(), expectedLength)
+                << "opCount " << opCount << " op " << i;
+        }
+
+        const RawRecord moved{std::move(view)};
+        ASSERT_EQ(std::size(moved.CigarOps()), opCount) << "opCount " << opCount;
+        for (std::uint16_t i{0}; i < opCount; ++i) {
+            const std::uint32_t expectedLength{((i + 1U) == opCount) ? (16U - i) : 1U};
+            EXPECT_EQ(moved.CigarOps()[i].Length(), expectedLength)
+                << "after move, opCount " << opCount << " op " << i;
+        }
+    }
 }
 
 TEST(RawRecord, LongCigarPlaceholderExpandsFromCgTag)

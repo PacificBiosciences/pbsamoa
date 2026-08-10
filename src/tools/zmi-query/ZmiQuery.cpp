@@ -75,7 +75,7 @@ int Runner(const CLI_v2::Results& results)
     for (const std::int64_t offset : offsets) {
         reader.Seek(VirtualOffset(offset));
         if (const auto view{reader.ReadRecord()}; view) {
-            WriteViewAsSam(header, *view);
+            WriteViewAsSam(header, view->View());
         }
     }
 

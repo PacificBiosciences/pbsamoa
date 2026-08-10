@@ -583,5 +583,63 @@ TEST_F(ZmiBamWriterTest, WriteRawRecord)
     std::filesystem::remove(std::filesystem::path{tmpBam2.string() + ".zmi"});
 }
 
+// Write(const RawRecordView&) is the copy-free batch path. The view borrows bytes that
+// the batch owns, so the writer must consume the bytes before the batch object is
+// destroyed. Only ReadBatch() and View() reach this overload, because Records() yields
+// const RawRecord&, which selects the owning overload instead. This test also checks
+// the .zmi file, because the ZMW identity must come from the borrowed bytes, not from
+// a copy.
+TEST_F(ZmiBamWriterTest, WriteRawRecordView)
+{
+    const SamHeader header = MakeMinimalHeader();
+
+    {
+        ZmiBamWriter writer{tmpBamPath_, header};
+        for (const std::int32_t zmw : {42, 43}) {
+            BamRecord rec;
+            rec.Name("movie/" + std::to_string(zmw) + "/0_100")
+                .Flag(0)
+                .RefId(0)
+                .Pos(0)
+                .MapQ(30)
+                .Cigar({CigarOp{CigarOpType::M, 4}})
+                .Sequence("ACGT")
+                .Qualities({30, 30, 30, 30});
+            writer.Write(rec);
+        }
+    }
+
+    const std::filesystem::path tmpBam2{tmpBamPath_.string() + ".viewcopy.bam"};
+    {
+        BamRawReader reader{tmpBamPath_};
+        ZmiBamWriter writer{tmpBam2, reader.Header()};
+        std::size_t written{0};
+        while (const std::optional<RawRecordBatch> batch{reader.ReadBatch()}) {
+            for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
+                writer.Write(batch->View(i));
+                ++written;
+            }
+        }
+        ASSERT_EQ(written, 2u);
+    }
+
+    BamRawReader reader2{tmpBam2};
+    const auto first{reader2.ReadRecord()};
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->Name(), "movie/42/0_100");
+    const auto second{reader2.ReadRecord()};
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->Name(), "movie/43/0_100");
+    EXPECT_FALSE(reader2.ReadRecord());
+
+    const ZmwIndex index{ZmwIndex::FromZmi(std::filesystem::path{tmpBam2.string() + ".zmi"})};
+    EXPECT_EQ(index.NumRecords(), 2u);
+    EXPECT_EQ(std::size(index.Find(ZmwIdentity{.rgId = 0, .zmw = 42})), 1u);
+    EXPECT_EQ(std::size(index.Find(ZmwIdentity{.rgId = 0, .zmw = 43})), 1u);
+
+    std::filesystem::remove(tmpBam2);
+    std::filesystem::remove(std::filesystem::path{tmpBam2.string() + ".zmi"});
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

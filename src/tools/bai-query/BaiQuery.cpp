@@ -90,7 +90,7 @@ int Runner(const CLI_v2::Results& results)
     }
 
     for (const auto& view : reader.Query(index, refId, region->Beg, region->End)) {
-        WriteViewAsSam(header, view);
+        WriteViewAsSam(header, view.View());
     }
 
     return EXIT_SUCCESS;

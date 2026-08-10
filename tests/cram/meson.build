@@ -5,6 +5,7 @@ if cram_script.found()
         'bai_query',
         'bam_read_dump',
         'bam_read_header_only',
+        'bam_read_parallel_deep_queue',
         'bam_write_parity',
         'bam_write_zmi',
         'chunk_basic',
@@ -19,6 +20,7 @@ if cram_script.found()
         'cram_read_methods',
         'cram_read_reference',
         'cram_read_roundtrip',
+        'cram_read_zero_length',
         'cram_write_bamrecord',
         'cram_write_crai',
         'cram_write_fqz_slices_1',
@@ -38,6 +40,7 @@ if cram_script.found()
         'merge_parallel',
         'merge_passthrough',
         'merge_queryname',
+        'pg_id_unique',
         'pipeline_copy',
         'pipeline_dump',
         'roundtrip_bam',
@@ -77,7 +80,7 @@ if cram_script.found()
             ],
             depends: [pbsamoa],
             env: cram_env,
-            timeout: 36000,
+            timeout: 600,
         )
     endforeach
 endif

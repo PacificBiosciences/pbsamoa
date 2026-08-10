@@ -965,6 +965,18 @@ char* AppendSignedDecimal(char* dest, std::int32_t value)
     return AppendUnsignedDecimal(dest, static_cast<std::uint32_t>(value));
 }
 
+/// \brief Returns the worst-case number of output bytes for one B-array
+/// element of type \p T.
+///
+/// The count includes the leading comma, an optional sign, and
+/// digits10 + 1 decimal digits. If the resize_and_overwrite buffer is
+/// smaller than this value, the write causes a heap overflow. This constant
+/// derives the buffer size from the type \p T, so the code does not repeat a
+/// literal byte count for each element width.
+template <typename T>
+constexpr std::size_t B_ARRAY_ELEM_MAX_CHARS{1U + std::numeric_limits<T>::digits10 + 1U +
+                                             (std::is_signed_v<T> ? 1U : 0U)};
+
 struct UInt8ArrayOverwriteWriter
 {
     const std::byte* data;
@@ -1012,7 +1024,7 @@ std::size_t Int8ArrayOverwriteWriter::operator()(char* buf, std::size_t /*bufSiz
 void SerializeBArrayUInt8(const std::byte* data, std::uint32_t count, std::string& out)
 {
     const std::size_t startPos{std::size(out)};
-    const std::size_t maxChars{count * 4U};
+    const std::size_t maxChars{std::size_t{count} * B_ARRAY_ELEM_MAX_CHARS<std::uint8_t>};
 
     out.resize_and_overwrite(startPos + maxChars, UInt8ArrayOverwriteWriter{data, count, startPos});
 }
@@ -1022,33 +1034,46 @@ void SerializeBArrayUInt8(const std::byte* data, std::uint32_t count, std::strin
 void SerializeBArrayInt8(const std::byte* data, std::uint32_t count, std::string& out)
 {
     const std::size_t startPos{std::size(out)};
-    const std::size_t maxChars{count * 5U};
+    const std::size_t maxChars{std::size_t{count} * B_ARRAY_ELEM_MAX_CHARS<std::int8_t>};
 
     out.resize_and_overwrite(startPos + maxChars, Int8ArrayOverwriteWriter{data, count, startPos});
 }
 
-/// \brief Serialize B:S/s/I/i array elements using to_chars with correct type
-/// width.
+template <typename T>
+struct IntArrayOverwriteWriter
+{
+    const std::byte* data;
+    std::uint32_t count;
+    std::size_t startPos;
+
+    std::size_t operator()(char* buf, std::size_t bufSize) const;
+};
+
+template <typename T>
+std::size_t IntArrayOverwriteWriter<T>::operator()(char* buf, std::size_t bufSize) const
+{
+    char* dest{buf + startPos};
+    char* const end{buf + bufSize};
+    for (std::uint32_t i{0}; i < count; ++i) {
+        *dest = ',';
+        ++dest;
+        // This call cannot fail because the caller sizes the buffer at
+        // B_ARRAY_ELEM_MAX_CHARS characters per element.
+        dest = std::to_chars(dest, end, ReadLE<T>(data + (i * sizeof(T)))).ptr;
+    }
+    return static_cast<std::size_t>(dest - buf);
+}
+
+/// \brief Serializes a B:s/S/i/I array with resize_and_overwrite, which
+/// avoids the zero-fill of an ordinary resize call.
 template <typename T>
 void SerializeBArrayInt(const std::byte* data, std::uint32_t count, std::string& out)
 {
-    std::array<char, 16> buf{};
-    for (std::uint32_t i{0}; i < count; ++i) {
-        out += ',';
-        T v{};
-        if constexpr (std::is_same_v<T, std::int16_t>) {
-            v = ReadI16LE(data + i * sizeof(T));
-        } else if constexpr (std::is_same_v<T, std::uint16_t>) {
-            v = ReadU16LE(data + i * sizeof(T));
-        } else if constexpr (std::is_same_v<T, std::int32_t>) {
-            v = ReadI32LE(data + i * sizeof(T));
-        } else if constexpr (std::is_same_v<T, std::uint32_t>) {
-            v = ReadU32LE(data + i * sizeof(T));
-        }
-        const std::to_chars_result toCharsResult{
-            std::to_chars(std::data(buf), std::data(buf) + std::size(buf), v)};
-        out.append(std::data(buf), toCharsResult.ptr);
-    }
+    const std::size_t startPos{std::size(out)};
+    const std::size_t maxChars{std::size_t{count} * B_ARRAY_ELEM_MAX_CHARS<T>};
+
+    out.resize_and_overwrite(startPos + maxChars,
+                             IntArrayOverwriteWriter<T>{data, count, startPos});
 }
 
 void SerializeBArrayFloat(const std::byte* data, std::uint32_t count, std::string& out)
@@ -1079,9 +1104,7 @@ std::size_t AppendNulTerminatedTextTag(std::string& out, char type, std::span<co
 
     out += type;
     out += ':';
-    for (const std::byte value : payload) {
-        out += static_cast<char>(value);
-    }
+    out.append(reinterpret_cast<const char*>(std::data(payload)), std::size(payload));
     return offset + 1;
 }
 

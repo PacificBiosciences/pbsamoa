@@ -111,8 +111,8 @@ Key relationships:
   group's `ZmwIdentity` with `rgId` always set to 0.
 
 - **BamWriter** owns a `BgzfWriter` for compression and a `SamHeader` for
-  the output file header. Accepts `BamRecord`, `RawRecord`, raw
-  `span<const byte>`, and `RawRecordBatch` (via `WriteBatch()`).
+  the output file header. Accepts `BamRecord`, `RawRecordView`, `RawRecord`,
+  raw `span<const byte>`, and `RawRecordBatch` (via `WriteBatch()`).
 
 - **CramReader** owns CRAM container/slice decode state and produces owned
   `BamRecord` objects. Container payload parsing is centralized through
@@ -167,7 +167,7 @@ Key relationships:
   `samtools 1.23 merge -@20` (~3.7x faster), and `--threads 32 --memory 5G`
   ran in 1m03s (~8.0x faster than that samtools run).
 
-- **RawRecord** owns a copy of raw BAM bytes. `CigarOp` values are eagerly
+- **RawRecordView** borrows raw BAM bytes. **RawRecord** owns a copy. `CigarOp` values are eagerly
   copied into an aligned buffer on construction (BAM does not guarantee
   alignment). `SequenceView` and `TagMap` are decoded on demand. All decode
   logic is inline in the header for maximum performance.
@@ -206,15 +206,17 @@ is intentional per the BAM spec.
 
 ## Record
 
-Two representations for alignment records, chosen by use case:
+Three representations for alignment records, chosen by use case:
 
-### RawRecord — fast, read-only
+### RawRecordView and RawRecord — fast, read-only
 
-An owning type that copies raw BAM bytes into a `vector<byte>`. CIGAR ops
-are eagerly copied into an aligned buffer on construction (BAM does not
-guarantee 4-byte alignment). Other accessors decode fields on demand
-directly from the binary layout. All decode logic is inline in the header
-for maximum inlining.
+`RawRecordView` borrows raw BAM bytes. `RawRecord` owns a copy for
+single-record APIs and for code that crosses threads. CIGAR ops are eagerly copied into
+aligned storage on construction (BAM does not guarantee 4-byte alignment).
+Other accessors decode fields on demand directly from the binary layout.
+All decode logic is inline in the header for maximum inlining.
+`RawRecord::View()` makes an owner's borrowed lifetime explicit. You can call it
+only on an lvalue `RawRecord`, so a temporary `RawRecord` cannot silently produce a dangling view.
 
 Use raw records when you're reading records and don't need to modify them —
 this is the common case.
@@ -233,26 +235,27 @@ Serialization to BAM binary happens once, in the writer, via
 
 ### Conversion between views and records
 
-`RawRecord::ToOwned()` produces a `BamRecord`. Optional tag filters
+`RawRecordView::ToOwned()` and `RawRecord::ToOwned()` produce a `BamRecord`. Optional tag filters
 (`DropTags`, `KeepTags`) let you skip large tags during conversion. This
 matters for PacBio BAM files where kinetics arrays can be megabytes per
 record.
 
-Both `BamWriter` and `SamWriter` accept either type (plus `WriteBatch()`
-for `RawRecordBatch`). `BamWriter` also accepts raw `span<const byte>`.
-Writing a view to `BamWriter` is zero-copy; writing a record serializes it.
+`BamWriter` and `SamWriter` accept `BamRecord`, `RawRecordView`, and `RawRecord`
+(plus `WriteBatch()` for `RawRecordBatch`). `BamWriter` also accepts raw
+`span<const byte>`. `BamWriter` does not serialize a raw view that you pass to it.
+It serializes a `BamRecord` that you pass to it.
 
 ### RawRecordBatch
 
-A batch owns the decompressed buffer and provides indexed access to raw
-record spans via `RecordData(i)`. Batches are sized by memory budget
+A batch owns the decompressed buffer and provides indexed, non-owning decoders
+via `View(i)` plus raw spans via `RecordData(i)`. Batches are sized by memory budget
 (`ByteLimit`), not record count. The default budget is 256 MiB.
 
 ```cpp
 using namespace PacBio::Samoa::Literals;
 while (auto batch = reader.ReadBatch(128_MiB)) {
     for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
-        const RawRecord view{batch->RecordData(i)};
+        const RawRecordView view{batch->View(i)};
     }
 }
 ```
@@ -280,13 +283,14 @@ Round-trips between SAM text and BAM binary.
 
 ### Readers
 
-**BamRawReader** provides zero-copy view-based iteration:
+**BamRawReader** provides decode-on-demand iteration:
 
 1. **Range** — `for (const auto& view : reader.Records())` — wraps batch
-   reading internally, simplest to use.
+   reading internally, simplest to use. Yields owning `RawRecord` references.
 
 2. **Batch** — `reader.ReadBatch(limit)` — returns `RawRecordBatch` for
-   explicit parallel processing control.
+   explicit parallel processing control. `batch.View(i)` decodes a record
+   and does not copy its bytes.
 
 Region queries via `reader.Query(index, refId, beg, end)` return a filtered
 range using a BAI index.
@@ -302,12 +306,12 @@ views, since there's no persistent binary buffer to view into).
 ### Writers
 
 **BamWriter** writes BGZF-compressed BAM. Accepts `BamRecord` (serializes),
-`RawRecord`, raw `span<const byte>`, and `RawRecordBatch` (via
+`RawRecordView`, `RawRecord`, raw `span<const byte>`, and `RawRecordBatch` (via
 `WriteBatch()`). An optional `IndexCallback` is invoked after each record
 write for downstream index building.
 
-**SamWriter** writes text SAM. Accepts `BamRecord`, `RawRecord`, and
-`RawRecordBatch` (via `WriteBatch()`).
+**SamWriter** writes text SAM. Accepts `BamRecord`, `RawRecordView`,
+`RawRecord`, and `RawRecordBatch` (via `WriteBatch()`).
 
 ### Indexing
 
@@ -431,15 +435,15 @@ A typical read pipeline:
 file on disk
   → BgzfReader (decompress BGZF blocks, optionally parallel)
     → BamRawReader (parse record boundaries from decompressed bytes)
-      → RawRecordBatch (owns buffer, provides RecordData(i) spans)
-        → RawRecord (eager CIGAR copy, other fields decode-on-demand)
+      → RawRecordBatch (owns buffer, provides View(i) decoders and RecordData(i) spans)
+        → RawRecordView (aligned CIGAR copy, other fields decode-on-demand)
           → BamRecord (optional: ToOwned() for mutation)
 ```
 
 A typical write pipeline:
 
 ```
-BamRecord or RawRecord or raw span<const byte>
+BamRecord or RawRecordView or RawRecord or raw span<const byte>
   → BamWriter (serialize record if needed, accumulate into BGZF blocks)
     → BgzfWriter (compress blocks with libdeflate)
       → file on disk

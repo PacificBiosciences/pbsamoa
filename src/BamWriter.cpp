@@ -136,6 +136,8 @@ void BamWriter::Write(std::span<const std::byte> rawData)
     WriteRawRecord(impl_->bgzf, impl_->recordsWritten, rawData, PendingCallback{});
 }
 
+void BamWriter::Write(const RawRecordView& byteView) { Write(byteView.RawData()); }
+
 void BamWriter::Write(const RawRecord& byteView) { Write(byteView.RawData()); }
 
 void BamWriter::WriteBatch(const RawRecordBatch& batch)

@@ -397,7 +397,6 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
     // as a fatal parse error (header.c:236-240). Track seen names to enforce the same.
     std::unordered_set<std::string> seenRefNames;
     std::unordered_set<std::string> seenRgIds;
-    std::unordered_set<std::string> seenPgIds;
     bool seenHd{false};
     const std::vector<std::string_view> lines{Split(text, '\n')};
     for (const std::string_view line : lines) {
@@ -460,15 +459,15 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
             continue;
         }
         if (recordType == "@PG") {
-            // SAMv1 §1.3: each @PG ID must be unique.
+            // SAMv1 §1.3 requires unique @PG IDs, but a duplicate does not stop a read.
+            // @PG IDs are opaque; only PP refers to them, and pbsamoa never resolves PP.
+            // Other tools and pbsamoa builds before the UniqueProgramId fix emit
+            // duplicates, so keep every line instead of rejecting the whole file. htslib
+            // keeps them too (header.c). pbsamoa's own writers keep new IDs unique.
             auto parsed{ParseTaggedRecord<ProgramRecord>(fields, "ID",
                                                          "Missing required ID field in @PG line")};
             if (!parsed) {
                 return std::unexpected{std::move(parsed.error())};
-            }
-            if (!seenPgIds.insert(std::string{parsed->Id()}).second) {
-                return std::unexpected{"Duplicate @PG ID \"" + std::string{parsed->Id()} +
-                                       "\" in sam header"};
             }
             header.programRecords_.push_back(std::move(*parsed));
             continue;

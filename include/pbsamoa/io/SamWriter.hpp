@@ -19,7 +19,7 @@ struct SamWriterConfig
 
 /// \brief Writes SAM text files.
 ///
-/// Accepts both owned BamRecord and RawRecord. Fields are formatted
+/// Accepts BamRecord, RawRecordView, and RawRecord. Fields are formatted
 /// per SAM spec (1-based POS, "=" for RNEXT when same as RNAME, etc.).
 class SamWriter
 {
@@ -38,7 +38,10 @@ public:
     /// \brief Write an owned record.
     void Write(const BamRecord& record);
 
-    /// \brief Write an owning byte view.
+    /// \brief Write a non-owning raw record view.
+    void Write(const RawRecordView& view);
+
+    /// \brief Write an owning raw record.
     void Write(const RawRecord& view);
 
     /// \brief Write a batch of records.

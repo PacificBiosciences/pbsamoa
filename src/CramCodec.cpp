@@ -333,6 +333,14 @@ std::span<const std::byte> CramCodec::DecodeByteArrayView(CramBitReader& coreRea
     return viewScratch_;
 }
 
+void CramCodec::DecodeBytesInto(std::span<std::byte> dest, CramBitReader& coreReader,
+                                CramExternalBlockStore& extBlocks)
+{
+    for (std::byte& value : dest) {
+        value = DecodeByte(coreReader, extBlocks);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NullCodec
 // ---------------------------------------------------------------------------
@@ -390,6 +398,25 @@ std::byte ExternalCodec::DecodeByte(CramBitReader& /*coreReader*/,
                                     CramExternalBlockStore& extBlocks)
 {
     return extBlocks.ReadByte(blockContentId_);
+}
+
+void ExternalCodec::DecodeBytesInto(std::span<std::byte> dest, CramBitReader& /*coreReader*/,
+                                    CramExternalBlockStore& extBlocks)
+{
+    // A zero-length read must not touch the block. Samtools omits the external block
+    // when every record in a slice has SEQ=* and QUAL=*. ReadBytesView resolves the
+    // block before it checks the count. The previous per-byte path made zero calls for
+    // an empty run. The early return preserves that behavior.
+    if (std::empty(dest)) {
+        return;
+    }
+
+    // DecodeBytesInto makes one bounds check and one block lookup for the whole run,
+    // not one for each byte. ReadBytesView throws the same past-end error that the
+    // per-byte path would throw. ReadBytesView throws before it reads any bytes, not
+    // partway through the run.
+    std::ranges::copy(extBlocks.ReadBytesView(blockContentId_, std::size(dest)),
+                      std::ranges::begin(dest));
 }
 
 std::vector<std::byte> ExternalCodec::DecodeByteArray(CramBitReader& /*coreReader*/,

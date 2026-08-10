@@ -1,5 +1,6 @@
 #include <pbsamoa/io/BamRecordReader.hpp>
 
+#include "ParallelUtils.hpp"
 #include "ReaderUtils.hpp"
 
 #include <pbsamoa/core/BamRecord.hpp>
@@ -11,6 +12,7 @@
 #include <pbcopper/parallel/ThreadPool.h>
 #include <rigtorp/SPSCQueue.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -40,7 +42,7 @@ using TagFilter = std::variant<std::monostate, DropTags, KeepTags>;
 
 struct DecodeVisitor
 {
-    const RawRecord& view;
+    const RawRecordView& view;
 
     BamRecord operator()(std::monostate) const { return view.ToOwned(); }
 
@@ -79,9 +81,20 @@ std::shared_ptr<DecodePool> CreateDecodePool(std::size_t decodeWorkers)
     });
 }
 
-BamRecord DecodeView(const RawRecord& view, const TagFilter& tagFilter)
+BamRecord DecodeView(const RawRecordView& view, const TagFilter& tagFilter)
 {
     return std::visit(DecodeVisitor{view}, tagFilter);
+}
+
+// Keep enough chunks available to distribute work across all workers.
+std::int32_t DecodeChunkSize(std::int32_t recordCount, std::size_t decodeWorkers)
+{
+    if (decodeWorkers == 0) {
+        return std::max(recordCount, 1);
+    }
+
+    return static_cast<std::int32_t>(
+        detail::ParallelChunkSize(static_cast<std::size_t>(recordCount), decodeWorkers));
 }
 
 struct DecodeBatchWorker
@@ -89,27 +102,42 @@ struct DecodeBatchWorker
     const RawRecordBatch* Batch;
     std::vector<BamRecord>* Owned;
     const TagFilter* TagFilterState;
+    std::int32_t RecordCount;
+    std::int32_t ChunkSize;
 
-    void operator()(std::int32_t i) const
+    void operator()(std::int32_t chunkIdx) const
     {
-        const RawRecord view{Batch->RecordData(i)};
-        (*Owned)[static_cast<std::size_t>(i)] = DecodeView(view, *TagFilterState);
+        const std::int32_t first{chunkIdx * ChunkSize};
+        const std::int32_t last{first + std::min(ChunkSize, RecordCount - first)};
+        for (std::int32_t i{first}; i < last; ++i) {
+            const RawRecordView view{Batch->View(static_cast<std::size_t>(i))};
+            (*Owned)[static_cast<std::size_t>(i)] = DecodeView(view, *TagFilterState);
+        }
     }
 };
 
 }  // namespace
 
 /// \brief Always-on atomic counters for decode pipeline introspection.
+///
+/// Each thread that writes to these counters gets its own cache line.
+/// The producer thread increments recordsProduced. The reader thread
+/// increments recordsConsumed once per record. Without separate lines,
+/// the two counters would share one line. Each record would then move
+/// that line between the two threads.
 struct DecodeCounters
 {
-    std::atomic<std::uint64_t> batchesDecoded{0};
+    // Producer thread
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> batchesDecoded{0};
     std::atomic<std::uint64_t> recordsDecoded{0};
     std::atomic<std::uint64_t> recordsProduced{0};
-    std::atomic<std::uint64_t> recordsConsumed{0};
     std::atomic<std::uint64_t> producerStalls{0};
-    std::atomic<std::uint64_t> consumerStalls{0};
     std::atomic<std::uint64_t> decodeNs{0};
     std::atomic<std::uint64_t> batchReadNs{0};
+
+    // Reader (caller thread)
+    alignas(detail::PIPELINE_CACHE_LINE_SIZE) std::atomic<std::uint64_t> recordsConsumed{0};
+    std::atomic<std::uint64_t> consumerStalls{0};
 };
 
 struct BamRecordReader::Impl
@@ -121,6 +149,7 @@ struct BamRecordReader::Impl
     rigtorp::SPSCQueue<QueueItem> queue_;
     TagFilter tagFilter_;
     ByteLimit batchBudget_;
+    std::size_t decodeWorkers_;
     bool eof_{false};
     bool parallelBgzf_;
     bool parallelDecode_;
@@ -140,6 +169,7 @@ struct BamRecordReader::Impl
         , queue_{config.OutputCapacity}
         , tagFilter_{config.TagFilter}
         , batchBudget_{config.BatchBudget}
+        , decodeWorkers_{config.DecodeWorkers}
         , parallelBgzf_{config.RawReaderConfig.BgzfWorkers > 0}
         , parallelDecode_{config.DecodeWorkers > 0}
     {
@@ -154,6 +184,7 @@ struct BamRecordReader::Impl
         , queue_{config.OutputCapacity}
         , tagFilter_{config.TagFilter}
         , batchBudget_{config.BatchBudget}
+        , decodeWorkers_{config.DecodeWorkers}
         , parallelBgzf_{config.RawReaderConfig.BgzfWorkers > 0}
         , parallelDecode_{config.DecodeWorkers > 0}
     {
@@ -236,8 +267,11 @@ struct BamRecordReader::Impl
                 std::vector<BamRecord> owned(n);
 
                 const auto decodeStart{std::chrono::steady_clock::now()};
-                const DecodeBatchWorker worker{std::addressof(*batch), &owned, &tagFilter_};
-                PacBio::Parallel::Dispatch(pool_, worker, n);
+                const std::int32_t chunkSize{DecodeChunkSize(n, decodeWorkers_)};
+                const std::int32_t chunkCount{(n / chunkSize) + ((n % chunkSize) != 0)};
+                const DecodeBatchWorker worker{std::addressof(*batch), &owned, &tagFilter_, n,
+                                               chunkSize};
+                PacBio::Parallel::Dispatch(pool_, worker, chunkCount);
                 counters_.decodeNs.fetch_add(
                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                    std::chrono::steady_clock::now() - decodeStart)
@@ -502,7 +536,7 @@ std::optional<BamRecord> BamRecordReader::QueryRange::ReadRecord()
     QueryRange::Impl::Source* source{impl_->ready_.top()};
     impl_->ready_.pop();
 
-    BamRecord record{DecodeView(*source->current, impl_->tagFilter_)};
+    BamRecord record{DecodeView(source->current->View(), impl_->tagFilter_)};
     ++(*source->iter);
     if ((*source->iter) != (*source->end)) {
         source->current.emplace(**source->iter);

@@ -91,16 +91,21 @@ std::vector<std::byte> PackSequence(std::string_view seq)
 
 std::string UnpackSequence(std::span<const std::byte> packed, std::uint32_t seqLength)
 {
-    std::string result(seqLength, '\0');
-    DecodePackedInto(packed, seqLength, std::data(result));
+    std::string result;
+    result.resize_and_overwrite(seqLength, [&](char* buf, std::size_t size) {
+        DecodePackedInto(packed, seqLength, buf);
+        return size;
+    });
     return result;
 }
 
 void WriteSequenceTo(std::span<const std::byte> packed, std::uint32_t seqLength, std::string& out)
 {
     const std::size_t startPos{std::size(out)};
-    out.resize(startPos + seqLength);
-    DecodePackedInto(packed, seqLength, std::data(out) + startPos);
+    out.resize_and_overwrite(startPos + seqLength, [&](char* buf, std::size_t size) {
+        DecodePackedInto(packed, seqLength, buf + startPos);
+        return size;
+    });
 }
 
 SequenceView::SequenceView() = default;

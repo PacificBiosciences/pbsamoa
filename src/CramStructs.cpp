@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace PacBio {
 namespace Samoa {
@@ -783,13 +784,23 @@ CramCompressionHeader ParseCompressionHeader(std::span<const std::byte> data)
         throw std::runtime_error("compression header: negative data series count");
     }
 
+    // The file supplies dsCount. A per-entry scan of DataSeriesEncodings would cost
+    // time proportional to dsCount squared. Instead, the parser tracks the 16-bit key
+    // space directly and rejects duplicate keys. This check limits the key set to
+    // 65536 entries. A crafted header of about 200 KB can reach that limit.
+    std::vector<bool> seenKeys(0x10000);
     for (std::int32_t i = 0; i < dsCount; ++i) {
         if (pos + 2 > dsMapEnd) {
             throw std::runtime_error("compression header: truncated data series map");
         }
         const auto c0 = static_cast<std::uint8_t>(ReadByteAndAdvance(data, pos));
         const auto c1 = static_cast<std::uint8_t>(ReadByteAndAdvance(data, pos));
-        const auto key = static_cast<CramDataSeries>((c0 << 8) | c1);
+        const auto keyBits = static_cast<std::uint16_t>((c0 << 8) | c1);
+        const auto key = static_cast<CramDataSeries>(keyBits);
+        if (seenKeys[keyBits]) {
+            throw std::runtime_error("compression header: duplicate data series encoding");
+        }
+        seenKeys[keyBits] = true;
 
         auto desc = ParseEncodingDescriptor(data, pos, dsMapEnd);
         header.DataSeriesEncodings.emplace_back(key, std::move(desc));
