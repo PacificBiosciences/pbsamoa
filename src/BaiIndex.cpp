@@ -717,7 +717,17 @@ struct BaiStreamBuilder::Impl
                 const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(r.pos, endPos)};
                 const std::uint16_t bin{Reg2Bin(r.pos, nonEmptyEnd)};
 
-                refIdx.bins[bin].push_back(Chunk{recordVo, recordEndVo});
+                // Coalesce into the bin's last chunk instead of appending one chunk per
+                // record: records arrive in nondecreasing virtual offset, so this is the
+                // same merge Finalize() performs, done incrementally. Appending first
+                // would hold 16 bytes per record until Finalize (GBs on a large BAM) to
+                // produce an index that collapses to a few chunks per bin.
+                std::vector<Chunk>& binChunks{refIdx.bins[bin]};
+                if (!binChunks.empty() && (recordVo <= binChunks.back().End)) {
+                    binChunks.back().End = std::max(binChunks.back().End, recordEndVo);
+                } else {
+                    binChunks.push_back(Chunk{recordVo, recordEndVo});
+                }
 
                 const std::int32_t begWindow = r.pos / BAI_LINEAR_INDEX_WINDOW;
                 const std::int32_t endWindow{

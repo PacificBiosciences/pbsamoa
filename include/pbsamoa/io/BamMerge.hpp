@@ -50,9 +50,13 @@ struct MergeConfig
     /// sorted-merge path (concat ignores it). A single cap, independent of input
     /// count; each source still keeps its head record available so a budget below
     /// one record cannot stall the merge. Default 768 MiB (matches sort's --memory).
-    /// Peak resident RAM also includes the per-input current batch the consumer
-    /// holds outside this budget (~= NumInputs x BatchBytes) plus the output
-    /// writer's queue (WriterQueueCapacity blocks); size those knobs to bound them.
+    ///
+    /// This is not a cap on the process: once producers outrun the consumer the
+    /// budget stays pinned at its cap and peak resident RAM measures ~1.4x it. The
+    /// budget meters record payload only; buffer capacity, the per-input current
+    /// batch the consumer holds outside the budget (~= NumInputs x BatchBytes), the
+    /// output writer's queue (WriterQueueCapacity blocks), and the BaiOutput builder
+    /// all land on top. Under a hard memory limit, size the limit >= 2x this.
     ByteLimit ReadAheadMemory{std::size_t{768} * 1024 * 1024};
 
     /// Target framed-record payload per per-input handoff batch on the sorted-merge

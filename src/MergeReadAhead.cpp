@@ -47,8 +47,19 @@ constexpr std::int32_t MERGE_BLOCKS_PER_BATCH{32};
 /// working set above the budget.
 constexpr std::size_t BATCH_TARGET_BYTES{std::size_t{256} * 1024};
 
+/// Decompressed bytes one read step can append to the working buffer.
+constexpr std::size_t READ_CHUNK_BYTES{static_cast<std::size_t>(MERGE_BLOCKS_PER_BATCH) *
+                                       MAX_DECOMPRESSED_BLOCK_SIZE};
+
 /// Per-record bookkeeping slack added to the raw byte count for the budget meter.
 constexpr std::size_t RECORD_SLACK{64};
+
+/// Drained batch buffers kept per source for the producer to refill. Buffers are
+/// allocated on a producer thread and released on the consumer thread; recycling
+/// them keeps that multi-MB churn out of the allocator, which otherwise retains it
+/// and pushes peak RSS far above the read-ahead budget. Producer and consumer are
+/// rate-matched (one batch out per batch in), so a shallow free list absorbs jitter.
+constexpr std::size_t RECYCLE_DEPTH{2};
 
 std::uint64_t ElapsedNs(std::chrono::steady_clock::time_point start)
 {
@@ -85,7 +96,8 @@ struct MergeReadAhead::Impl
         std::mutex QueueMutex;
         std::condition_variable DataCv;  // consumer waits for a batch / EOF / error
         std::deque<Batch> Queue;
-        std::atomic<std::size_t> QueuedBatches{0};  // read lock-free by the budget predicate
+        std::vector<std::vector<std::byte>> Recycled;  // drained buffers, guarded by QueueMutex
+        std::atomic<std::size_t> QueuedBatches{0};     // read lock-free by the budget predicate
         bool Done{false};
         std::exception_ptr Error{};
 
@@ -217,6 +229,33 @@ struct MergeReadAhead::Impl
         carry.resize(writePos);
     }
 
+    /// Take a drained buffer for the producer to refill; empty (a fresh allocation)
+    /// when the consumer has not returned one yet.
+    static std::vector<std::byte> TakeRecycled(PerSource& source)
+    {
+        const std::lock_guard queueLock{source.QueueMutex};
+        if (source.Recycled.empty()) {
+            return {};
+        }
+        std::vector<std::byte> buffer{std::move(source.Recycled.back())};
+        source.Recycled.pop_back();
+        return buffer;
+    }
+
+    /// Hand a drained buffer back to the producer, keeping its capacity. Depth-capped
+    /// so a stalled producer cannot pin more than RECYCLE_DEPTH buffers per source.
+    static void Recycle(PerSource& source, std::vector<std::byte>&& buffer)
+    {
+        if (buffer.capacity() == 0) {
+            return;
+        }
+        buffer.clear();
+        const std::lock_guard queueLock{source.QueueMutex};
+        if (std::size(source.Recycled) < RECYCLE_DEPTH) {
+            source.Recycled.push_back(std::move(buffer));
+        }
+    }
+
     /// Block on the budget, then publish \p batch to \p source. Returns false if
     /// teardown was requested while waiting.
     bool PublishBatch(PerSource& source, Batch&& batch)
@@ -273,8 +312,14 @@ struct MergeReadAhead::Impl
             // per-record copy), keep the unframed tail, and publish. Returns false
             // on teardown.
             const auto flush{[&]() -> bool {
-                std::vector<std::byte> tail(
-                    std::begin(carry) + static_cast<std::ptrdiff_t>(framedEnd), std::end(carry));
+                std::vector<std::byte> tail{TakeRecycled(source)};
+                tail.assign(std::begin(carry) + static_cast<std::ptrdiff_t>(framedEnd),
+                            std::end(carry));
+                // Size the next working buffer for a whole batch up front. Growing it
+                // by one read chunk at a time instead lets the vector's geometric growth
+                // hand every published batch up to twice the capacity it needs, and the
+                // budget meters payload bytes, so that slack is invisible to --memory.
+                tail.reserve(std::size(tail) + BatchTargetBytes + READ_CHUNK_BYTES);
                 Batch batch{};
                 batch.Buffer = std::move(carry);
                 batch.Buffer.resize(framedEnd);
@@ -434,6 +479,10 @@ struct MergeReadAhead::Impl
             }
             SpaceCv.notify_all();
 
+            // The batch just retired is dead here (its records were handed out before
+            // this call), so its buffer goes back to the producer rather than to the
+            // allocator — same lifetime as the free it replaces.
+            Recycle(source, std::move(source.Current.Buffer));
             source.Current = std::move(next);
             source.CurrentPos = 0;
         }

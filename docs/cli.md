@@ -157,7 +157,7 @@ Options:
 | `--threads N` | Default size of both CPU pools (input decode + output compress), `0`/auto = `min(hw, 8)`. Does **not** bound the per-input producer threads (one I/O-bound thread per input). |
 | `--decode-threads N` | Input-decompression pool size; `0` = inherit `--threads`. Sorted merge only. |
 | `--compress-threads N` | Output-compression pool size; `0` = inherit `--threads`. Sorted merge only. |
-| `--memory SIZE` | Total input read-ahead budget, `K`/`M`/`G` suffix (default: `768M`); sorted merge only. Peak RAM also includes ~`NumInputs × --batch-bytes` (per-input current batches held outside the budget) plus the writer queue. |
+| `--memory SIZE` | Total input read-ahead budget, `K`/`M`/`G` suffix (default: `768M`); sorted merge only. **Not a total memory cap**: peak RSS runs ~1.4x the budget once producers pin it, plus ~`NumInputs × --batch-bytes` (per-input current batches held outside the budget), the writer queue, and the `--bai` builder. Under a hard limit (cgroup/SLURM), set the limit to at least 2x `--memory`. |
 | `--batch-bytes SIZE` | Per-input handoff batch target, `K`/`M`/`G` suffix (default: `256K`); sorted merge only. |
 | `--writer-queue N` | Output writer queue depth in compressed blocks (default: `256`, must be `≥ 1`); sorted merge only. |
 | `--compression L` | Output BGZF level `[1,12]` (default: `6`) |

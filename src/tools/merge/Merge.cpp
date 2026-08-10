@@ -84,7 +84,7 @@ const CLI_v2::Option CompressThreads{
 const CLI_v2::Option Memory{
     R"({
     "names" : ["memory"],
-    "description" : "Input read-ahead budget; K/M/G suffix accepted.",
+    "description" : "Input read-ahead budget, not a total memory cap; K/M/G suffix accepted. Peak RSS runs ~1.4x this, so set any hard memory limit to at least 2x.",
     "type" : "string",
     "default" : "768M"
 })"};
@@ -273,8 +273,10 @@ void PrintRuntimeReport(const MergeStats& stats, double cpuSeconds, std::int64_t
         }
     } else if (budgetPinned && (fIn >= fOut)) {
         verdict = "MEMORY-bound (read-ahead budget capped)";
-        hint =
-            std::format("raise --memory (budget {:.0f} MB pinned)", Tools::ToMiB(rt.BudgetBytes));
+        hint = std::format(
+            "raise --memory (budget {:.0f} MB pinned); peak RSS is ~1.4x the budget, so raise any "
+            "hard memory limit further",
+            Tools::ToMiB(rt.BudgetBytes));
     } else if ((fIn >= 0.34) && (fIn >= fOut) && (fIn >= fMergeCpu) && (fIn >= fOther)) {
         if (rt.InputDecompressSeconds > rt.InputIoReadSeconds) {
             verdict = "INPUT-bound (decode CPU)";
