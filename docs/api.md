@@ -40,16 +40,16 @@ BamRawReader reader{"input.bam", BamRawReaderConfig{.ChunkNum = 2,
 
 `BamRawReaderConfig` fields:
 
-|      Field      |    Default    |                    Description                     |
-| --------------- | ------------- | -------------------------------------------------- |
-| `BgzfWorkers`   | `0`           | BGZF decompression threads (0 = synchronous)       |
-| `RecordLimit`   | `0`           | Stop after N records (0 = unlimited)               |
-| `ChunkNum`      | `0`           | 1-based chunk number (0 = no chunking)             |
-| `TotalChunks`   | `0`           | Total chunk count (0 = no chunking)                |
-| `ChunkingMode`  | `CONTIGUOUS`  | `CONTIGUOUS` ZMW ranges, or `SCATTER` (see below)  |
-| `ChunkTileZmws` | `1`           | Scatter only: read up to M consecutive ZMWs/seek   |
-| `ChunkSeed`     | `0`           | Scatter only: deterministic shuffle seed           |
-| `Whitelist`     | `{}`          | Optional `ZmwWhitelist` for whitelist queries      |
+|      Field      |   Default    |                    Description                    |
+| --------------- | ------------ | ------------------------------------------------- |
+| `BgzfWorkers`   | `0`          | BGZF decompression threads (0 = synchronous)      |
+| `RecordLimit`   | `0`          | Stop after N records (0 = unlimited)              |
+| `ChunkNum`      | `0`          | 1-based chunk number (0 = no chunking)            |
+| `TotalChunks`   | `0`          | Total chunk count (0 = no chunking)               |
+| `ChunkingMode`  | `CONTIGUOUS` | `CONTIGUOUS` ZMW ranges, or `SCATTER` (see below) |
+| `ChunkTileZmws` | `1`          | Scatter only: read up to M consecutive ZMWs/seek  |
+| `ChunkSeed`     | `0`          | Scatter only: deterministic shuffle seed          |
+| `Whitelist`     | `{}`         | Optional `ZmwWhitelist` for whitelist queries     |
 
 Both chunk modes are ZMW-keyed (a ZMW's records stay together) and partition the
 file exactly: all `TotalChunks` chunks together visit every record once.
@@ -238,10 +238,10 @@ CramReader reader{"input.cram", CramReaderConfig{
 
 `CramReaderConfig` fields:
 
-| Field | Default | Description |
-| ----- | ------- | ----------- |
-| `ReferencePath` | `{}` | Optional FASTA path for reference-based slices |
-| `DecompressionWorkers` | `0` | CRAM block decompression workers for slice data blocks (`0` = synchronous) |
+|         Field          | Default |                                Description                                 |
+| ---------------------- | ------- | -------------------------------------------------------------------------- |
+| `ReferencePath`        | `{}`    | Optional FASTA path for reference-based slices                             |
+| `DecompressionWorkers` | `0`     | CRAM block decompression workers for slice data blocks (`0` = synchronous) |
 
 ### Header access
 
@@ -324,19 +324,19 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 
 `CramWriterConfig` fields:
 
-| Field | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `BlockCompressionMethod` | `CramBlockMethod` | `GZIP` | Default block method |
-| `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}` | Per-data-series method overrides |
-| `RecordsPerSlice` | `int32_t` | `10000` | Max records per slice |
-| `SlicesPerContainer` | `int32_t` | `1` | Max slices per container (`<= 0` means unlimited until `Close()`) |
-| `MajorVersion` | `uint8_t` | `3` | CRAM major version (`3` only) |
-| `MinorVersion` | `uint8_t` | `0` | CRAM minor version (`0` or `1`) |
-| `WriteCrai` | `bool` | `false` | Write `<output>.crai` sidecar |
-| `CraiPath` | `optional<path>` | `{}` | CRAI output path override |
-| `CompressionWorkers` | `size_t` | `0` | CRAM block compression threads (`0` = synchronous) |
-| `CompressionLevel` | `optional<int>` | `{}` | Optional gzip compression level (`[0,12]`) |
-| `UseTempFile` | `bool` | `false` | Write to a temporary path and rename atomically on `Close()` |
+|             Field              |                       Type                       | Default |                            Description                            |
+| ------------------------------ | ------------------------------------------------ | ------- | ----------------------------------------------------------------- |
+| `BlockCompressionMethod`       | `CramBlockMethod`                                | `GZIP`  | Default block method                                              |
+| `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series method overrides                                  |
+| `RecordsPerSlice`              | `int32_t`                                        | `10000` | Max records per slice                                             |
+| `SlicesPerContainer`           | `int32_t`                                        | `1`     | Max slices per container (`<= 0` means unlimited until `Close()`) |
+| `MajorVersion`                 | `uint8_t`                                        | `3`     | CRAM major version (`3` only)                                     |
+| `MinorVersion`                 | `uint8_t`                                        | `0`     | CRAM minor version (`0` or `1`)                                   |
+| `WriteCrai`                    | `bool`                                           | `false` | Write `<output>.crai` sidecar                                     |
+| `CraiPath`                     | `optional<path>`                                 | `{}`    | CRAI output path override                                         |
+| `CompressionWorkers`           | `size_t`                                         | `0`     | CRAM block compression threads (`0` = synchronous)                |
+| `CompressionLevel`             | `optional<int>`                                  | `{}`    | Optional gzip compression level (`[0,12]`)                        |
+| `UseTempFile`                  | `bool`                                           | `false` | Write to a temporary path and rename atomically on `Close()`      |
 
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
@@ -626,12 +626,12 @@ it.
 
 Owns a decompressed buffer and provides views into it.
 
-|     Method      |    Return type     |              Description              |
-| --------------- | ------------------ | ------------------------------------- |
-| `View(i)`       | `RawRecordView`    | Non-owning decoder for record `i`     |
-| `RecordData(i)` | `span<const byte>` | Raw data for record `i`               |
-| `RecordCount()` | `size_t`           | Number of records                     |
-| `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes     |
+|     Method      |    Return type     |            Description            |
+| --------------- | ------------------ | --------------------------------- |
+| `View(i)`       | `RawRecordView`    | Non-owning decoder for record `i` |
+| `RecordData(i)` | `span<const byte>` | Raw data for record `i`           |
+| `RecordCount()` | `size_t`           | Number of records                 |
+| `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes |
 
 Views are invalidated when the batch is destroyed.
 
@@ -982,16 +982,17 @@ std::vector<std::int64_t> offsets = index.Find(12345);  // raw virtual offsets b
 
 ### Queries
 
-|             Method              |      Return type      |                Description                |
-| ------------------------------- | --------------------- | ----------------------------------------- |
-| `Find(int32_t zmw)`             | `vector<int64_t>`     | Offsets for hole number (all read groups) |
-| `Find(ZmwIdentity)`             | `vector<int64_t>`     | Offsets for exact (rgId, zmw)             |
-| `Find(span<const ZmwIdentity>)` | `vector<int64_t>`     | Batch query                               |
-| `FirstOffset(int32_t zmw)`      | `int64_t`             | First offset for hole number              |
-| `FirstOffset(ZmwIdentity)`      | `int64_t`             | First offset for exact (rgId, zmw)        |
-| `UniqueZmws()`                  | `vector<ZmwIdentity>` | All unique (rgId, zmw) in file order      |
-| `NumRecords()`                  | `uint64_t`            | Total records in the index                |
-| `NumZmws()`                     | `uint64_t`            | Unique ZMW count                          |
+|             Method              |      Return type      |                Description                 |
+| ------------------------------- | --------------------- | ------------------------------------------ |
+| `Find(int32_t zmw)`             | `vector<int64_t>`     | Offsets for hole number (all read groups)  |
+| `Find(ZmwIdentity)`             | `vector<int64_t>`     | Offsets for exact (rgId, zmw)              |
+| `Find(span<const ZmwIdentity>)` | `vector<int64_t>`     | Batch query                                |
+| `FirstOffset(int32_t zmw)`      | `int64_t`             | First offset for hole number               |
+| `FirstOffset(ZmwIdentity)`      | `int64_t`             | First offset for exact (rgId, zmw)         |
+| `UniqueZmws()`                  | `vector<ZmwIdentity>` | All unique (rgId, zmw) in file order       |
+| `ContiguousChunk(i, n)`         | `ZmwChunk`            | Seek offset and sizes for chunk `i` of `n` |
+| `NumRecords()`                  | `uint64_t`            | Total records in the index                 |
+| `NumZmws()`                     | `uint64_t`            | Unique ZMW count                           |
 
 ## ZmwGroup
 

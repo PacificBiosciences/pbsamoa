@@ -17,6 +17,7 @@
 #include <format>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -174,6 +175,67 @@ TEST_F(ZmiWriterTest, UniqueZmwsRemovesNonConsecutiveDuplicates)
     EXPECT_EQ(unique[1], (ZmwIdentity{100, 99}));
     EXPECT_EQ(unique[2], (ZmwIdentity{200, 7}));
     EXPECT_EQ(index.NumZmws(), std::size(unique));
+}
+
+TEST_F(ZmiWriterTest, ContiguousChunkUsesOrderedRunsWithoutPointIndex)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+        writer.AddRecord(100, 42, 2000);
+        writer.AddRecord(100, 99, 3000);
+        writer.AddRecord(200, 7, 4000);
+        writer.AddRecord(200, 7, 5000);
+    }
+
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    const ZmwChunk first{index.ContiguousChunk(1, 2)};
+    EXPECT_EQ(first.FirstOffset, 1000);
+    EXPECT_EQ(first.NumRecords, 2u);
+    EXPECT_EQ(first.NumZmws, 1u);
+
+    const ZmwChunk second{index.ContiguousChunk(2, 2)};
+    EXPECT_EQ(second.FirstOffset, 3000);
+    EXPECT_EQ(second.NumRecords, 3u);
+    EXPECT_EQ(second.NumZmws, 2u);
+}
+
+TEST_F(ZmiWriterTest, ContiguousChunkPreservesNonConsecutiveDuplicateSemantics)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+        writer.AddRecord(100, 99, 2000);
+        writer.AddRecord(100, 42, 3000);
+        writer.AddRecord(200, 7, 4000);
+        writer.AddRecord(100, 99, 5000);
+    }
+
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    const ZmwChunk first{index.ContiguousChunk(1, 2)};
+    EXPECT_EQ(first.FirstOffset, 1000);
+    EXPECT_EQ(first.NumRecords, 2u);
+    EXPECT_EQ(first.NumZmws, 1u);
+
+    const ZmwChunk second{index.ContiguousChunk(2, 2)};
+    EXPECT_EQ(second.FirstOffset, 2000);
+    EXPECT_EQ(second.NumRecords, 3u);
+    EXPECT_EQ(second.NumZmws, 2u);
+}
+
+TEST_F(ZmiWriterTest, ContiguousChunkCanBeEmpty)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000);
+    }
+
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    const ZmwChunk empty{index.ContiguousChunk(1, 2)};
+    EXPECT_EQ(empty.NumRecords, 0u);
+    EXPECT_EQ(empty.NumZmws, 0u);
+    EXPECT_THROW(index.ContiguousChunk(0, 2), std::invalid_argument);
+    EXPECT_THROW(index.ContiguousChunk(3, 2), std::invalid_argument);
 }
 
 class ZmiBamWriterTest : public ::testing::Test
@@ -392,6 +454,51 @@ TEST_F(ZmiWriterTest, FromPbiRoundTripWithBasicDataOnly)
     const auto exact{index.Find(ZmwIdentity{100, 99})};
     ASSERT_EQ(std::size(exact), 1u);
     EXPECT_EQ(exact[0], 2000);
+}
+
+TEST_F(ZmiWriterTest, FromPbiReadsColumnsAcrossBgzfBlocks)
+{
+    constexpr std::uint32_t NUM_READS{5000};
+    const std::filesystem::path pbiPath{tempDir_.File("multiblock.pbi")};
+    std::vector<std::byte> raw(32, std::byte{0});
+    raw[0] = std::byte{'P'};
+    raw[1] = std::byte{'B'};
+    raw[2] = std::byte{'I'};
+    raw[3] = std::byte{'\1'};
+    WriteAt(raw, 4, std::uint32_t{0x030000});
+    WriteAt(raw, 10, NUM_READS);
+
+    const auto appendI32Column = [&raw](auto valueAt) {
+        const std::size_t start{std::size(raw)};
+        raw.resize(start + (NUM_READS * sizeof(std::int32_t)), std::byte{0});
+        for (std::uint32_t i{0}; i < NUM_READS; ++i) {
+            WriteAt(raw, start + (i * sizeof(std::int32_t)), valueAt(i));
+        }
+    };
+    appendI32Column([](std::uint32_t) { return std::int32_t{7}; });
+    appendI32Column([](std::uint32_t) { return std::int32_t{0}; });
+    appendI32Column([](std::uint32_t) { return std::int32_t{1000}; });
+    appendI32Column([](std::uint32_t i) { return static_cast<std::int32_t>(i / 3); });
+    raw.resize(std::size(raw) + (NUM_READS * sizeof(float)), std::byte{0});
+    raw.resize(std::size(raw) + NUM_READS, std::byte{0});
+
+    const std::size_t offsetColumn{std::size(raw)};
+    raw.resize(offsetColumn + (NUM_READS * sizeof(std::int64_t)), std::byte{0});
+    for (std::uint32_t i{0}; i < NUM_READS; ++i) {
+        WriteAt(raw, offsetColumn + (i * sizeof(std::int64_t)), static_cast<std::int64_t>(i) * 64);
+    }
+
+    {
+        BgzfWriter writer{pbiPath};
+        writer.Write(raw);
+    }
+
+    const ZmwIndex index{ZmwIndex::FromPbi(pbiPath)};
+    EXPECT_EQ(index.NumRecords(), NUM_READS);
+    const ZmwChunk chunk{index.ContiguousChunk(2, 3)};
+    EXPECT_EQ(chunk.FirstOffset, 1665 * 64);
+    EXPECT_EQ(chunk.NumRecords, 1668u);
+    EXPECT_EQ(chunk.NumZmws, 556u);
 }
 
 TEST_F(ZmiWriterTest, FromPbiThrowsOnIncompleteBasicData)

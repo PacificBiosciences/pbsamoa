@@ -326,35 +326,23 @@ struct BamRawReader::Impl
         }
 
         const ZmwIndex index{ZmwIndex::Open(path)};
-        const std::vector<ZmwIdentity> unique{index.UniqueZmws()};
-        const std::ptrdiff_t numZmws{std::ssize(unique)};
-
-        if (numZmws == 0) {
+        if (index.NumRecords() == 0) {
             throw std::runtime_error{std::format("ZMW index is empty for: {}", path.string())};
         }
 
-        const std::ptrdiff_t startIdx{(numZmws * static_cast<std::ptrdiff_t>(chunkNum - 1)) /
-                                      totalChunks};
-        const std::ptrdiff_t endIdx{(numZmws * static_cast<std::ptrdiff_t>(chunkNum)) /
-                                    totalChunks};
+        const ZmwChunk chunk{index.ContiguousChunk(static_cast<std::uint32_t>(chunkNum),
+                                                   static_cast<std::uint32_t>(totalChunks))};
 
         recordsRead = 0;
 
-        if (startIdx >= endIdx) {
+        if (chunk.NumRecords == 0) {
             recordLimit = std::size_t{0};
             return;
         }
 
-        numZmws_ = static_cast<std::int32_t>(endIdx - startIdx);
-
-        const std::span<const ZmwIdentity> chunkZmws{std::data(unique) + startIdx,
-                                                     static_cast<std::size_t>(endIdx - startIdx)};
-        const std::vector<std::int64_t> chunkOffsets{index.Find(chunkZmws)};
-
-        recordLimit = std::optional{std::size(chunkOffsets)};
-
-        const VirtualOffset startOffset(index.FirstOffset(unique[startIdx]));
-        bgzf->Seek(startOffset);
+        numZmws_ = static_cast<std::int32_t>(chunk.NumZmws);
+        recordLimit = static_cast<std::size_t>(chunk.NumRecords);
+        bgzf->Seek(VirtualOffset(chunk.FirstOffset));
     }
 
     // Builds the scatter plan for this chunk: partition the unique ZMWs into tiles

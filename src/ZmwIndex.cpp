@@ -7,12 +7,16 @@
 #include <pbsamoa/core/Bgzf.hpp>
 
 #include <array>
+#include <bit>
 #include <format>
 #include <limits>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -65,13 +69,56 @@ std::size_t CheckedMul(std::size_t lhs, std::size_t rhs, std::string_view what)
     return lhs * rhs;
 }
 
-std::size_t CheckedAdd(std::size_t lhs, std::size_t rhs, std::string_view what)
+class BgzfDataReader
 {
-    if (rhs > (std::numeric_limits<std::size_t>::max() - lhs)) {
-        throw std::runtime_error{std::format("{} size overflows", what)};
+public:
+    explicit BgzfDataReader(const std::filesystem::path& path) : reader_{path} {}
+
+    void ReadExactly(std::span<std::byte> output, std::string_view error)
+    {
+        while (!std::empty(output)) {
+            if (!Refill()) {
+                throw std::runtime_error{std::string{error}};
+            }
+            const std::size_t count{std::min(std::size(output), size_ - pos_)};
+            std::memcpy(std::data(output), std::data(block_) + pos_, count);
+            output = output.subspan(count);
+            pos_ += count;
+        }
     }
-    return lhs + rhs;
-}
+
+    void SkipExactly(std::size_t count, std::string_view error)
+    {
+        while (count != 0) {
+            if (!Refill()) {
+                throw std::runtime_error{std::string{error}};
+            }
+            const std::size_t step{std::min(count, size_ - pos_)};
+            pos_ += step;
+            count -= step;
+        }
+    }
+
+private:
+    bool Refill()
+    {
+        if (pos_ != size_) {
+            return true;
+        }
+        const std::optional<std::size_t> bytesRead{reader_.ReadBlock(block_)};
+        if (!bytesRead) {
+            throw std::runtime_error{"Failed to decompress BGZF index data"};
+        }
+        pos_ = 0;
+        size_ = *bytesRead;
+        return size_ != 0;
+    }
+
+    BgzfReader reader_;
+    std::array<std::byte, MAX_DECOMPRESSED_BLOCK_SIZE> block_{};
+    std::size_t pos_{0};
+    std::size_t size_{0};
+};
 
 std::vector<std::byte> ReadAllBgzfData(BgzfReader& reader)
 {
@@ -90,15 +137,33 @@ std::vector<std::byte> ReadAllBgzfData(BgzfReader& reader)
     return data;
 }
 
-template <typename T, typename Reader>
-void ReadColumn(std::vector<T>& output, std::span<const std::byte> data, std::size_t offset,
-                std::uint32_t count, Reader reader)
+template <typename T>
+void ReadLittleEndianColumn(std::vector<T>& output, BgzfDataReader& reader, std::uint32_t count,
+                            std::string_view error)
 {
-    output.reserve(std::size(output) + count);
-    const std::byte* const columnData{std::data(data) + offset};
-    for (std::uint32_t i{0}; i < count; ++i) {
-        output.push_back(reader(columnData + (i * sizeof(T))));
+    static_assert(std::is_integral_v<T>);
+    output.resize(count);
+    reader.ReadExactly(std::as_writable_bytes(std::span{output}), error);
+    if constexpr (std::endian::native == std::endian::big) {
+        for (T& value : output) {
+            using UnsignedT = std::make_unsigned_t<T>;
+            const UnsignedT bits{std::bit_cast<UnsignedT>(value)};
+            value = std::bit_cast<T>(std::byteswap(bits));
+        }
     }
+}
+
+bool IdentityLess(const ZmwIdentity lhs, const ZmwIdentity rhs)
+{
+    return (lhs.rgId < rhs.rgId) || ((lhs.rgId == rhs.rgId) && (lhs.zmw < rhs.zmw));
+}
+
+std::uint64_t PartitionBoundary(std::uint64_t count, std::uint32_t boundary,
+                                std::uint32_t partitions)
+{
+    const std::uint64_t quotient{count / partitions};
+    const std::uint64_t remainder{count % partitions};
+    return (quotient * boundary) + ((remainder * boundary) / partitions);
 }
 
 template <typename IndexMap, typename Key>
@@ -214,20 +279,16 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
 
 ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
 {
-    BgzfReader reader{path};
-    std::vector<std::byte> data{ReadAllBgzfData(reader)};
-
-    // Validate minimum size for header
-    if (std::size(data) < PBI_HEADER_SIZE) {
-        throw std::runtime_error{"PBI file too small: missing header"};
-    }
+    BgzfDataReader reader{path};
+    std::array<std::byte, PBI_HEADER_SIZE> header{};
+    reader.ReadExactly(header, "PBI file too small: missing header");
 
     // Validate magic "PBI\1"
-    if (std::memcmp(std::data(data), std::data(PBI_MAGIC), 4) != 0) {
+    if (std::memcmp(std::data(header), std::data(PBI_MAGIC), 4) != 0) {
         throw std::runtime_error{"PBI file has invalid magic bytes"};
     }
     // Read numReads from offset 10 (uint32 LE)
-    const std::uint32_t numReads{ReadU32LE(std::data(data) + 10)};
+    const std::uint32_t numReads{ReadU32LE(std::data(header) + 10)};
 
     // BasicData columns start at offset 32 (end of header).
     // Columns are stored sequentially (not interleaved):
@@ -245,49 +306,30 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     const std::size_t float32ColBytes{CheckedMul(readsAsSize, sizeof(float), "PBI float32 column")};
     const std::size_t uint8ColBytes{
         CheckedMul(readsAsSize, sizeof(std::uint8_t), "PBI uint8 column")};
-    const std::size_t int64ColBytes{
-        CheckedMul(readsAsSize, sizeof(std::int64_t), "PBI int64 column")};
-
-    // Validate that we have enough data for all BasicData columns
-    std::size_t requiredSize{PBI_HEADER_SIZE};
-    requiredSize = CheckedAdd(requiredSize, CheckedMul(4, int32ColBytes, "PBI int32 columns"),
-                              "PBI total size");
-    requiredSize = CheckedAdd(requiredSize, float32ColBytes, "PBI total size");
-    requiredSize = CheckedAdd(requiredSize, uint8ColBytes, "PBI total size");
-    requiredSize = CheckedAdd(requiredSize, int64ColBytes, "PBI total size");
-    if (std::size(data) < requiredSize) {
-        throw std::runtime_error{"PBI file too small: incomplete BasicData section"};
-    }
-
     ZmwIndex index;
-    index.rgIds_.reserve(numReads);
-    index.zmws_.reserve(numReads);
-    index.offsets_.reserve(numReads);
-
-    std::size_t offset{PBI_HEADER_SIZE};
+    constexpr std::string_view INCOMPLETE_BASIC_DATA{
+        "PBI file too small: incomplete BasicData section"};
 
     // Column 1: rgId (numReads × int32)
-    ReadColumn(index.rgIds_, data, offset, numReads, ReadI32LE);
-    offset += int32ColBytes;
+    ReadLittleEndianColumn(index.rgIds_, reader, numReads, INCOMPLETE_BASIC_DATA);
 
     // Column 2: qStart (skip)
-    offset += int32ColBytes;
+    reader.SkipExactly(int32ColBytes, INCOMPLETE_BASIC_DATA);
 
     // Column 3: qEnd (skip)
-    offset += int32ColBytes;
+    reader.SkipExactly(int32ColBytes, INCOMPLETE_BASIC_DATA);
 
     // Column 4: holeNumber (numReads × int32)
-    ReadColumn(index.zmws_, data, offset, numReads, ReadI32LE);
-    offset += int32ColBytes;
+    ReadLittleEndianColumn(index.zmws_, reader, numReads, INCOMPLETE_BASIC_DATA);
 
     // Column 5: readQual (skip)
-    offset += float32ColBytes;
+    reader.SkipExactly(float32ColBytes, INCOMPLETE_BASIC_DATA);
 
     // Column 6: ctxtFlag (skip)
-    offset += uint8ColBytes;
+    reader.SkipExactly(uint8ColBytes, INCOMPLETE_BASIC_DATA);
 
     // Column 7: fileOffset (numReads × int64)
-    ReadColumn(index.offsets_, data, offset, numReads, ReadI64LE);
+    ReadLittleEndianColumn(index.offsets_, reader, numReads, INCOMPLETE_BASIC_DATA);
 
     return index;
 }
@@ -378,6 +420,99 @@ std::vector<ZmwIdentity> ZmwIndex::UniqueZmws() const
     }
 
     return result;
+}
+
+ZmwChunk ZmwIndex::ContiguousChunk(const std::uint32_t chunkNum,
+                                   const std::uint32_t totalChunks) const
+{
+    if ((totalChunks == 0) || (chunkNum == 0) || (chunkNum > totalChunks)) {
+        throw std::invalid_argument{
+            std::format("Chunk number must be in [1, {}], got {}", totalChunks, chunkNum)};
+    }
+    if (std::empty(zmws_)) {
+        return {};
+    }
+
+    // The garden-path BAM is ordered by (rgId, ZMW), so its unique identities are
+    // simply adjacent runs. Count those with no allocation or hashing. Strictly
+    // increasing run keys also prove that an identity cannot recur later.
+    std::uint64_t numZmws{1};
+    bool ordered{true};
+    ZmwIdentity previous{rgIds_.front(), zmws_.front()};
+    for (std::size_t i{1}; i < std::size(zmws_); ++i) {
+        const ZmwIdentity current{rgIds_[i], zmws_[i]};
+        if (current == previous) {
+            continue;
+        }
+        ordered = ordered && IdentityLess(previous, current);
+        previous = current;
+        ++numZmws;
+    }
+
+    if (ordered) {
+        const std::uint64_t startZmw{PartitionBoundary(numZmws, chunkNum - 1, totalChunks)};
+        const std::uint64_t endZmw{PartitionBoundary(numZmws, chunkNum, totalChunks)};
+        if (startZmw == endZmw) {
+            return {};
+        }
+
+        std::size_t startRecord{0};
+        std::size_t endRecord{std::size(zmws_)};
+        std::uint64_t currentZmw{0};
+        previous = ZmwIdentity{rgIds_.front(), zmws_.front()};
+        for (std::size_t i{1}; i < std::size(zmws_); ++i) {
+            const ZmwIdentity current{rgIds_[i], zmws_[i]};
+            if (current == previous) {
+                continue;
+            }
+            previous = current;
+            ++currentZmw;
+            if (currentZmw == startZmw) {
+                startRecord = i;
+            }
+            if (currentZmw == endZmw) {
+                endRecord = i;
+                break;
+            }
+        }
+        return ZmwChunk{offsets_[startRecord], endRecord - startRecord, endZmw - startZmw};
+    }
+
+    // Preserve UniqueZmws()/Find() semantics for unusual indexes whose identities
+    // are not ordered. One summary per unique identity replaces the two full point-
+    // query hash indexes and per-record index vectors used by the old chunking path.
+    struct Summary
+    {
+        std::int64_t FirstOffset;
+        std::uint64_t NumRecords;
+    };
+
+    std::vector<Summary> summaries;
+    summaries.reserve(std::size(zmws_));
+    std::unordered_map<std::uint64_t, std::size_t> summaryByIdentity;
+    summaryByIdentity.reserve(std::size(zmws_));
+    for (std::size_t i{0}; i < std::size(zmws_); ++i) {
+        const std::uint64_t key{IdentityKey(rgIds_[i], zmws_[i])};
+        const auto [it, inserted]{summaryByIdentity.try_emplace(key, std::size(summaries))};
+        if (inserted) {
+            summaries.push_back(Summary{offsets_[i], 1});
+        } else {
+            ++summaries[it->second].NumRecords;
+        }
+    }
+
+    numZmws = std::size(summaries);
+    const std::uint64_t startZmw{PartitionBoundary(numZmws, chunkNum - 1, totalChunks)};
+    const std::uint64_t endZmw{PartitionBoundary(numZmws, chunkNum, totalChunks)};
+    if (startZmw == endZmw) {
+        return {};
+    }
+    std::uint64_t numRecords{0};
+    for (std::uint64_t i{startZmw}; i < endZmw; ++i) {
+        numRecords += summaries[static_cast<std::size_t>(i)].NumRecords;
+    }
+    return ZmwChunk{summaries[static_cast<std::size_t>(startZmw)].FirstOffset, numRecords,
+                    endZmw - startZmw};
 }
 
 std::int64_t ZmwIndex::FirstOffset(std::int32_t zmw) const

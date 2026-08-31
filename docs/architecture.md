@@ -391,9 +391,10 @@ while (auto view = reader.ReadRecord()) { /* … */ }
 ```
 
 `ChunkNum` is 1-based (1 through `TotalChunks`). Internally the reader calls
-`ZmwIndex::UniqueZmws()` to get sorted ZMW identities, partitions them
-proportionally, then seeks to `ZmwIndex::FirstOffset()` and sets an internal
-`RecordLimit`.
+`ZmwIndex::ContiguousChunk()` scans the columnar index directly, partitions the
+file-order ZMW runs proportionally, then returns one seek offset and an exact
+record limit. Ordered BAM indexes require no hash tables or per-record lookup
+vectors during chunk selection.
 
 Setting `ChunkingMode = ChunkMode::SCATTER` keeps the same exact-partition
 guarantee but spreads each chunk's ZMWs across the whole file (a

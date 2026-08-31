@@ -21,6 +21,14 @@ struct ZmwIdentity
     bool operator==(const ZmwIdentity&) const = default;
 };
 
+/// \brief The seek position and exact sizes for one contiguous ZMW chunk.
+struct ZmwChunk
+{
+    std::int64_t FirstOffset{0};
+    std::uint64_t NumRecords{0};
+    std::uint64_t NumZmws{0};
+};
+
 /// \brief In-memory ZMW index loaded from .zmi or .pbi files.
 ///
 /// Stores (rgId, zmw, virtualOffset) per BAM record in file order.
@@ -61,6 +69,12 @@ public:
 
     /// \brief All unique (rgId, zmw) pairs in file order.
     std::vector<ZmwIdentity> UniqueZmws() const;
+
+    /// \brief Resolve one 1-based contiguous chunk without building the point-query indexes.
+    ///
+    /// The returned offset is meaningful only when NumRecords is non-zero.
+    /// \throws std::invalid_argument for an invalid chunk specification
+    ZmwChunk ContiguousChunk(std::uint32_t chunkNum, std::uint32_t totalChunks) const;
 
     /// \brief Virtual offset of the first record for a given ZMW.
     /// \throws std::runtime_error if ZMW not found
