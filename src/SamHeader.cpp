@@ -1,5 +1,7 @@
 #include <pbsamoa/core/SamHeader.hpp>
 
+#include <pbsamoa/PbSamoaLibraryInfo.hpp>
+
 #include "BinaryUtils.hpp"
 #include "Md5.hpp"
 
@@ -381,6 +383,11 @@ void ProgramRecord::SetTag(std::string key, std::string value)
     UpsertValue(customTags_, std::move(key), std::move(value));
 }
 
+void ProgramRecord::RemoveTag(std::string_view key)
+{
+    std::erase_if(customTags_, [key](const auto& tag) { return tag.first == key; });
+}
+
 std::span<const std::pair<std::string, std::string>> ProgramRecord::CustomTags() const
 {
     return customTags_;
@@ -460,7 +467,7 @@ std::expected<SamHeader, std::string> SamHeader::FromText(std::string_view text)
         }
         if (recordType == "@PG") {
             // SAMv1 §1.3 requires unique @PG IDs, but a duplicate does not stop a read.
-            // @PG IDs are opaque; only PP refers to them, and pbsamoa never resolves PP.
+            // @PG IDs are opaque; only PP refers to them.
             // Other tools and pbsamoa builds before the UniqueProgramId fix emit
             // duplicates, so keep every line instead of rejecting the whole file. htslib
             // keeps them too (header.c). pbsamoa's own writers keep new IDs unique.
@@ -756,6 +763,41 @@ std::string_view SamHeader::ReferenceName(std::int32_t refId) const
 }
 
 std::int32_t SamHeader::NumReferences() const { return std::ssize(references_); }
+
+/// Return \p id, or `id.N` for the smallest N >= 1 that no existing @PG claims.
+std::string UniqueProgramId(const SamHeader& header, std::string id)
+{
+    const auto taken{[&header](std::string_view candidate) {
+        return std::ranges::any_of(header.ProgramRecords(), [candidate](const ProgramRecord& pg) {
+            return pg.Id() == candidate;
+        });
+    }};
+    if (!taken(id)) {
+        return id;
+    }
+    for (std::int64_t suffix{1};; ++suffix) {
+        std::string candidate{std::format("{}.{}", id, suffix)};
+        if (!taken(candidate)) {
+            return candidate;
+        }
+    }
+}
+
+/// Append a chained @PG describing this tool invocation (PP = current last @PG).
+void AppendProgramRecord(SamHeader& header, std::string id,
+                         const std::optional<std::string>& commandLine)
+{
+    ProgramRecord program{UniqueProgramId(header, std::move(id))};
+    program.SetTag("PN", "pbsamoa");
+    program.SetTag("VN", std::string{GetLibraryInfo().Release});
+    if (commandLine) {
+        program.SetTag("CL", *commandLine);
+    }
+    if (const std::span<const ProgramRecord> existing{header.ProgramRecords()}; !existing.empty()) {
+        program.SetTag("PP", std::string{existing.back().Id()});
+    }
+    header.AddProgramRecord(std::move(program));
+}
 
 }  // namespace Samoa
 }  // namespace PacBio

@@ -432,41 +432,6 @@ std::string SortOrderText(SortOrder order)
     std::unreachable();
 }
 
-/// Return \p id, or `id.N` for the smallest N >= 1 that no existing @PG claims.
-std::string UniqueProgramId(const SamHeader& header, std::string id)
-{
-    const auto taken{[&header](std::string_view candidate) {
-        return std::ranges::any_of(header.ProgramRecords(), [candidate](const ProgramRecord& pg) {
-            return pg.Id() == candidate;
-        });
-    }};
-    if (!taken(id)) {
-        return id;
-    }
-    for (std::int64_t suffix{1};; ++suffix) {
-        std::string candidate{std::format("{}.{}", id, suffix)};
-        if (!taken(candidate)) {
-            return candidate;
-        }
-    }
-}
-
-/// Append a chained @PG describing this tool invocation (PP = current last @PG).
-void AppendProgramRecord(SamHeader& header, std::string id,
-                         const std::optional<std::string>& commandLine)
-{
-    ProgramRecord program{UniqueProgramId(header, std::move(id))};
-    program.SetTag("PN", "pbsamoa");
-    program.SetTag("VN", std::string{GetLibraryInfo().Release});
-    if (commandLine) {
-        program.SetTag("CL", *commandLine);
-    }
-    if (const std::span<const ProgramRecord> existing{header.ProgramRecords()}; !existing.empty()) {
-        program.SetTag("PP", std::string{existing.back().Id()});
-    }
-    header.AddProgramRecord(std::move(program));
-}
-
 /// Upper bound on run files (== open file descriptors) merged in a single pass.
 /// Keeps the simultaneously-open run count well under a conservative process
 /// open-file limit (RLIMIT_NOFILE, e.g. macOS's default soft limit of 256); see

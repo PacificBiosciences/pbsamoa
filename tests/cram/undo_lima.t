@@ -47,3 +47,27 @@ lima @PG is dropped, and a pbsamoa.undo @PG is chained:
   ID:ccs
   ID:zmwfilter
   ID:pbsamoa.undo
+
+Header repair: a @PG that points at a dropped lima record (PP:lima) is reparented to
+lima's own predecessor, an unclipped record (no ls tag) still gets its RG collapsed, and a
+second run gets a suffixed @PG ID instead of a duplicate.
+
+  $ samtools view -h "${TESTDIR}"/../data/lima_demux.bam \
+  >   | awk -F'\t' -v OFS='\t' '
+  >     /^@PG/ && $2 == "ID:lima" { print $0, "PP:ccs"; next }
+  >     /^@PG/ && $2 == "ID:zmwfilter" { print $0, "PP:lima"; next }
+  >     { print }
+  >     !/^@/ && !done { done = 1; $1 = "unclipped/1/ccs"; for (i = 12; i <= NF; ++i) if ($i ~ /^ls:/) $i = ""; print }' \
+  >   | tr -s '\t' | samtools view -b -o chained.bam
+  $ "${PBSAMOA}" undo chained.bam undo1.bam
+  pbsamoa undo: 4 records, 3 restored
+  $ samtools view -H --no-PG undo1.bam | grep '^@PG' | cut -f2 | paste -sd' ' -
+  ID:ccs ID:zmwfilter ID:samtools ID:samtools.1 ID:pbsamoa.undo
+  $ samtools view -H --no-PG undo1.bam | grep '^@PG' | tr '\t' '\n' | grep '^PP:' | paste -sd' ' -
+  PP:ccs PP:zmwfilter PP:samtools PP:samtools.1
+  $ samtools view undo1.bam | grep '^unclipped' | tr '\t' '\n' | grep '^RG:'
+  RG:Z:c8c82efd
+  $ "${PBSAMOA}" undo undo1.bam undo2.bam
+  pbsamoa undo: 4 records, 0 restored
+  $ samtools view -H --no-PG undo2.bam | grep '^@PG' | cut -f2 | tail -2 | paste -sd' ' -
+  ID:pbsamoa.undo ID:pbsamoa.undo.1

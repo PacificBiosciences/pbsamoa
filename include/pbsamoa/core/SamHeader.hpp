@@ -132,6 +132,7 @@ public:
 
     const std::string* GetTag(std::string_view key) const;
     void SetTag(std::string key, std::string value);
+    void RemoveTag(std::string_view key);
     std::span<const std::pair<std::string, std::string>> CustomTags() const;
 
 private:
@@ -245,6 +246,12 @@ private:
         nameToId_;
     mutable std::size_t nameIndexSize_{0};  // tracks reference count at last rebuild
 };
+
+/// \brief Append a chained @PG for a pbsamoa tool invocation.
+///
+/// The ID gets a `.N` suffix when \p id is already taken; PP points at the current last @PG.
+void AppendProgramRecord(SamHeader& header, std::string id,
+                         const std::optional<std::string>& commandLine);
 
 }  // namespace Samoa
 }  // namespace PacBio

@@ -4,6 +4,7 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/LosslessClipping.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
+#include <pbsamoa/core/Tags.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
 
@@ -12,12 +13,14 @@
 #include <pbcopper/cli2/Results.h>
 
 #include <filesystem>
+#include <optional>
 #include <print>
 #include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <cstdint>
@@ -78,16 +81,31 @@ SamHeader UndoneHeader(const SamHeader& input, std::string_view commandLine)
     }
     header.ReadGroups() = std::move(groups);
 
-    std::erase_if(header.ProgramRecords(),
-                  [](const ProgramRecord& pg) { return pg.Id().starts_with("lima"); });
-    ProgramRecord program{"pbsamoa.undo"};
-    program.SetTag("PN", "pbsamoa");
-    program.SetTag("VN", std::string{GetLibraryInfo().Release});
-    program.SetTag("CL", std::string{commandLine});
-    if (!std::empty(header.ProgramRecords())) {
-        program.SetTag("PP", std::string{header.ProgramRecords().back().Id()});
+    // Drop lima's @PG lines. A surviving @PG whose PP names a dropped record is
+    // reparented to that record's own PP, so the chain stays unbroken (SAMv1 §1.3).
+    std::vector<ProgramRecord>& programs{header.ProgramRecords()};
+    for (auto it{std::begin(programs)}; it != std::end(programs);) {
+        if (!it->Id().starts_with("lima")) {
+            ++it;
+            continue;
+        }
+        const std::string removedId{it->Id()};
+        const std::string* removedPp{it->GetTag("PP")};
+        const std::optional<std::string> parent{removedPp ? std::optional{*removedPp}
+                                                          : std::nullopt};
+        it = programs.erase(it);
+        for (ProgramRecord& pg : programs) {
+            const std::string* pp{pg.GetTag("PP")};
+            if ((pp != nullptr) && (*pp == removedId)) {
+                if (parent) {
+                    pg.SetTag("PP", *parent);
+                } else {
+                    pg.RemoveTag("PP");
+                }
+            }
+        }
     }
-    header.AddProgramRecord(std::move(program));
+    AppendProgramRecord(header, "pbsamoa.undo", std::string{commandLine});
     return header;
 }
 
@@ -121,6 +139,11 @@ int Runner(const CLI_v2::Results& results)
         ++numRecords;
         if (RestoreFromLossless(record)) {
             ++numRestored;
+        } else if (const TagValue* rg{record.Tags().Get(RG_TAG)}; rg != nullptr) {
+            // No ls stack (unclipped read): still point RG at the collapsed base group.
+            if (const std::string* id{std::get_if<std::string>(rg)}; id != nullptr) {
+                record.MutableTags().Set(RG_TAG, std::string{ReadGroupBaseId(*id)});
+            }
         }
         writer.Write(record);
     }
