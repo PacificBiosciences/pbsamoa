@@ -77,6 +77,18 @@ Notes:
   `CompressionLevel`, `UseTempFile`) are currently API-only and are not
   exposed as `convert` flags.
 
+### undo — undo barcode clipping
+
+Reverse demultiplexing done by lima or horizon: re-attach the clipped barcode
+flanks (sequence, qualities, kinetics, MM/ML, subread pileup) from the `ls` undo
+stack, unwinding nested clips, and drop the demultiplexing tags
+(`bc bq bx bl bt ql qt ls`, CCS `qs`/`qe`, barcode bits in `cx`). Barcoded read
+groups collapse onto their base ID and lima `@PG` records are removed.
+
+```sh
+pbsamoa undo demux.bam original.bam
+```
+
 ### sort — sort a BAM file
 
 Sort a BAM file by coordinate, query name, or a 2-char tag, using a RAM-bounded

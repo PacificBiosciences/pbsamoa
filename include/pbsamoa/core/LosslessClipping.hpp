@@ -19,21 +19,23 @@ namespace Samoa {
 /// record is then clipped with the standard query clipper. The `ls` format matches
 /// lima, so `lima-undo` can reconstruct the read.
 ///
-/// Sequence, qualities, per-base kinetics, and base modifications (MM/ML) are all
-/// captured for undo. Intended for unmapped reads (lima's use case): the record is
+/// Sequence, qualities, per-base kinetics, base modifications (MM/ML), and the
+/// subread pileup summary (sa/sm/sx, with lima's psa/ssa run fixups) are all captured
+/// for undo. Intended for unmapped reads (lima's use case): the record is
 /// clipped to query and restore rebuilds the query fields, but it does not reverse
 /// CIGAR/POS, so a mapped record's alignment is not reconstructed on undo.
 ///
 /// No-op if the range is empty, out of bounds, or covers the whole sequence.
 /// \throws std::runtime_error if the record carries raw-subread pulse (pc/pt/pq/...)
-///         or subread-pileup (sf/sm/sx/sa) per-base tags: the tag clipper trims them
-///         but capturing the removed values into `ls` for undo is not yet
-///         implemented, so they are rejected rather than silently dropped.
+///         or legacy per-base QV (dq/iq/...) tags: the tag clipper trims them but
+///         capturing the removed values into `ls` for undo is not implemented, so
+///         they are rejected rather than silently dropped.
 void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t clipRight);
 
 /// \brief Inverse of ClipToQueryLossless: reconstruct the pre-clip record from its
 /// `ls` tag, unwinding the full `nested` chain, then remove the demultiplexing
-/// tags (bc/bq/bx/bl/bt/ql/qt/ls).
+/// tags (bc/bq/bx/bl/bt/ql/qt/ls), the CCS qs/qe window, the barcode bits in cx,
+/// and the barcode suffix of RG (like lima-undo).
 /// \returns true if an `ls` tag was present and applied.
 [[nodiscard]] bool RestoreFromLossless(BamRecord& record);
 

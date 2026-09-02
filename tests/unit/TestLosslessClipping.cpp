@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace PacBio {
 namespace Samoa {
@@ -26,6 +27,22 @@ TagArray MakeUInt8Array(const std::vector<std::uint8_t>& values)
         array.AppendUInt8(value);
     }
     return array;
+}
+
+TagArray MakeUInt32Array(const std::vector<std::uint32_t>& values)
+{
+    TagArray array{'I'};
+    for (const std::uint32_t value : values) {
+        array.AppendUInt32(value);
+    }
+    return array;
+}
+
+std::vector<std::uint32_t> DecodeI(const TagArray& array)
+{
+    std::vector<std::uint32_t> out(array.Count());
+    std::memcpy(std::data(out), std::data(array.Data()), std::size(array.Data()));
+    return out;
 }
 
 std::vector<std::uint8_t> Ramp(std::uint8_t start, std::int32_t count)
@@ -267,10 +284,97 @@ TEST(LosslessClipping, RejectsUnsupportedClipTags)
 {
     BamRecord record{MakeUnmappedRecord(20)};
     TagMap tags{record.Tags()};
-    tags.Set(TagKey{'s', 'a'}, MakeUInt8Array({20, 1}));  // subread-pileup, not captured
+    tags.Set(TagKey{'p', 'c'}, std::string(20, 'A'));  // raw-subread pulse, not captured
     record.Tags(std::move(tags));
 
     EXPECT_THROW(ClipToQueryLossless(record, 4, 16), std::runtime_error);
+}
+
+// Subread pileup: sa is run-length encoded, so a clip boundary can fall inside a run.
+// The straddling runs must shrink on clip and grow back on undo (lima psa/ssa), and the
+// flank-only runs must move out to `ls` and back.
+TEST(LosslessClipping, RoundTripRestoresSubreadPileupTags)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'s', 'a'}, MakeUInt32Array({2, 5, 6, 7, 8, 9, 4, 3}));  // runs: 2+6+8+4
+    tags.Set(TagKey{'s', 'm'}, MakeUInt8Array(Ramp(200, 20)));
+    tags.Set(TagKey{'s', 'x'}, MakeUInt8Array(Ramp(60, 20)));
+    record.Tags(std::move(tags));
+    const BamRecord original{record};
+
+    ClipToQueryLossless(record, 4, 16);  // splits run 2 (6 -> 4) and run 3 (8 -> 8 kept, 4 lost)
+    EXPECT_EQ(DecodeI(ArrayTag(record, TagKey{'s', 'a'})),
+              (std::vector<std::uint32_t>{4, 7, 8, 9}));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'm'}), Ramp(204, 12));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'x'}), Ramp(64, 12));
+
+    ASSERT_TRUE(RestoreFromLossless(record));
+    EXPECT_EQ(DecodeI(ArrayTag(record, TagKey{'s', 'a'})),
+              DecodeI(ArrayTag(original, TagKey{'s', 'a'})));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'm'}), TagValues(original, TagKey{'s', 'm'}));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'x'}), TagValues(original, TagKey{'s', 'x'}));
+    EXPECT_EQ(record.Sequence(), original.Sequence());
+}
+
+TEST(LosslessClipping, NestedClipsRestoreSubreadPileupTags)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'s', 'a'}, MakeUInt32Array({2, 5, 6, 7, 8, 9, 4, 3}));
+    tags.Set(TagKey{'s', 'm'}, MakeUInt8Array(Ramp(200, 20)));
+    tags.Set(TagKey{'s', 'x'}, MakeUInt8Array(Ramp(60, 20)));
+    record.Tags(std::move(tags));
+    const BamRecord original{record};
+
+    ClipToQueryLossless(record, 4, 16);
+    ClipToQueryLossless(record, 1, 11);  // second boundary inside the same runs again
+    EXPECT_EQ(DecodeI(ArrayTag(record, TagKey{'s', 'a'})),
+              (std::vector<std::uint32_t>{3, 7, 7, 9}));
+
+    ASSERT_TRUE(RestoreFromLossless(record));
+    EXPECT_EQ(DecodeI(ArrayTag(record, TagKey{'s', 'a'})),
+              DecodeI(ArrayTag(original, TagKey{'s', 'a'})));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'm'}), TagValues(original, TagKey{'s', 'm'}));
+    EXPECT_EQ(TagValues(record, TagKey{'s', 'x'}), TagValues(original, TagKey{'s', 'x'}));
+}
+
+// Undo also reverts what a demultiplexer stamps around the clip: barcode bits in cx,
+// the barcoded read-group suffix, and (CCS only) the qs/qe query window.
+TEST(LosslessClipping, RestoreStripsDemultiplexingSideEffects)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    ClipToQueryLossless(record, 4, 16);
+    TagMap tags{record.Tags()};
+    tags.Set(TagKey{'c', 'x'}, std::int64_t{4 | 8 | 16});  // BARCODE_BEFORE|BARCODE_AFTER|FORWARD
+    tags.Set(TagKey{'q', 's'}, std::int64_t{4});
+    tags.Set(TagKey{'q', 'e'}, std::int64_t{16});
+    tags.Set(RG_TAG, std::string{"abcd1234/1--1"});
+    tags.Set(TagKey{'b', 'c'}, MakeUInt8Array({1, 1}));
+    record.Tags(std::move(tags));
+
+    ASSERT_TRUE(RestoreFromLossless(record));
+    EXPECT_EQ(std::get<std::int64_t>(*record.Tags().Get(TagKey{'c', 'x'})), 16);
+    EXPECT_FALSE(record.Tags().Contains(TagKey{'q', 's'}));
+    EXPECT_FALSE(record.Tags().Contains(TagKey{'q', 'e'}));
+    EXPECT_FALSE(record.Tags().Contains(TagKey{'b', 'c'}));
+    EXPECT_EQ(record.ReadGroupId(), "abcd1234");
+}
+
+TEST(LosslessClipping, RestoreDropsEmptyCxOnCcsOnly)
+{
+    BamRecord ccs{MakeUnmappedRecord(20)};
+    ClipToQueryLossless(ccs, 4, 16);
+    ccs.MutableTags().Set(TagKey{'c', 'x'}, std::int64_t{4 | 8});
+    ASSERT_TRUE(RestoreFromLossless(ccs));
+    EXPECT_FALSE(ccs.Tags().Contains(TagKey{'c', 'x'}));
+
+    BamRecord subread{MakeUnmappedRecord(20)};
+    subread.Name("movie/1/0_20");
+    ClipToQueryLossless(subread, 4, 16);
+    subread.MutableTags().Set(TagKey{'c', 'x'}, std::int64_t{4 | 8});
+    ASSERT_TRUE(RestoreFromLossless(subread));
+    EXPECT_EQ(std::get<std::int64_t>(*subread.Tags().Get(TagKey{'c', 'x'})), 0);
 }
 
 // dq/iq/mq/sq/dt/st are per-base tags the PacBio default clipper trims (substring

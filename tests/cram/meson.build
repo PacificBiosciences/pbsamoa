@@ -53,6 +53,7 @@ if cram_script.found()
         'sort_errors',
         'sort_queryname',
         'sort_spill',
+        'undo_lima',
         'zmi_build',
         'zmi_chunk',
         'zmi_chunk_scatter',

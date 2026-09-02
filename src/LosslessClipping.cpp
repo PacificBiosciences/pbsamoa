@@ -2,14 +2,17 @@
 
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/Basemods.hpp>
+#include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
+#include <pbcopper/data/LocalContextFlags.h>
 #include <pbcopper/json/JSON.h>
 
 #include <algorithm>
 #include <array>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -34,14 +37,25 @@ struct KineticTag
     bool Reverse;       ///< stored mirrored relative to the sequence (rp/ri)
 };
 
-constexpr std::array<KineticTag, 6> KINETIC_TAGS{{
+// Per-base tracks: kinetics plus the subread-pileup match/mismatch counts (sm/sx).
+constexpr std::array<KineticTag, 8> KINETIC_TAGS{{
     {TagKey{'p', 'w'}, "pw", false},
     {TagKey{'i', 'p'}, "ip", false},
     {TagKey{'f', 'p'}, "fp", false},
     {TagKey{'f', 'i'}, "fi", false},
     {TagKey{'r', 'p'}, "rp", true},
     {TagKey{'r', 'i'}, "ri", true},
+    {TagKey{'s', 'm'}, "sm", false},
+    {TagKey{'s', 'x'}, "sx", false},
 }};
+
+// Subread-pileup coverage: run-length encoded [runLen, cov, ...] pairs summing to seqLen.
+constexpr TagKey SA_TAG{'s', 'a'};
+constexpr TagKey CX_TAG{'c', 'x'};
+constexpr TagKey QS_TAG{'q', 's'};
+constexpr TagKey QE_TAG{'q', 'e'};
+constexpr std::int64_t CX_BARCODE_BITS{Data::LocalContextFlags::BARCODE_BEFORE |
+                                       Data::LocalContextFlags::BARCODE_AFTER};
 
 // Demultiplexing tags removed when a record is restored to its pre-clip state.
 constexpr std::array<TagKey, 8> DEMUX_TAGS{{
@@ -161,15 +175,64 @@ std::vector<std::uint8_t> QualitiesFromFastq(std::string_view fastq)
 
 // Per-base tags that the PacBio default clipper trims but lossless storage does not
 // capture: legacy per-base QV/tag strings (dq/iq/mq/sq/dt/st), raw-subread pulse, and
-// subread-pileup tags. Only the kinetic tracks and MM/ML are captured above; everything
-// else is rejected up front so a clip can never silently drop data that undo would need.
-constexpr std::array<TagKey, 22> UNSUPPORTED_CLIP_TAGS{{
+// raw-subread pulse frames. Only the per-base tracks, sa, and MM/ML are captured;
+// everything else is rejected up front so a clip can never silently drop data that
+// undo would need.
+constexpr std::array<TagKey, 19> UNSUPPORTED_CLIP_TAGS{{
     TagKey{'d', 'q'}, TagKey{'i', 'q'}, TagKey{'m', 'q'}, TagKey{'s', 'q'}, TagKey{'d', 't'},
     TagKey{'s', 't'}, TagKey{'p', 'c'}, TagKey{'p', 't'}, TagKey{'p', 'q'}, TagKey{'p', 'v'},
     TagKey{'p', 'g'}, TagKey{'p', 'a'}, TagKey{'p', 'm'}, TagKey{'p', 's'}, TagKey{'p', 'i'},
-    TagKey{'p', 'd'}, TagKey{'p', 'x'}, TagKey{'p', 'e'}, TagKey{'s', 'f'}, TagKey{'s', 'm'},
-    TagKey{'s', 'x'}, TagKey{'s', 'a'},
+    TagKey{'p', 'd'}, TagKey{'p', 'x'}, TagKey{'p', 'e'}, TagKey{'s', 'f'},
 }};
+
+// Split the run-length encoded `sa` coverage at the clip window, lima-style: runs
+// fully inside a flank move to lead/trail; a run straddling a boundary stays in the
+// retained array with its length reduced, and the removed base count is recorded as
+// psa/ssa so undo can grow it back.
+struct PileupSplit
+{
+    std::vector<std::int64_t> Lead;
+    std::vector<std::int64_t> Retained;
+    std::vector<std::int64_t> Trail;
+    std::int64_t LostPrefix{0};
+    std::int64_t LostSuffix{0};
+};
+
+PileupSplit SplitPileupCoverage(const std::vector<std::int64_t>& sa, std::int64_t seqLen,
+                                std::int64_t clipLeft, std::int64_t clipRight)
+{
+    PileupSplit split;
+    std::int64_t runStart{0};
+    for (std::size_t i = 0; i + 1 < std::size(sa); i += 2) {
+        const std::int64_t runLen{sa[i]};
+        const std::int64_t runEnd{runStart + runLen};
+        std::vector<std::int64_t>* dst{&split.Retained};
+        if (runEnd <= clipLeft) {
+            dst = &split.Lead;
+        } else if (runStart >= clipRight) {
+            dst = &split.Trail;
+        }
+        dst->push_back(runLen);
+        dst->push_back(sa[i + 1]);
+        runStart = runEnd;
+    }
+    if (runStart != seqLen) {
+        throw std::runtime_error{"ClipToQueryLossless: sa run lengths do not sum to SEQ length"};
+    }
+    std::int64_t leadBases{0};
+    for (std::size_t i = 0; i < std::size(split.Lead); i += 2) {
+        leadBases += split.Lead[i];
+    }
+    std::int64_t trailBases{0};
+    for (std::size_t i = 0; i < std::size(split.Trail); i += 2) {
+        trailBases += split.Trail[i];
+    }
+    split.LostPrefix = clipLeft - leadBases;
+    split.LostSuffix = (seqLen - clipRight) - trailBases;
+    split.Retained[0] -= split.LostPrefix;
+    split.Retained[std::size(split.Retained) - 2] -= split.LostSuffix;
+    return split;
+}
 
 // Capture the removed base-modification calls (MM/ML) into the `ls` lead/trail
 // maps, plus the per-mod prefix-lost-base count (pMM) needed to recover the first
@@ -406,11 +469,35 @@ void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t 
     JSON::Json basemodPrefix = JSON::Json::object();
     CaptureBasemods(tags, sequence, clipLeft, clipRight, lead, trail, basemodPrefix);
 
+    // The default tag clipper only handles a uint8 `sa`; clip it here and reinstall the
+    // retained runs after the query clip.
+    std::optional<TagArray> retainedSa;
+    std::int64_t lostPrefixSa{0};
+    std::int64_t lostSuffixSa{0};
+    if (const TagArray* saArray{GetArray(tags, SA_TAG)}; saArray != nullptr) {
+        const PileupSplit split{
+            SplitPileupCoverage(DecodeIntArray(*saArray), seqLen, clipLeft, clipRight)};
+        if (clipLeft > 0) {
+            lead["sa"] = split.Lead;
+        }
+        if (clipRight < seqLen) {
+            trail["sa"] = split.Trail;
+        }
+        retainedSa = EncodeIntArray(saArray->ElementType(), split.Retained);
+        lostPrefixSa = split.LostPrefix;
+        lostSuffixSa = split.LostSuffix;
+    }
+
     JSON::Json root = JSON::Json::object();
     root["lead"] = std::move(lead);
     root["trail"] = std::move(trail);
     if (!basemodPrefix.empty()) {
         root["pMM"] = std::move(basemodPrefix);
+    }
+    if (retainedSa) {
+        root["psa"] = lostPrefixSa;
+        root["ssa"] = lostSuffixSa;
+        root["csa"] = -1;  // lima: coverage of an emptied window; impossible here
     }
     // Chain any prior lossless storage so repeated clips can all be undone.
     if (const TagArray* existing{GetArray(tags, LS_TAG)}; existing != nullptr) {
@@ -425,7 +512,11 @@ void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t 
     std::memcpy(std::data(lsArray.MutableData()), std::data(packed), std::size(packed));
     record.MutableTags().Set(LS_TAG, lsArray);
 
+    record.MutableTags().Remove(SA_TAG);
     record.Clip(ClipType::CLIP_TO_QUERY, clipLeft, clipRight);
+    if (retainedSa) {
+        record.MutableTags().Set(SA_TAG, std::move(*retainedSa));
+    }
 }
 
 bool RestoreFromLossless(BamRecord& record)
@@ -491,6 +582,11 @@ bool RestoreFromLossless(BamRecord& record)
         }
     }
 
+    std::optional<Track> saTrack;
+    if (const TagArray* saArray{GetArray(record.Tags(), SA_TAG)}; saArray != nullptr) {
+        saTrack = Track{saArray->ElementType(), false, DecodeIntArray(*saArray)};
+    }
+
     const auto applyFlank = [&](const JSON::Json& cut, bool isLead) {
         if (cut.contains("sq")) {
             const std::string piece = cut["sq"];
@@ -514,12 +610,36 @@ bool RestoreFromLossless(BamRecord& record)
                 track.Values.insert(std::cend(track.Values), std::cbegin(piece), std::cend(piece));
             }
         }
+        if (saTrack && cut.contains("sa")) {
+            const std::vector<std::int64_t> piece = cut["sa"];
+            std::vector<std::int64_t>& sa{saTrack->Values};
+            sa.insert(isLead ? std::cbegin(sa) : std::cend(sa), std::cbegin(piece),
+                      std::cend(piece));
+        }
+    };
+
+    // Grow the boundary runs back before re-attaching the flank runs (lima-undo order).
+    const auto restorePileupRuns = [&](const JSON::Json& node) {
+        if (!saTrack) {
+            return;
+        }
+        std::vector<std::int64_t>& sa{saTrack->Values};
+        if (node.contains("csa") && (node["csa"].get<std::int64_t>() != -1) && std::empty(sa)) {
+            sa = {0, node["csa"].get<std::int64_t>()};
+        }
+        if (node.contains("psa") && !std::empty(sa)) {
+            sa[0] += node["psa"].get<std::int64_t>();
+        }
+        if (node.contains("ssa") && !std::empty(sa)) {
+            sa[std::size(sa) - 2] += node["ssa"].get<std::int64_t>();
+        }
     };
 
     // NOTE: copy-init, not brace-init: `Json node{parsedObject}` would invoke the
     // initializer_list constructor and wrap the object in a one-element array.
     JSON::Json node = JSON::Json::from_msgpack(packed);
     while (!node.is_null()) {
+        restorePileupRuns(node);
         if (node.contains("lead")) {
             applyFlank(node["lead"], true);
         }
@@ -562,8 +682,39 @@ bool RestoreFromLossless(BamRecord& record)
             record.MutableTags().Set(TagKey{'M', 'N'}, std::ssize(sequence));
         }
     }
+    if (saTrack) {
+        record.MutableTags().Set(SA_TAG, EncodeIntArray(saTrack->ElementType, saTrack->Values));
+    }
     for (const TagKey key : DEMUX_TAGS) {
         record.MutableTags().Remove(key);
+    }
+
+    // Demultiplexing side effects beyond the clip itself, mirroring lima-undo.
+    TagMap& tags{record.MutableTags()};
+    // CCS names end in "/ccs[/fwd|/rev]"; segment reads append "/qs_qe" and keep qs/qe.
+    std::string_view name{record.Name()};
+    if (name.ends_with("/fwd") || name.ends_with("/rev")) {
+        name.remove_suffix(4);
+    }
+    const bool isCcs{name.ends_with("/ccs")};
+    if (isCcs) {
+        tags.Remove(QS_TAG);
+        tags.Remove(QE_TAG);
+    }
+    if (const TagValue* cx{tags.Get(CX_TAG)}; cx != nullptr) {
+        if (const std::int64_t* value{std::get_if<std::int64_t>(cx)}; value != nullptr) {
+            const std::int64_t cleared{*value & ~CX_BARCODE_BITS};
+            if ((cleared == 0) && isCcs) {
+                tags.Remove(CX_TAG);
+            } else {
+                tags.Set(CX_TAG, cleared);
+            }
+        }
+    }
+    if (const TagValue* rg{tags.Get(RG_TAG)}; rg != nullptr) {
+        if (const std::string* id{std::get_if<std::string>(rg)}; id != nullptr) {
+            tags.Set(RG_TAG, std::string{ReadGroupBaseId(*id)});
+        }
     }
     return true;
 }

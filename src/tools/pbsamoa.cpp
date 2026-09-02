@@ -6,6 +6,7 @@
 #include "dump/Dump.hpp"
 #include "merge/Merge.hpp"
 #include "sort/Sort.hpp"
+#include "undo/Undo.hpp"
 #include "zmi-build/ZmiBuild.hpp"
 #include "zmi-index/ZmiIndex.hpp"
 #include "zmi-query/ZmiQuery.hpp"
@@ -29,6 +30,7 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         {"sort", SortTool::CreateInterface(), &SortTool::Runner},
         {"merge", MergeTool::CreateInterface(), &MergeTool::Runner},
         {"convert", Convert::CreateInterface(), &Convert::Runner},
+        {"undo", Undo::CreateInterface(), &Undo::Runner},
         {"bai-build", BaiBuild::CreateInterface(), &BaiBuild::Runner},
         {"bai-query", BaiQuery::CreateInterface(), &BaiQuery::Runner},
         {"zmi-build", ZmiBuild::CreateInterface(), &ZmiBuild::Runner},
@@ -40,6 +42,7 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         "Examples:\n"
         "  pbsamoa dump       input.bam              Convert BAM to SAM text\n"
         "  pbsamoa convert    input.bam output.cram  Convert BAM/SAM to CRAM\n"
+        "  pbsamoa undo       demux.bam output.bam   Undo barcode clipping (lima-compatible)\n"
         "  pbsamoa bai-build  input.bam              Build BAI index\n"
         "  pbsamoa bai-query  input.bam chr1:1-1000  Region query via BAI\n"
         "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
