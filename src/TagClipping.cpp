@@ -58,9 +58,14 @@ bool ClearClipValue(TagValue& value)
     return false;
 }
 
+// A value shorter than the clip window is not a per-base track (e.g. horizon emits an
+// empty rp/ri when a strand has no kinetics); leave it untouched rather than read past it.
 bool ClipSubstring(TagValue& value, std::size_t offset, std::size_t length)
 {
     if (auto* str = std::get_if<std::string>(&value)) {
+        if ((offset + length) > std::size(*str)) {
+            return true;
+        }
         *str = str->substr(offset, length);
         return true;
     }
@@ -68,6 +73,9 @@ bool ClipSubstring(TagValue& value, std::size_t offset, std::size_t length)
         const std::size_t elemSize{arr->ElementSize()};
         if (elemSize == 0) {
             return false;
+        }
+        if ((offset + length) > arr->Count()) {
+            return true;
         }
         const std::size_t byteOffset{offset * elemSize};
         const std::size_t byteLength{length * elemSize};

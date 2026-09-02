@@ -81,6 +81,20 @@ TEST(TagClipping, SubstringClip_UInt16Array)
     EXPECT_EQ(v0, 200);
 }
 
+// horizon emits an empty rp/ri array when a strand has no kinetics; clipping must not
+// read past it (it used to memmove from a null buffer) and must keep it as is.
+TEST(TagClipping, SubstringClip_ShorterThanWindow_LeftUntouched)
+{
+    const SubstringClipStrategy strategy;
+    TagValue value{TagArray{'C'}};
+    EXPECT_TRUE(strategy.Clip(value, 4, 12, 20));
+    EXPECT_EQ(std::get<TagArray>(value).Count(), 0U);
+
+    TagValue text{std::string{"abc"}};
+    EXPECT_TRUE(strategy.Clip(text, 4, 12, 20));
+    EXPECT_EQ(std::get<std::string>(text), "abc");
+}
+
 TEST(TagClipping, SubstringClip_UnsupportedType_ReturnsFalse)
 {
     const SubstringClipStrategy strategy;
