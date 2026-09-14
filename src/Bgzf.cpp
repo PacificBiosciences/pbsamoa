@@ -713,6 +713,12 @@ struct BgzfWriter::Impl
     std::uint32_t lastDataBlockIsize{0};
     std::unique_ptr<Parallel::ThreadPool<detail::CompressedBatch>> pool;
     std::unique_ptr<rigtorp::SPSCQueue<detail::WriteItem>> inputQueue;
+    // The packer blocks here when the input queue runs dry. Polling instead would cost one
+    // wakeup per writer every few microseconds, which with hundreds of concurrently open
+    // writers (demultiplexed output) turns into millions of kernel wakeups per second.
+    std::mutex inputMutex;
+    std::condition_variable inputCv;
+    std::atomic<bool> packerWaiting{false};
     std::jthread packerThread;
     std::jthread ioWriterThread;
     std::vector<detail::CompressorPtr> compressors;
@@ -802,6 +808,9 @@ struct BgzfWriter::Impl
     {
         if (packerThread.joinable()) {
             packerThread.request_stop();
+            // The packer may be parked in WaitForInput; its predicate re-checks the token.
+            const std::lock_guard lock{inputMutex};
+            inputCv.notify_all();
         }
         if (ioWriterThread.joinable()) {
             ioWriterThread.request_stop();
@@ -885,6 +894,33 @@ struct BgzfWriter::Impl
         FlushBatchIfFull(batch, batchLimit);
     }
 
+    /// Block until the producer enqueues an item or the stop token fires. The wait is
+    /// unbounded: a timed wait would wake every idle writer on each timeout, and a
+    /// demultiplexed run keeps hundreds of them open. Lost wakeups are prevented by the
+    /// Dekker-style handshake with NotifyInput(): the packer publishes packerWaiting before
+    /// it re-checks the queue, and the producer pushes before it reads packerWaiting, with a
+    /// full fence on both sides, so at least one of them observes the other's write.
+    void WaitForInput(const std::stop_token& stopToken)
+    {
+        std::unique_lock lock{inputMutex};
+        packerWaiting.store(true, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        inputCv.wait(lock, [this, &stopToken] {
+            return (inputQueue->front() != nullptr) || stopToken.stop_requested();
+        });
+        packerWaiting.store(false, std::memory_order_seq_cst);
+    }
+
+    /// Wake the packer after a push; skips the syscall while the packer is not waiting.
+    void NotifyInput()
+    {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (packerWaiting.load(std::memory_order_seq_cst)) {
+            const std::lock_guard lock{inputMutex};
+            inputCv.notify_one();
+        }
+    }
+
     void PackData(const std::span<const std::byte> data, PendingCallback callback,
                   std::vector<detail::UncompressedBlock>& batch,
                   detail::UncompressedBlock& currentBlock);
@@ -905,10 +941,10 @@ struct BgzfWriter::Impl
                 if (!front) {
                     counters.packerStalls.fetch_add(1, std::memory_order_relaxed);
                     ++emptyPollCount;
-                    if (emptyPollCount < 64) {
+                    if (emptyPollCount < 8) {
                         std::this_thread::yield();
                     } else {
-                        std::this_thread::sleep_for(std::chrono::microseconds{50});
+                        WaitForInput(stopToken);
                     }
                     continue;
                 }
@@ -1126,6 +1162,7 @@ void BgzfWriter::Impl::FinishInput()
     while (!closeQueued) {
         closeQueued = inputQueue->try_emplace(detail::WriteItemKind::CLOSE);
         if (closeQueued) {
+            NotifyInput();
             break;
         }
         if (pipelineError.load(std::memory_order_acquire)) {
@@ -1299,6 +1336,7 @@ void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
         impl_->counters.callerStalls.fetch_add(1, std::memory_order_relaxed);
         std::this_thread::yield();
     }
+    impl_->NotifyInput();
     if (stalled) {
         const auto elapsed{std::chrono::steady_clock::now() - stallStart};
         impl_->counters.callerStallNs.fetch_add(
