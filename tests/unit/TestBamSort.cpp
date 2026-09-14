@@ -204,6 +204,54 @@ TEST_F(BamSortTest, SortsCoordinateFromNonSeekableFifoStream)
     EXPECT_EQ(tests::ReadNames(Out()), tests::ReadNames(fileOut));
 }
 
+// The output index callback sees every final record, in file order, with the virtual
+// offset it lands at in the finished file -- for the in-memory fast path and for the
+// spilled multi-run merge alike, and never for the spilled runs themselves.
+TEST_F(BamSortTest, OutputIndexCallbackReportsFinalOffsetsInFileOrder)
+{
+    const SamHeader header{MakeHeader(0)};
+    constexpr std::int32_t RECORDS{400};
+    {
+        BamWriter writer{In(), header};
+        for (std::int32_t i{RECORDS - 1}; i >= 0; --i) {
+            writer.Write(Unmapped(std::format("read/{}", i), std::string(200, 'A')));
+        }
+        writer.Close();
+    }
+    for (const std::size_t memory : {std::size_t{1} << 30, std::size_t{16} * 1024}) {
+        std::vector<std::pair<std::int64_t, std::string>> seen;
+        const SortStats stats{SortBam(
+            In(), Out(),
+            SortConfig{.Order = SortOrder::QUERY_NAME,
+                       .MaxMemory = ByteLimit{memory},
+                       .NumThreads = 2,
+                       .MergeFanIn = 3,
+                       .OutputIndexCallback = [&seen](const std::int64_t offset,
+                                                      const std::span<const std::byte> raw) {
+                           seen.emplace_back(offset, std::string{RawRecordView{raw}.Name()});
+                       }})};
+        ASSERT_EQ(stats.NumRecords, RECORDS);
+        ASSERT_EQ(std::ssize(seen), RECORDS) << "memory " << memory;
+        if (memory < (std::size_t{1} << 30)) {
+            EXPECT_GT(stats.NumRuns, 2U);  // exercised the multi-pass merge
+        }
+        BamRawReader reader{Out()};
+        std::int64_t index{0};
+        while (std::optional<RawRecord> record{reader.ReadRecord()}) {
+            ASSERT_LT(index, std::ssize(seen));
+            EXPECT_EQ(record->Name(), seen[index].second);
+            EXPECT_EQ(record->Name(), std::format("read/{}", index));
+            ++index;
+        }
+        for (const auto& [offset, name] : seen) {
+            reader.Seek(VirtualOffset{static_cast<std::uint64_t>(offset)});
+            const std::optional<RawRecord> record{reader.ReadRecord()};
+            ASSERT_TRUE(record.has_value());
+            EXPECT_EQ(record->Name(), name);
+        }
+    }
+}
+
 TEST_F(BamSortTest, MultiRunMergeEqualsInMemoryAndIsMonotonic)
 {
     constexpr std::int32_t NUM_RECORDS{300};

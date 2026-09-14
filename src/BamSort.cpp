@@ -511,10 +511,22 @@ std::vector<MergeSource> OpenRunSources(std::span<const std::filesystem::path> r
 /// preserved across passes because batches are contiguous in run order and merged
 /// lowest-index-first at every level; the in-memory tail (newest records) is merged
 /// last so equal keys keep input order.
+/// The final output writer: with the caller's index callback attached when one is set,
+/// since a callback-enabled writer copies every record's bytes for the callback.
+BamWriter MakeOutputWriter(const std::filesystem::path& path, const SamHeader& header,
+                           const BamWriterConfig& config, const IndexCallback& callback)
+{
+    if (callback) {
+        return BamWriter{path, header, config, callback};
+    }
+    return BamWriter{path, header, config};
+}
+
 std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
                        std::vector<Item> memoryRun, const std::filesystem::path& outPath,
                        const SamHeader& outHeader, const BamWriterConfig& outWriterConfig,
-                       const SortContext& ctx, const std::size_t fanIn)
+                       const SortContext& ctx, const std::size_t fanIn,
+                       const IndexCallback& outputCallback)
 {
     const bool hasMemory{!memoryRun.empty()};
 
@@ -525,7 +537,7 @@ std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
         if (hasMemory) {
             sources.push_back(MergeSource{MergeSource::MemoryState{std::move(memoryRun)}});
         }
-        BamWriter writer{outPath, outHeader, outWriterConfig};
+        BamWriter writer{MakeOutputWriter(outPath, outHeader, outWriterConfig, outputCallback)};
         const std::int64_t recordsWritten{MergeSourcesIntoWriter(sources, writer, ctx)};
         writer.Close();
         return recordsWritten;
@@ -575,7 +587,7 @@ std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
     }
 
     std::vector<MergeSource> sources{OpenRunSources(level)};
-    BamWriter writer{outPath, outHeader, outWriterConfig};
+    BamWriter writer{MakeOutputWriter(outPath, outHeader, outWriterConfig, outputCallback)};
     const std::int64_t recordsWritten{MergeSourcesIntoWriter(sources, writer, ctx)};
     writer.Close();
     return recordsWritten;
@@ -1238,14 +1250,15 @@ SortStats SortBam(const SamHeader& inputHeader,
 
     if (runPaths.empty()) {
         // Fast path: whole input fit the budget — one run, no merge.
-        BamWriter writer{writePath, outHeader, outWriterConfig};
+        BamWriter writer{
+            MakeOutputWriter(writePath, outHeader, outWriterConfig, config.OutputIndexCallback)};
         for (const Item& item : run) {
             writer.Write(item.Record);
         }
         writer.Close();
     } else {
         MergeRuns(runPaths, std::move(run), writePath, outHeader, outWriterConfig, ctx,
-                  config.MergeFanIn);
+                  config.MergeFanIn, config.OutputIndexCallback);
     }
 
     if (!streamOutput) {

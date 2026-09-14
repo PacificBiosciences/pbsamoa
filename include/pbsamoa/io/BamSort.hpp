@@ -2,6 +2,7 @@
 #define PBSAMOA_IO_BAMSORT_HPP
 
 #include <pbsamoa/io/BamRawReader.hpp>  // ByteLimit, Literals
+#include <pbsamoa/io/BamWriter.hpp>     // IndexCallback
 
 #include <array>
 #include <filesystem>
@@ -67,6 +68,13 @@ struct SortConfig
     /// Maximum run readers per merge pass; at least 2. Divide a process-wide
     /// descriptor budget across concurrent sorts before setting this.
     std::size_t MergeFanIn{64};
+
+    /// Invoked for every record of the final output, with its virtual offset in the
+    /// finished file and its raw bytes, for on-the-fly indexing (e.g. a PBI). Fires from
+    /// the output writer's IO thread only for the final file, never for spilled runs or
+    /// intermediate merge passes, and has drained before SortBam returns. Empty: no
+    /// per-record copy is made.
+    IndexCallback OutputIndexCallback{};
 };
 
 /// \brief Outcome statistics from a sort.
