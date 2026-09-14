@@ -432,12 +432,6 @@ std::string SortOrderText(SortOrder order)
     std::unreachable();
 }
 
-/// Upper bound on run files (== open file descriptors) merged in a single pass.
-/// Keeps the simultaneously-open run count well under a conservative process
-/// open-file limit (RLIMIT_NOFILE, e.g. macOS's default soft limit of 256); see
-/// MergeRuns for the multi-pass fallback when there are more runs than this.
-constexpr std::size_t MERGE_MAX_FANIN{64};
-
 /// Heap-merge already-open \p sources into \p writer (left open for the caller to
 /// close). Returns the number of records written.
 ///
@@ -511,7 +505,7 @@ std::vector<MergeSource> OpenRunSources(std::span<const std::filesystem::path> r
 /// Each open run holds a file descriptor, so opening every run at once fails once
 /// the run count approaches the process open-file limit (RLIMIT_NOFILE) — a tiny
 /// --memory budget over a large input can produce thousands of runs. At most
-/// MERGE_MAX_FANIN runs are open at any time: when there are more, runs are merged
+/// The caller's fan-in limit bounds open runs: when there are more, runs are merged
 /// in fixed-size batches into intermediate run files across as many passes as needed
 /// (a balanced k-way merge tree) until a final batch fits. Tie-break stability is
 /// preserved across passes because batches are contiguous in run order and merged
@@ -520,13 +514,13 @@ std::vector<MergeSource> OpenRunSources(std::span<const std::filesystem::path> r
 std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
                        std::vector<Item> memoryRun, const std::filesystem::path& outPath,
                        const SamHeader& outHeader, const BamWriterConfig& outWriterConfig,
-                       const SortContext& ctx)
+                       const SortContext& ctx, const std::size_t fanIn)
 {
     const bool hasMemory{!memoryRun.empty()};
 
     // Single pass: every run file plus the in-memory tail fit under the fan-in
     // budget, so merge straight to the output and keep the tail in RAM.
-    if ((std::size(runPaths) + (hasMemory ? std::size_t{1} : std::size_t{0})) <= MERGE_MAX_FANIN) {
+    if ((std::size(runPaths) + (hasMemory ? std::size_t{1} : std::size_t{0})) <= fanIn) {
         std::vector<MergeSource> sources{OpenRunSources(runPaths)};
         if (hasMemory) {
             sources.push_back(MergeSource{MergeSource::MemoryState{std::move(memoryRun)}});
@@ -560,11 +554,11 @@ std::int64_t MergeRuns(const std::vector<std::filesystem::path>& runPaths,
     }
 
     // Reduce the run count by merging fixed-size batches until a single batch remains.
-    while (std::size(level) > MERGE_MAX_FANIN) {
+    while (std::size(level) > fanIn) {
         std::vector<std::filesystem::path> next{};
-        next.reserve((std::size(level) + MERGE_MAX_FANIN - 1) / MERGE_MAX_FANIN);
-        for (std::size_t start{0}; start < std::size(level); start += MERGE_MAX_FANIN) {
-            const std::size_t count{std::min(MERGE_MAX_FANIN, std::size(level) - start)};
+        next.reserve((std::size(level) + fanIn - 1) / fanIn);
+        for (std::size_t start{0}; start < std::size(level); start += fanIn) {
+            const std::size_t count{std::min(fanIn, std::size(level) - start)};
             std::filesystem::path interPath{detail::TemporaryWritePath(outPath)};
             interPath += ".merge.bam";
             intermediateCleanup.Add(interPath);
@@ -1121,6 +1115,20 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         throw std::runtime_error{
             std::format("SortBam: input file does not exist: {}", input.string())};
     }
+    auto reader = std::make_shared<BamRawReader>(
+        input, BamRawReaderConfig{.BgzfWorkers = ResolveThreads(config.NumThreads)});
+    const SamHeader header{reader->Header()};
+    return SortBam(
+        header, [reader = std::move(reader)]() { return reader->ReadRecord(); }, output, config);
+}
+
+SortStats SortBam(const SamHeader& inputHeader,
+                  std::function<std::optional<RawRecord>()> nextRecord,
+                  const std::filesystem::path& output, const SortConfig& config)
+{
+    if (!nextRecord || (config.MergeFanIn < 2)) {
+        throw std::invalid_argument{"SortBam requires a record source and merge fan-in >= 2"};
+    }
     if (config.Minimise && (config.Order != SortOrder::COORDINATE)) {
         throw std::runtime_error{"SortBam: minimiser clustering requires coordinate order"};
     }
@@ -1166,8 +1174,6 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
     SamHeader outHeader{};
 
     {
-        BamRawReader reader{input, BamRawReaderConfig{.BgzfWorkers = numThreads}};
-        const SamHeader& inputHeader{reader.Header()};
         ctx.NumReferences = inputHeader.NumReferences();
 
         SamHeader runHeader{inputHeader};
@@ -1190,7 +1196,7 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
             runBytes = 0;
         };
 
-        while (std::optional<RawRecord> record{reader.ReadRecord()}) {
+        while (std::optional<RawRecord> record{nextRecord()}) {
             hasMapped = hasMapped || (record->RefId() >= 0);
             Item item{MakeItem(std::move(*record), ctx)};
             const std::size_t footprint{Footprint(item)};
@@ -1212,7 +1218,8 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         }
         outHeader.SetGroupOrder("");  // drop any stale group-order
         AppendProgramRecord(outHeader, "pbsamoa.sort", config.CommandLine);
-    }  // input reader closed here; its BGZF worker threads are released
+    }
+    nextRecord = nullptr;  // Release owned readers before opening merge runs.
 
     // The remaining `run` is the final (unspilled) run for both paths below.
     std::ranges::stable_sort(run, less);
@@ -1237,7 +1244,8 @@ SortStats SortBam(const std::filesystem::path& input, const std::filesystem::pat
         }
         writer.Close();
     } else {
-        MergeRuns(runPaths, std::move(run), writePath, outHeader, outWriterConfig, ctx);
+        MergeRuns(runPaths, std::move(run), writePath, outHeader, outWriterConfig, ctx,
+                  config.MergeFanIn);
     }
 
     if (!streamOutput) {

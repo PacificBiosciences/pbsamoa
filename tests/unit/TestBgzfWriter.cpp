@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <format>
 #include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace PacBio {
@@ -30,6 +32,42 @@ struct CallbackCapture
         payloads->emplace_back(std::ranges::begin(rawData), std::ranges::end(rawData));
     }
 };
+
+void CheckSharedOutput(const std::filesystem::path& path, const std::size_t i,
+                       const std::size_t records, const std::span<const std::int64_t> offsets,
+                       const std::span<const std::byte> markers)
+{
+    BgzfReader reader{path};
+    ASSERT_TRUE(reader.HasEofMarker());
+    ASSERT_EQ(std::size(offsets), records);
+    std::vector<std::byte> output;
+    std::vector<std::byte> block(65536);
+    std::vector<std::size_t> recordPositions;
+    while (true) {
+        const auto size{reader.ReadBlock(block)};
+        ASSERT_TRUE(size);
+        if (*size == 0) {
+            break;
+        }
+        const VirtualOffset blockOffset{reader.Tell()};
+        for (const std::int64_t offset : offsets) {
+            const VirtualOffset recordOffset{static_cast<std::uint64_t>(offset)};
+            if (recordOffset.BlockOffset() == blockOffset.BlockOffset()) {
+                recordPositions.push_back(std::size(output) + recordOffset.WithinBlockOffset());
+            }
+        }
+        output.insert(std::end(output), std::begin(block), std::begin(block) + *size);
+    }
+    ASSERT_EQ(std::size(output), records * 70000);
+    ASSERT_EQ(std::size(recordPositions), records);
+    for (std::size_t round{0}; round < records; ++round) {
+        EXPECT_EQ(recordPositions[round], round * 70000);
+        const std::byte value{static_cast<std::byte>(i + round)};
+        EXPECT_EQ(markers[round], value);
+        EXPECT_TRUE(std::ranges::all_of(std::span{output}.subspan(round * 70000, 70000),
+                                        [value](const std::byte byte) { return byte == value; }));
+    }
+}
 
 }  // namespace
 
@@ -276,6 +314,79 @@ TEST_F(BgzfWriterTest, OversizedRecordIsSplitAcrossBlocksAndCallbackFiresOnce)
 
     const BgzfWriteMetrics metrics{writer.GetMetrics()};
     EXPECT_GE(metrics.BlocksWritten, 2U);
+}
+
+TEST_F(BgzfWriterTest, SharedPoolPreservesInterleavedDataAndOffsetsWithBoundedQueues)
+{
+    for (const std::size_t workers : {1UZ, 3UZ}) {
+        const auto pool{std::make_shared<BgzfWriterPool>(workers, 1)};
+        std::vector<std::vector<std::int64_t>> offsets(64);
+        std::vector<std::vector<std::byte>> markers(64);
+        std::vector<std::unique_ptr<BgzfWriter>> writers;
+        for (std::size_t i{0}; i < std::size(offsets); ++i) {
+            writers.push_back(std::make_unique<BgzfWriter>(
+                tempDir_.File(std::format("shared-{}-{}.bgzf", workers, i)),
+                BgzfWriterConfig{.CompressionLevel = (i % 2 == 0) ? 1 : 9,
+                                 .BgzfWorkers = 0,
+                                 .InputQueueCapacity = 0,
+                                 .BlocksPerBatch = 1,
+                                 .Pool = pool}));
+            writers.back()->SetCallback(
+                [&, i](const std::int64_t offset, const std::span<const std::byte> marker) {
+                    offsets[i].push_back(offset);
+                    markers[i].push_back(marker.front());
+                });
+        }
+        // One destination closes early, one stays empty, and records cross block boundaries.
+        for (std::size_t round{0}; round < 3; ++round) {
+            for (std::size_t i{round == 0 ? 0UZ : 1UZ}; i + 1 < std::size(writers); ++i) {
+                const std::byte value{static_cast<std::byte>(i + round)};
+                writers[i]->Write(std::vector<std::byte>(70000, value),
+                                  PendingCallback{.rawData = {value}, .active = true});
+            }
+            writers.front()->Close();
+        }
+        for (std::size_t i{0}; i < std::size(writers); ++i) {
+            writers[i]->Close();
+            const std::size_t records{(i + 1 == std::size(writers)) ? 0UZ : (i == 0 ? 1UZ : 3UZ)};
+            CheckSharedOutput(tempDir_.File(std::format("shared-{}-{}.bgzf", workers, i)), i,
+                              records, offsets[i], markers[i]);
+            EXPECT_LE(writers[i]->GetMetrics().Pool.PeakActiveWorkers, workers);
+        }
+    }
+}
+
+TEST_F(BgzfWriterTest, SharedPoolSurvivesWriterFailureAndOwnerRelease)
+{
+    auto pool{std::make_shared<BgzfWriterPool>(1, 1)};
+    const auto goodPath{tempDir_.File("good.bgzf")};
+    BgzfWriter good{goodPath, {.BlocksPerBatch = 1, .Pool = pool}};
+    BgzfWriter bad{tmpPath_, {.BlocksPerBatch = 1, .Pool = pool}};
+    pool.reset();
+    bad.SetCallback([](std::int64_t, std::span<const std::byte>) {
+        throw std::runtime_error{"callback failure"};
+    });
+    bad.Write(std::vector<std::byte>(70000), {.active = true});
+    EXPECT_THROW(bad.Close(), std::runtime_error);
+    EXPECT_NO_THROW(bad.Close());
+    good.Write(std::vector<std::byte>(70000, std::byte{42}));
+    EXPECT_NO_THROW(good.Close());
+    EXPECT_TRUE(BgzfReader{goodPath}.HasEofMarker());
+    EXPECT_THROW(good.Write(std::vector<std::byte>(1)), std::runtime_error);
+}
+
+TEST_F(BgzfWriterTest, SharedPoolMoveAssignmentDrainsPreviousWriter)
+{
+    const auto pool{std::make_shared<BgzfWriterPool>(1, 1)};
+    const auto secondPath{tempDir_.File("second.bgzf")};
+    BgzfWriter first{tmpPath_, {.BlocksPerBatch = 1, .Pool = pool}};
+    BgzfWriter second{secondPath, {.BlocksPerBatch = 1, .Pool = pool}};
+    first.Write(std::vector<std::byte>(70000, std::byte{1}));
+    second.Write(std::vector<std::byte>(70000, std::byte{2}));
+    first = std::move(second);
+    EXPECT_TRUE(BgzfReader{tmpPath_}.HasEofMarker());
+    first.Close();
+    EXPECT_TRUE(BgzfReader{secondPath}.HasEofMarker());
 }
 
 }  // namespace Samoa

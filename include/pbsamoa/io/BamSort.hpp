@@ -5,6 +5,7 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -62,6 +63,10 @@ struct SortConfig
     /// sets this. Spilled runs then fall back to the current directory when no
     /// TempDir is given. Existing non-regular outputs are also auto-detected.
     bool DirectToOutput{false};
+
+    /// Maximum run readers per merge pass; at least 2. Divide a process-wide
+    /// descriptor budget across concurrent sorts before setting this.
+    std::size_t MergeFanIn{64};
 };
 
 /// \brief Outcome statistics from a sort.
@@ -83,6 +88,11 @@ struct SortStats
 /// \throws std::runtime_error on I/O or invariant errors (mirrors BamWriter).
 SortStats SortBam(const std::filesystem::path& input, const std::filesystem::path& output,
                   const SortConfig& config = {});
+
+/// Sort records supplied in source order under the exact destination header.
+/// The source is released after ingestion, before merging spill runs.
+SortStats SortBam(const SamHeader& header, std::function<std::optional<RawRecord>()> nextRecord,
+                  const std::filesystem::path& output, const SortConfig& config = {});
 
 namespace detail {
 

@@ -31,6 +31,8 @@ ZmwIndex::ZmwIndex(ZmwIndex&& other) noexcept
     : rgIds_{std::move(other.rgIds_)}
     , zmws_{std::move(other.zmws_)}
     , offsets_{std::move(other.offsets_)}
+    , hasBarcodeData_{other.hasBarcodeData_}
+    , barcodeOffsets_{std::move(other.barcodeOffsets_)}
     , zmwIndex_{std::move(other.zmwIndex_)}
     , identityIndex_{std::move(other.identityIndex_)}
     , cachedNumZmws_{other.cachedNumZmws_}
@@ -46,6 +48,8 @@ ZmwIndex& ZmwIndex::operator=(ZmwIndex&& other) noexcept
         rgIds_ = std::move(other.rgIds_);
         zmws_ = std::move(other.zmws_);
         offsets_ = std::move(other.offsets_);
+        hasBarcodeData_ = other.hasBarcodeData_;
+        barcodeOffsets_ = std::move(other.barcodeOffsets_);
         zmwIndex_ = std::move(other.zmwIndex_);
         identityIndex_ = std::move(other.identityIndex_);
         cachedNumZmws_ = other.cachedNumZmws_;
@@ -240,8 +244,13 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
 
     // Read entrySize from offset 8 (2 bytes LE)
     const std::uint16_t entrySize{ReadU16LE(std::data(data) + 8)};
-    if (entrySize < detail::ZMI_ENTRY_SIZE) {
+    if (entrySize < detail::ZMI_BASE_ENTRY_SIZE) {
         throw std::runtime_error{std::format("ZMI entrySize too small: {}", entrySize)};
+    }
+    const std::uint32_t version{ReadU32LE(std::data(data) + 4)};
+    const bool hasBarcodes{version >= detail::ZMI_VERSION};
+    if (hasBarcodes && (entrySize < detail::ZMI_ENTRY_SIZE)) {
+        throw std::runtime_error{"ZMI entry too small for barcode fields"};
     }
     const std::uint64_t numRecordsHeader{ReadU64LE(std::data(data) + 12)};
 
@@ -258,6 +267,7 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
     }
 
     ZmwIndex index;
+    index.hasBarcodeData_ = hasBarcodes;
     index.rgIds_.reserve(numEntries);
     index.zmws_.reserve(numEntries);
     index.offsets_.reserve(numEntries);
@@ -272,6 +282,14 @@ ZmwIndex ZmwIndex::FromZmi(const std::filesystem::path& path)
         index.rgIds_.push_back(rgId);
         index.zmws_.push_back(zmw);
         index.offsets_.push_back(virtualOffset);
+        if (hasBarcodes) {
+            const BarcodePair pair{ReadI32LE(entry + 16), ReadI32LE(entry + 20)};
+            if ((pair.Forward < -1) || (pair.Forward > 65535) || (pair.Reverse < -1) ||
+                (pair.Reverse > 65535)) {
+                throw std::runtime_error{"ZMI barcode IDs must be in [-1, 65535]"};
+            }
+            index.barcodeOffsets_[pair].push_back(virtualOffset);
+        }
     }
 
     return index;
@@ -381,6 +399,26 @@ std::vector<std::int64_t> ZmwIndex::Find(std::int32_t zmw) const
     std::vector<std::int64_t> result;
     AppendLookupOffsets(result, zmwIndex_, zmw, offsets_);
     return result;
+}
+
+bool ZmwIndex::HasBarcodeData() const { return hasBarcodeData_; }
+
+std::span<const std::int64_t> ZmwIndex::FindBarcodes(const BarcodePair barcodes) const
+{
+    if (!hasBarcodeData_) {
+        throw std::runtime_error{"Index has no barcode data; rebuild the ZMI index"};
+    }
+    const auto found{barcodeOffsets_.find(barcodes)};
+    return (found == std::end(barcodeOffsets_)) ? std::span<const std::int64_t>{}
+                                                : std::span<const std::int64_t>{found->second};
+}
+
+std::vector<BarcodePair> ZmwIndex::BarcodePairs() const
+{
+    if (!hasBarcodeData_) {
+        throw std::runtime_error{"Index has no barcode data; rebuild the ZMI index"};
+    }
+    return barcodeOffsets_ | std::views::keys | std::ranges::to<std::vector>();
 }
 
 std::vector<std::int64_t> ZmwIndex::Find(ZmwIdentity id) const

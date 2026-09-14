@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <stdexcept>
 
 #include <cstdint>
 
@@ -57,12 +58,19 @@ ZmiWriter::~ZmiWriter()
 ZmiWriter::ZmiWriter(ZmiWriter&&) noexcept = default;
 ZmiWriter& ZmiWriter::operator=(ZmiWriter&&) noexcept = default;
 
-void ZmiWriter::AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virtualOffset)
+void ZmiWriter::AddRecord(const std::int32_t rgId, const std::int32_t zmw,
+                          const std::int64_t virtualOffset, const BarcodePair barcodes)
 {
+    if ((barcodes.Forward < -1) || (barcodes.Forward > 65535) || (barcodes.Reverse < -1) ||
+        (barcodes.Reverse > 65535)) {
+        throw std::invalid_argument{"ZMI barcode IDs must be in [-1, 65535]"};
+    }
     std::array<std::byte, detail::ZMI_ENTRY_SIZE> entry{};
     WriteLE(std::data(entry), rgId);
     WriteLE(std::data(entry) + 4, zmw);
     WriteLE(std::data(entry) + 8, virtualOffset);
+    WriteLE(std::data(entry) + 16, barcodes.Forward);
+    WriteLE(std::data(entry) + 20, barcodes.Reverse);
 
     impl_->bgzf.Write(entry);
 }

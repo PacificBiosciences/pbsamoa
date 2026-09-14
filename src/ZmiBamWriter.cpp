@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 
 namespace PacBio {
 namespace Samoa {
@@ -24,12 +25,13 @@ struct ZmiBamWriter::Impl
         , bam{bamPath, header, cfg,
               [this](std::int64_t virtualOffset, std::span<const std::byte> rawData) {
                   // This lambda reads the raw bytes directly. It does not build a
-                  // RawRecord and a TagMap first, because it needs only the RG tag
+                  // RawRecord and a TagMap first, because it needs only RG, bc,
                   // and the read name. A full tag map would copy the PacBio ip/pw
                   // kinetics on the writer's IO thread, only to discard that data
                   // afterward.
-                  const ZmwIdentity identity{detail::ParseRecordIdentity(rawData)};
-                  zmi.AddRecord(identity.rgId, identity.zmw, virtualOffset);
+                  BarcodePair barcodes;
+                  const ZmwIdentity identity{detail::ParseRecordIdentity(rawData, &barcodes)};
+                  zmi.AddRecord(identity.rgId, identity.zmw, virtualOffset, barcodes);
               }}
     {
     }
@@ -68,11 +70,25 @@ void ZmiBamWriter::Close()
     if (impl_->closed) {
         return;
     }
-    // BamWriter must close first (flushes remaining records + fires callbacks)
-    impl_->bam.Close();
-    // Then ZmiWriter closes (finalizes the index)
-    impl_->zmi.Close();
     impl_->closed = true;
+    // BamWriter must close first (flushes remaining records + fires callbacks)
+    std::exception_ptr error;
+    try {
+        impl_->bam.Close();
+    } catch (...) {
+        error = std::current_exception();
+    }
+    // Drain the index even when BAM serialization or an index callback failed.
+    try {
+        impl_->zmi.Close();
+    } catch (...) {
+        if (!error) {
+            error = std::current_exception();
+        }
+    }
+    if (error) {
+        std::rethrow_exception(error);
+    }
 }
 
 }  // namespace Samoa

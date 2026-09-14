@@ -31,6 +31,10 @@ ZmwIdentity ParseZmwIdentity(std::string_view name, const TagMap& tags);
 
 namespace detail {
 
+/// Read bc:B:S or bc:B:s without copying other tags. Missing bc yields {-1, -1}.
+/// Throws on malformed aux data or a bc tag that is not a pair of valid IDs.
+BarcodePair ParseBarcodes(std::span<const std::byte> aux);
+
 /// \brief Returns the length in bytes of the value part of a BAM aux field,
 /// based on the type code.
 ///
@@ -142,7 +146,8 @@ namespace detail {
 /// group value.
 ///
 /// \throws std::runtime_error on a structurally malformed record.
-inline ZmwIdentity ParseRecordIdentity(std::span<const std::byte> recordBody)
+inline ZmwIdentity ParseRecordIdentity(std::span<const std::byte> recordBody,
+                                       BarcodePair* barcodes = nullptr)
 {
     constexpr std::size_t FIXED_FIELDS_SIZE{32U};
     if (std::size(recordBody) < FIXED_FIELDS_SIZE) {
@@ -180,6 +185,10 @@ inline ZmwIdentity ParseRecordIdentity(std::span<const std::byte> recordBody)
     const std::string_view name{reinterpret_cast<const char*>(std::data(recordBody) + nameOffset),
                                 static_cast<std::size_t>(nameLen) - 1U};
     const std::span<const std::byte> aux{recordBody.subspan(auxOffset)};
+
+    if (barcodes != nullptr) {
+        *barcodes = ParseBarcodes(aux);
+    }
 
     const std::optional<std::string_view> rgText{FindZTag(aux, RG_TAG)};
     return ZmwIdentity{rgText ? ParseReadGroupId(*rgText) : 0, ParseZmwFromName(name)};

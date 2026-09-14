@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -652,6 +653,35 @@ struct WritePipelineCounters
 
 }  // namespace detail
 
+struct BgzfWriterPool::Impl
+{
+    // ponytail: global FIFO can delay other files behind a slow batch/write; add
+    // per-file result scheduling only if measured throughput requires it.
+    Parallel::ThreadPool<std::packaged_task<void()>> Pool;
+    // Join the consumer before destroying its pool.
+    std::jthread OutputThread;
+
+    Impl(const std::size_t numWorkers, const std::size_t queueMultiplier)
+        : Pool{
+              {.NumThreads = numWorkers, .QueueMultiplier = queueMultiplier, .EnableMetrics = true}}
+        , OutputThread{[this] {
+            // packaged_task captures output exceptions in each writer's future.
+            while (Pool.ConsumeWith([](std::packaged_task<void()> task) { task(); })) {
+            }
+        }}
+    {
+    }
+
+    ~Impl() { Pool.Finalize(); }
+};
+
+BgzfWriterPool::BgzfWriterPool(const std::size_t numWorkers, const std::size_t queueMultiplier)
+    : impl_{std::make_unique<Impl>(numWorkers, queueMultiplier)}
+{
+}
+
+BgzfWriterPool::~BgzfWriterPool() = default;
+
 struct BgzfWriter::Impl
 {
     struct CompressedBatchWriter
@@ -666,6 +696,7 @@ struct BgzfWriter::Impl
         std::vector<detail::UncompressedBlock> blocks;
         std::vector<detail::CompressorPtr>* compressors;
         detail::WritePipelineCounters* counters;
+        int compressionLevel{6};
 
         detail::CompressedBatch operator()(Parallel::ThreadIndex threadIdx);
     };
@@ -692,6 +723,9 @@ struct BgzfWriter::Impl
     mutable std::mutex errorMutex;
     detail::WritePipelineCounters counters;
     bool closed{false};
+    std::vector<detail::UncompressedBlock> sharedBatch;
+    detail::UncompressedBlock sharedBlock;
+    std::future<void> lastWrite;
 
     explicit Impl(const std::filesystem::path& path, const BgzfWriterConfig& cfg)
         : config{cfg}, finalPath{path}
@@ -699,10 +733,10 @@ struct BgzfWriter::Impl
         if (config.CompressionLevel < 1 || config.CompressionLevel > 12) {
             throw std::invalid_argument{"BgzfWriter: compression level must be in [1, 12]"};
         }
-        if (config.BgzfWorkers == 0) {
+        if (!config.Pool && (config.BgzfWorkers == 0)) {
             throw std::invalid_argument{"BgzfWriter: BgzfWorkers must be > 0"};
         }
-        if (config.InputQueueCapacity == 0) {
+        if (!config.Pool && (config.InputQueueCapacity == 0)) {
             throw std::invalid_argument{"BgzfWriter: InputQueueCapacity must be > 0"};
         }
         if (config.BlocksPerBatch <= 0) {
@@ -713,6 +747,11 @@ struct BgzfWriter::Impl
         file.open(writePath, std::ios::binary | std::ios::trunc);
         if (!file.is_open()) {
             throw std::runtime_error{"Cannot open file for writing: " + writePath.string()};
+        }
+
+        if (config.Pool) {
+            ResetCurrentBlock(sharedBlock);
+            return;
         }
 
         compressors.reserve(config.BgzfWorkers);
@@ -821,16 +860,11 @@ struct BgzfWriter::Impl
         currentBlock.data.reserve(MAX_UNCOMPRESSED_SIZE);
     }
 
-    void SubmitBatch(std::vector<detail::UncompressedBlock>& batch, std::size_t batchLimit)
-    {
-        if (std::empty(batch)) {
-            return;
-        }
-        auto blocks{std::move(batch)};
-        batch.reserve(batchLimit);
+    void SubmitBatch(std::vector<detail::UncompressedBlock>& batch, std::size_t batchLimit);
 
-        pool->Submit(CompressBatchTask{std::move(blocks), &compressors, &counters});
-    }
+    void FinishInput();
+
+    void DrainSharedWrites();
 
     void FlushBatchIfFull(std::vector<detail::UncompressedBlock>& batch, std::size_t batchLimit)
     {
@@ -850,6 +884,10 @@ struct BgzfWriter::Impl
         ResetCurrentBlock(currentBlock);
         FlushBatchIfFull(batch, batchLimit);
     }
+
+    void PackData(const std::span<const std::byte> data, PendingCallback callback,
+                  std::vector<detail::UncompressedBlock>& batch,
+                  detail::UncompressedBlock& currentBlock);
 
     void PackerLoop(std::stop_token stopToken)
     {
@@ -888,37 +926,7 @@ struct BgzfWriter::Impl
                     continue;
                 }
 
-                const bool fitsInSingleBlock{std::size(item.data) <= MAX_UNCOMPRESSED_SIZE};
-                if (fitsInSingleBlock && !std::empty(currentBlock.data) &&
-                    (std::size(currentBlock.data) + std::size(item.data) > MAX_UNCOMPRESSED_SIZE)) {
-                    SealCurrentBlock(batch, currentBlock, batchLimit);
-                }
-
-                std::size_t dataPos{0};
-                bool callbackAssigned{false};
-                while (dataPos < std::size(item.data)) {
-                    if (std::size(currentBlock.data) >= MAX_UNCOMPRESSED_SIZE) {
-                        SealCurrentBlock(batch, currentBlock, batchLimit);
-                    }
-
-                    const std::size_t space{MAX_UNCOMPRESSED_SIZE - std::size(currentBlock.data)};
-                    const std::size_t remaining{std::size(item.data) - dataPos};
-                    const std::size_t toCopy{std::ranges::min(space, remaining)};
-
-                    if (item.callback.active && !callbackAssigned) {
-                        item.callback.withinBlockOffset =
-                            static_cast<std::uint16_t>(std::size(currentBlock.data));
-                        currentBlock.callbacks.push_back(std::move(item.callback));
-                        callbackAssigned = true;
-                    }
-
-                    currentBlock.data.insert(
-                        std::ranges::end(currentBlock.data),
-                        std::ranges::begin(item.data) + static_cast<std::ptrdiff_t>(dataPos),
-                        std::ranges::begin(item.data) +
-                            static_cast<std::ptrdiff_t>(dataPos + toCopy));
-                    dataPos += toCopy;
-                }
+                PackData(item.data, std::move(item.callback), batch, currentBlock);
             }
 
             pool->Finalize();
@@ -1013,6 +1021,130 @@ struct BgzfWriter::Impl
     }
 };
 
+void BgzfWriter::Impl::SubmitBatch(std::vector<detail::UncompressedBlock>& batch,
+                                   std::size_t batchLimit)
+{
+    if (std::empty(batch)) {
+        return;
+    }
+    auto blocks{std::move(batch)};
+    batch.reserve(batchLimit);
+
+    if (!config.Pool) {
+        pool->Submit(CompressBatchTask{std::move(blocks), &compressors, &counters});
+        return;
+    }
+
+    auto result{std::make_shared<detail::CompressedBatch>()};
+    std::packaged_task<void()> output{[this, result] {
+        try {
+            RethrowIfError();
+            WriteCompressedBatch(std::move(*result));
+        } catch (...) {
+            SetError(std::current_exception());
+            throw;
+        }
+    }};
+    std::future<void> done{output.get_future()};
+    config.Pool->impl_->Pool.Submit(
+        [this, result, output = std::move(output),
+         compress =
+             CompressBatchTask{std::move(blocks), nullptr, &counters, config.CompressionLevel}](
+            Parallel::ThreadIndex index) mutable noexcept {
+            try {
+                *result = compress(index);
+            } catch (...) {
+                SetError(std::current_exception());
+            }
+            return std::move(output);
+        });
+    // FIFO result consumption makes this a fence for all earlier writes to this file.
+    lastWrite = std::move(done);
+}
+
+void BgzfWriter::Impl::DrainSharedWrites()
+{
+    if (lastWrite.valid()) {
+        try {
+            lastWrite.get();
+        } catch (...) {
+            SetError(std::current_exception());
+        }
+    }
+}
+
+void BgzfWriter::Impl::PackData(const std::span<const std::byte> data, PendingCallback callback,
+                                std::vector<detail::UncompressedBlock>& batch,
+                                detail::UncompressedBlock& currentBlock)
+{
+    const std::size_t batchLimit = config.BlocksPerBatch;
+    const bool fitsInSingleBlock{std::size(data) <= MAX_UNCOMPRESSED_SIZE};
+    if (fitsInSingleBlock && !std::empty(currentBlock.data) &&
+        (std::size(currentBlock.data) + std::size(data) > MAX_UNCOMPRESSED_SIZE)) {
+        SealCurrentBlock(batch, currentBlock, batchLimit);
+    }
+
+    std::size_t dataPos{0};
+    bool callbackAssigned{false};
+    while (dataPos < std::size(data)) {
+        if (std::size(currentBlock.data) >= MAX_UNCOMPRESSED_SIZE) {
+            SealCurrentBlock(batch, currentBlock, batchLimit);
+        }
+
+        const std::size_t space{MAX_UNCOMPRESSED_SIZE - std::size(currentBlock.data)};
+        const std::size_t remaining{std::size(data) - dataPos};
+        const std::size_t toCopy{std::ranges::min(space, remaining)};
+
+        if (callback.active && !callbackAssigned) {
+            callback.withinBlockOffset = static_cast<std::uint16_t>(std::size(currentBlock.data));
+            currentBlock.callbacks.push_back(std::move(callback));
+            callbackAssigned = true;
+        }
+
+        currentBlock.data.insert(
+            std::ranges::end(currentBlock.data),
+            std::ranges::begin(data) + static_cast<std::ptrdiff_t>(dataPos),
+            std::ranges::begin(data) + static_cast<std::ptrdiff_t>(dataPos + toCopy));
+        dataPos += toCopy;
+    }
+}
+
+void BgzfWriter::Impl::FinishInput()
+{
+    if (config.Pool) {
+        try {
+            RethrowIfError();
+            SealCurrentBlock(sharedBatch, sharedBlock, config.BlocksPerBatch);
+            SubmitBatch(sharedBatch, config.BlocksPerBatch);
+        } catch (...) {
+            SetError(std::current_exception());
+        }
+        DrainSharedWrites();
+        return;
+    }
+    bool closeQueued{false};
+    while (!closeQueued) {
+        closeQueued = inputQueue->try_emplace(detail::WriteItemKind::CLOSE);
+        if (closeQueued) {
+            break;
+        }
+        if (pipelineError.load(std::memory_order_acquire)) {
+            break;
+        }
+        std::this_thread::yield();
+    }
+    if (!closeQueued) {
+        ShutdownPipelineNoThrow();
+        return;
+    }
+    if (packerThread.joinable()) {
+        packerThread.join();
+    }
+    if (ioWriterThread.joinable()) {
+        ioWriterThread.join();
+    }
+}
+
 void BgzfWriter::Impl::CompressedBatchWriter::operator()(detail::CompressedBatch batch) const
 {
     self->WriteCompressedBatch(std::move(batch));
@@ -1024,7 +1156,24 @@ detail::CompressedBatch BgzfWriter::Impl::CompressBatchTask::operator()(
     detail::CompressedBatch result{};
     result.blocks.reserve(std::size(blocks));
 
-    auto* compressor{(*compressors)[threadIdx.Value()].get()};
+    // A shared worker serves writers with different compression levels. Cache by level,
+    // not by writer, so high-plex runs do not allocate workers x writers compressors.
+    struct CompressorCache
+    {
+        int Level{0};
+        detail::CompressorPtr Compressor;
+    };
+
+    static thread_local CompressorCache cache;
+    if (!compressors && (!cache.Compressor || (cache.Level != compressionLevel))) {
+        cache.Compressor.reset(libdeflate_alloc_compressor(compressionLevel));
+        cache.Level = compressionLevel;
+        if (!cache.Compressor) {
+            throw std::runtime_error{"Failed to create libdeflate compressor"};
+        }
+    }
+    auto* compressor{compressors ? (*compressors)[threadIdx.Value()].get()
+                                 : cache.Compressor.get()};
     std::vector<std::uint8_t> compressedBuffer(BGZF_MAX_BLOCK_SIZE);
 
     for (auto& block : blocks) {
@@ -1079,7 +1228,13 @@ BgzfWriter::~BgzfWriter()
 }
 
 BgzfWriter::BgzfWriter(BgzfWriter&&) noexcept = default;
-BgzfWriter& BgzfWriter::operator=(BgzfWriter&&) noexcept = default;
+
+BgzfWriter& BgzfWriter::operator=(BgzfWriter&& other) noexcept
+{
+    BgzfWriter previous{std::move(other)};
+    impl_.swap(previous.impl_);
+    return *this;
+}
 
 void BgzfWriter::SetCallback(IndexCallbackFn callback)
 {
@@ -1120,6 +1275,16 @@ void BgzfWriter::Write(std::vector<std::byte>&& data, PendingCallback callback)
     }
     impl_->RethrowIfError();
 
+    if (impl_->config.Pool) {
+        try {
+            impl_->PackData(data, std::move(callback), impl_->sharedBatch, impl_->sharedBlock);
+        } catch (...) {
+            impl_->SetError(std::current_exception());
+            throw;
+        }
+        return;
+    }
+
     // Clock is read only on the slow path (queue full): the first failed
     // try_emplace starts the stopwatch, so a never-full queue pays nothing.
     std::chrono::steady_clock::time_point stallStart{};
@@ -1153,28 +1318,7 @@ void BgzfWriter::Close()
     impl_->closed = true;
 
     try {
-        bool closeQueued{false};
-        while (!closeQueued) {
-            closeQueued = impl_->inputQueue->try_emplace(detail::WriteItemKind::CLOSE);
-            if (closeQueued) {
-                break;
-            }
-            if (impl_->pipelineError.load(std::memory_order_acquire)) {
-                break;
-            }
-            std::this_thread::yield();
-        }
-
-        if (!closeQueued) {
-            impl_->ShutdownPipelineNoThrow();
-        } else {
-            if (impl_->packerThread.joinable()) {
-                impl_->packerThread.join();
-            }
-            if (impl_->ioWriterThread.joinable()) {
-                impl_->ioWriterThread.join();
-            }
-        }
+        impl_->FinishInput();
 
         impl_->RethrowIfError();
 
@@ -1213,8 +1357,9 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
     m.WriterStalls = impl_->counters.writerStalls.load(std::memory_order_relaxed);
     m.CallbackNs = impl_->counters.callbackNs.load(std::memory_order_relaxed);
 
-    if (impl_->pool) {
-        const auto snap{impl_->pool->GetMetrics()};
+    if (impl_->pool || impl_->config.Pool) {
+        const auto snap{impl_->config.Pool ? impl_->config.Pool->impl_->Pool.GetMetrics()
+                                           : impl_->pool->GetMetrics()};
         m.Pool.QueueDepth = snap.CurrentQueueDepth;
         m.Pool.PeakQueueDepth = snap.PeakQueueDepth;
         m.Pool.ActiveWorkers = snap.CurrentActiveTasks;

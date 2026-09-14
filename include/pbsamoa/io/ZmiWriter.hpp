@@ -1,6 +1,8 @@
 #ifndef PBSAMOA_IO_ZMIWRITER_HPP
 #define PBSAMOA_IO_ZMIWRITER_HPP
 
+#include <pbsamoa/index/ZmwIndex.hpp>
+
 #include <filesystem>
 #include <memory>
 
@@ -17,7 +19,7 @@ struct ZmiWriterConfig
 
 /// \brief Streaming writer for ZMW index (.zmi) files.
 ///
-/// Appends (rgId, zmw, virtualOffset) entries in BAM write order.
+/// Appends (rgId, zmw, virtualOffset, forwardBarcode, reverseBarcode) in BAM write order.
 /// BGZF-compressed with a fixed header followed by entry records.
 class ZmiWriter
 {
@@ -35,7 +37,9 @@ public:
     /// \param[in] rgId numeric read-group ID
     /// \param[in] zmw ZMW hole number
     /// \param[in] virtualOffset BGZF virtual offset of the BAM record
-    void AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virtualOffset);
+    /// \param[in] barcodes ordered barcode pair; defaults to unassigned
+    void AddRecord(std::int32_t rgId, std::int32_t zmw, std::int64_t virtualOffset,
+                   BarcodePair barcodes = {});
 
     /// \brief Flush and close. Called automatically by destructor.
     void Close();

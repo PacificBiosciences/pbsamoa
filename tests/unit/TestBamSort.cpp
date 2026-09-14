@@ -14,6 +14,7 @@
 
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -333,5 +334,37 @@ TEST_F(BamSortTest, ZeroRecordsProducesHeaderOnlyWithSortOrder)
     EXPECT_FALSE(reader.ReadRecord());
 }
 
+}  // namespace Samoa
+}  // namespace PacBio
+
+namespace PacBio {
+namespace Samoa {
+TEST_F(BamSortTest, RecordSourceMatchesFileSortThroughMultipleMergePasses)
+{
+    std::vector<BamRecord> records;
+    for (std::int32_t i{0}; i < 60; ++i) {
+        records.push_back(Unmapped(std::format("read{}", i),
+                                   (i % 2 == 0) ? std::string(100, 'A') : std::string(100, 'C')));
+    }
+    const auto header{MakeHeader(0)};
+    tests::WriteBam(In(), header, records);
+    const auto expected{tempDir_.File("expected.bam")};
+    SortBam(In(), expected, {.NumThreads = 1, .Minimise = true});
+    auto reader = std::make_shared<BamRawReader>(In());
+    const std::weak_ptr<BamRawReader> weak{reader};
+    const auto stats{
+        SortBam(header, [reader = std::move(reader)]() { return reader->ReadRecord(); }, Out(),
+                {.MaxMemory = ByteLimit{256}, .NumThreads = 1, .Minimise = true, .MergeFanIn = 2})};
+    EXPECT_TRUE(weak.expired());
+    EXPECT_GT(stats.NumRuns, 2u);
+    EXPECT_EQ(stats.NumRecords, 60);
+    EXPECT_EQ(tests::ReadNames(Out()), tests::ReadNames(expected));
+    EXPECT_THROW(
+        SortBam(header,
+                []() -> std::optional<RawRecord> { throw std::runtime_error{"source failure"}; },
+                Out(), {.NumThreads = 1}),
+        std::runtime_error);
+    EXPECT_EQ(tests::ReadNames(Out()), tests::ReadNames(expected));
+}
 }  // namespace Samoa
 }  // namespace PacBio

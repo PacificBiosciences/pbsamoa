@@ -211,7 +211,8 @@ int Runner(const CLI_v2::Results& results)
             parser.Feed(block.FileOffset, block.Data);
             while (auto entry{parser.NextRecord()}) {
                 writer.AddRecord(entry->rgId, entry->zmw,
-                                 static_cast<std::int64_t>(entry->virtualOffset.Value()));
+                                 static_cast<std::int64_t>(entry->virtualOffset.Value()),
+                                 entry->Barcodes);
             }
         })) {
         }

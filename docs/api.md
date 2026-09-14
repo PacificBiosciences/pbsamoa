@@ -921,6 +921,28 @@ writer.Write(data);
 writer.Close();  // call explicitly to observe errors
 ```
 
+To write many destinations without creating threads per file, inject one pool:
+
+```cpp
+auto pool = std::make_shared<BgzfWriterPool>(8);  // 8 compressors + 1 ordered output thread
+BgzfWriterConfig sharedConfig{.Pool = pool};
+BgzfWriter first{"first.bgzf", sharedConfig};
+BgzfWriter second{"second.bgzf", sharedConfig};
+```
+
+Shared mode packs on the caller. Calls to a particular writer must remain serial;
+different writers may submit concurrently. `BgzfWorkers` and `InputQueueCapacity`
+only configure the privately owned pipeline when `Pool` is null. The pool bounds
+both work and result queues with its `queueMultiplier` constructor argument
+(default 3, multiplied by worker count). Each writer retains its own partially
+filled block batch. Writers retain shared ownership of the pool and close only
+their own output; the last owner shuts down the pool. Pool metrics describe the
+whole shared pool, and input-queue stall counters are zero in shared mode.
+
+Results use the existing global FIFO consumer: a slow batch or output file can
+delay other files. Callbacks execute on that consumer thread and must not submit
+to or close writers on the same pool, which could wait for the consumer itself.
+
 Close semantics:
 - `Close()` transitions the writer to a terminal state; later `Write()` calls throw.
 - If `Close()` throws, treat the writer as closed/failed and do not reuse it.
@@ -993,6 +1015,41 @@ std::vector<std::int64_t> offsets = index.Find(12345);  // raw virtual offsets b
 | `ContiguousChunk(i, n)`         | `ZmwChunk`            | Seek offset and sizes for chunk `i` of `n` |
 | `NumRecords()`                  | `uint64_t`            | Total records in the index                 |
 | `NumZmws()`                     | `uint64_t`            | Unique ZMW count                           |
+
+### Barcode lookup
+
+ZMI 1.1 records the ordered forward/reverse barcode IDs from `bc:B:S` or
+`bc:B:s`. `ZmiBamWriter`, `zmi-build`, and `zmi-index` capture them automatically.
+An absent tag is `BarcodePair{-1, -1}`; signed -1 components remain unassigned.
+Unsigned IDs, including 65535, are preserved. Malformed barcode tags are rejected.
+
+```cpp
+const ZmwIndex index = ZmwIndex::Open("movie.bam");
+for (const BarcodePair pair : index.BarcodePairs()) {
+    for (const std::int64_t offset : index.FindBarcodes(pair)) {
+        reader.Seek(VirtualOffset{std::bit_cast<std::uint64_t>(offset)});
+        // Read this record; offsets retain source file order.
+    }
+}
+```
+
+`HasBarcodeData()` distinguishes an index without barcode fields from a new
+index whose records are all unassigned. `FindBarcodes()` returns a borrowed
+`span<const int64_t>`; `BarcodePairs()` returns distinct pairs in lexicographic
+order. Pairs are directional: `{a, b}` and `{b, a}` remain distinct. Queries
+are safe concurrently on an unchanged index; moving or destroying it invalidates
+borrowed results. Loading groups offsets once, using one additional int64 offset
+per record plus per-pair map/vector storage, so each lookup avoids scanning the
+whole index.
+
+The BGZF-compressed format retains the 64-byte header and `ZMI\1` magic. Version
+at byte 4 is now `0x010100`; entry size at byte 8 is 24. Each little-endian entry
+retains `rgId:int32`, `zmw:int32`, and `virtualOffset:int64` at offsets 0, 4, and 8,
+and appends forward/reverse `int32` IDs at offsets 16 and 20. IDs range from -1
+through 65535. Older readers that honor entry size can skip the extra fields.
+Legacy 16-byte ZMI entries remain readable for ZMW queries. Barcode queries throw
+when fields are unavailable, including through `FromPbi()`, which still reads
+only PBI's ZMW columns; rebuild the ZMI to enable barcode lookup.
 
 ## ZmwGroup
 
@@ -1087,6 +1144,21 @@ double fullness = static_cast<double>(m.QueueDepth) / m.ConfiguredCapacity;
 - Capacity/occupancy: `ConfiguredCapacity`, `QueueDepth`, `PeakQueueDepth`
 - Throughput: `GroupsProduced`, `GroupsConsumed`
 - Stalls: `ProducerStalls`, `ConsumerStalls`
+
+## SortBam — selected records
+
+`SortBam(header, nextRecord, output, config)` accepts a
+`std::function<std::optional<RawRecord>()>` source and the destination header.
+Return nullopt at end of input. This permits ZMI barcode extraction directly
+into the existing external sort without creating a per-barcode input BAM.
+The function releases its source after ingestion, before merging runs. The
+caller must keep borrowed offsets and other externally owned source data alive.
+Source exceptions propagate and leave an existing regular output unchanged.
+
+`SortConfig::MergeFanIn` defaults to 64 and must be at least 2. Concurrent callers
+must divide their available descriptor budget across jobs, allowing additional
+headroom for each output and any source handles they retain. `MaxMemory` bounds
+each sort's record run buffer; it does not include external indexes or codec state.
 
 ## ZmiBamWriter
 

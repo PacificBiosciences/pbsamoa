@@ -1,7 +1,7 @@
 Build a BAM with PacBio-style read names (3 ZMWs: 10, 20, 30):
 
   $ printf '@HD\tVN:1.6\tSO:unknown\n@SQ\tSN:ref\tLN:10000\n' > input.sam
-  $ printf 'movie/10/0_100\t0\tref\t101\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
+  $ printf 'movie/10/0_100\t0\tref\t101\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\tbc:B:S,65535,0\n' >> input.sam
   $ printf 'movie/10/100_200\t0\tref\t201\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
   $ printf 'movie/20/0_100\t0\tref\t301\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
   $ printf 'movie/30/0_100\t0\tref\t401\t30\t10M\t*\t0\t0\tACGTACGTAC\t*\n' >> input.sam
@@ -24,6 +24,13 @@ Output must byte-equal the zmi-build sidecar (same writer, same records, same VO
 
   $ cmp canonical.bam.zmi canonical.bam.zmi.from-build && echo MATCH
   MATCH
+
+The ZMI 1.1 header advertises 24-byte entries; the first pair keeps unsigned IDs:
+
+  $ gzip -dc canonical.bam.zmi | od -An -t u1 -j 4 -N 6 | awk 'NF {$1=$1; print}'
+  0 1 1 0 24 0
+  $ gzip -dc canonical.bam.zmi | od -An -t u1 -j 80 -N 8 | awk 'NF {$1=$1; print}'
+  255 255 0 0 0 0 0 0
 
 Determinism across thread counts:
 

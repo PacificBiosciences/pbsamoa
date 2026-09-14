@@ -69,6 +69,10 @@ TEST_F(ZmiWriterTest, WriteEmptyIndex)
     // File should exist and have at least 64 bytes (header)
     EXPECT_TRUE(std::filesystem::exists(tmpPath_));
     EXPECT_GE(std::filesystem::file_size(tmpPath_), 64u);
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_TRUE(index.HasBarcodeData());
+    EXPECT_TRUE(std::empty(index.BarcodePairs()));
+    EXPECT_TRUE(std::empty(index.FindBarcodes({})));
 }
 
 TEST_F(ZmiWriterTest, WriteEntries)
@@ -128,6 +132,64 @@ TEST_F(ZmiWriterTest, RoundTrip)
     // Find nonexistent
     const auto missing{index.Find(9999)};
     EXPECT_TRUE(std::empty(missing));
+}
+
+TEST_F(ZmiWriterTest, BarcodePairsRoundTripAndMove)
+{
+    {
+        ZmiWriter writer{tmpPath_};
+        writer.AddRecord(100, 42, 1000, {0, 65535});
+        writer.AddRecord(100, 42, 2000, {65535, 0});
+        writer.AddRecord(200, 42, 3000, {0, 65535});
+        writer.AddRecord(100, 99, 4000);
+        writer.AddRecord(100, 99, 5000, {-1, 2});
+        EXPECT_THROW(writer.AddRecord(1, 1, 6000, {-2, 0}), std::invalid_argument);
+        EXPECT_THROW(writer.AddRecord(1, 1, 6000, {0, 65536}), std::invalid_argument);
+    }
+    ZmwIndex original{ZmwIndex::FromZmi(tmpPath_)};
+    ZmwIndex moved{std::move(original)};
+    ZmwIndex index;
+    index = std::move(moved);
+    ASSERT_TRUE(index.HasBarcodeData());
+    EXPECT_EQ(index.NumRecords(), 5u);
+    EXPECT_EQ(index.BarcodePairs(),
+              (std::vector<BarcodePair>{{-1, -1}, {-1, 2}, {0, 65535}, {65535, 0}}));
+    EXPECT_TRUE(std::ranges::equal(index.FindBarcodes({0, 65535}), std::array{1000, 3000}));
+    EXPECT_TRUE(std::ranges::equal(index.FindBarcodes({65535, 0}), std::array{2000}));
+    EXPECT_TRUE(std::ranges::equal(index.FindBarcodes({}), std::array{4000}));
+    EXPECT_TRUE(std::empty(index.FindBarcodes({1, 1})));
+    EXPECT_EQ(index.Find(42), (std::vector<std::int64_t>{1000, 2000, 3000}));
+}
+
+TEST_F(ZmiWriterTest, LegacyEntriesRemainReadableWithoutBarcodeData)
+{
+    std::array<std::byte, 80> raw{};
+    raw[0] = std::byte{'Z'};
+    raw[1] = std::byte{'M'};
+    raw[2] = std::byte{'I'};
+    raw[3] = std::byte{1};
+    WriteAt(raw, 4, std::uint32_t{0x010000});
+    WriteAt(raw, 8, std::uint16_t{16});
+    WriteAt(raw, 64, std::int32_t{100});
+    WriteAt(raw, 68, std::int32_t{42});
+    WriteAt(raw, 72, std::int64_t{1000});
+    {
+        BgzfWriter writer{tmpPath_};
+        writer.Write(raw);
+    }
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_FALSE(index.HasBarcodeData());
+    EXPECT_EQ(index.Find(42), (std::vector<std::int64_t>{1000}));
+    EXPECT_THROW(index.FindBarcodes({}), std::runtime_error);
+    EXPECT_THROW(index.BarcodePairs(), std::runtime_error);
+
+    // Advertising barcodes without space for both fields must fail.
+    WriteAt(raw, 4, std::uint32_t{0x010100});
+    {
+        BgzfWriter writer{tmpPath_};
+        writer.Write(raw);
+    }
+    EXPECT_THROW(ZmwIndex::FromZmi(tmpPath_), std::runtime_error);
 }
 
 TEST_F(ZmiWriterTest, UniqueZmws)
@@ -295,6 +357,51 @@ TEST_F(ZmiBamWriterTest, WritesBamAndZmi)
     EXPECT_GT(offsets[0], 0);  // offset should be positive (after header)
 }
 
+TEST_F(ZmiBamWriterTest, BarcodeOffsetsSeekExactRecordsAcrossBlocks)
+{
+    {
+        ZmiBamWriter writer{tmpBamPath_, MakeMinimalHeader()};
+        for (const std::int32_t i : std::views::iota(0, 6)) {
+            BamRecord record;
+            record.Name(std::format("movie/{}/ccs", i)).Flag(4).Sequence(std::string(70000, 'A'));
+            if (i < 5) {
+                TagArray barcodes{'S'};
+                barcodes.AppendUInt16((i % 2 == 0) ? 65535 : 2);
+                barcodes.AppendUInt16(0);
+                record.MutableTags().Set(TagKey{'b', 'c'}, std::move(barcodes));
+            }
+            writer.Write(record);
+        }
+    }
+    const ZmwIndex index{ZmwIndex::Open(tmpBamPath_)};
+    ASSERT_TRUE(index.HasBarcodeData());
+    const auto offsets{index.FindBarcodes({65535, 0})};
+    ASSERT_EQ(std::size(offsets), 3u);
+    BamRawReader reader{tmpBamPath_};
+    std::int32_t expected{0};
+    for (const std::int64_t offset : offsets) {
+        reader.Seek(VirtualOffset{std::bit_cast<std::uint64_t>(offset)});
+        const auto record{reader.ReadRecord()};
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record->Name(), std::format("movie/{}/ccs", expected));
+        expected += 2;
+    }
+    EXPECT_EQ(std::size(index.FindBarcodes({})), 1u);
+}
+
+TEST_F(ZmiBamWriterTest, CallbackFailureStillClosesIndex)
+{
+    ZmiBamWriter writer{tmpBamPath_, MakeMinimalHeader()};
+    BamRecord record;
+    record.Name("movie/1/ccs").Flag(4).Sequence("A");
+    record.MutableTags().Set(TagKey{'b', 'c'}, std::string{"invalid"});
+    writer.Write(record);
+    EXPECT_THROW(writer.Close(), std::runtime_error);
+    EXPECT_NO_THROW(writer.Close());
+    const auto index{ZmwIndex::Open(tmpBamPath_)};
+    EXPECT_EQ(index.NumRecords(), 0u);
+}
+
 TEST_F(ZmiBamWriterTest, WritesReadGroupIdFromRgTag)
 {
     SamHeader header = MakeMinimalHeader();
@@ -442,6 +549,8 @@ TEST_F(ZmiWriterTest, FromPbiRoundTripWithBasicDataOnly)
 
     // Load via FromPbi
     const ZmwIndex index{ZmwIndex::FromPbi(pbiPath)};
+    EXPECT_FALSE(index.HasBarcodeData());
+    EXPECT_THROW(index.FindBarcodes({}), std::runtime_error);
     EXPECT_EQ(index.NumRecords(), 3u);
 
     // Check Find by zmw

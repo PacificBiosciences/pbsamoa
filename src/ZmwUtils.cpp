@@ -65,5 +65,38 @@ ZmwIdentity ParseZmwIdentity(std::string_view name, const TagMap& tags)
     return ZmwIdentity{ReadGroupIdFromTags(tags), ParseZmwFromName(name)};
 }
 
+BarcodePair detail::ParseBarcodes(std::span<const std::byte> aux)
+{
+    while (!std::empty(aux)) {
+        if (std::size(aux) < 3) {
+            throw std::runtime_error{"ZMI: truncated BAM aux tag"};
+        }
+        const std::span<const std::byte> value{aux.subspan(3)};
+        const std::optional<std::size_t> length{AuxValueLength(aux[2], value)};
+        if (!length || (*length > std::size(value))) {
+            throw std::runtime_error{"ZMI: malformed BAM aux value"};
+        }
+        if ((aux[0] == std::byte{'b'}) && (aux[1] == std::byte{'c'})) {
+            if ((aux[2] != std::byte{'B'}) || (*length != 9) ||
+                ((value[0] != std::byte{'s'}) && (value[0] != std::byte{'S'})) ||
+                (ReadU32LE(std::data(value) + 1) != 2)) {
+                throw std::runtime_error{"ZMI: bc must be a B:S or B:s array of two barcode IDs"};
+            }
+            const auto readId = [&](const std::size_t offset) -> std::int32_t {
+                return (value[0] == std::byte{'S'})
+                           ? ReadU16LE(std::data(value) + offset)
+                           : ReadLE<std::int16_t>(std::data(value) + offset);
+            };
+            const BarcodePair pair{readId(5), readId(7)};
+            if ((pair.Forward < -1) || (pair.Reverse < -1)) {
+                throw std::runtime_error{"ZMI: barcode IDs must be >= -1"};
+            }
+            return pair;
+        }
+        aux = aux.subspan(3 + *length);
+    }
+    return {};
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

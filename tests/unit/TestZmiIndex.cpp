@@ -228,6 +228,47 @@ TEST(ZmiIndexRecord, ParseIdentityNameNoSlash)
     EXPECT_EQ(rgId, 1);
 }
 
+TEST(ZmiIndexRecord, BarcodePairParsingAndValidation)
+{
+    // An RG tag precedes bc; neither needs a TagMap allocation.
+    std::vector<std::byte> aux;
+    AppendRgZ(aux, "00000005");
+    aux.insert(aux.end(), {std::byte{'b'}, std::byte{'c'}, std::byte{'B'}, std::byte{'S'}});
+    AppendU32LE(aux, 2);
+    AppendU16LE(aux, 65535);
+    AppendU16LE(aux, 0);
+    const auto body{BuildRecordBody("m/42/ccs", aux)};
+    BarcodePair pair;
+    EXPECT_EQ(detail::ParseRecordIdentity(body, &pair), (ZmwIdentity{5, 42}));
+    EXPECT_EQ(pair, (BarcodePair{65535, 0}));
+
+    // zmi-index's streaming parser must carry the same pair through a split record.
+    auto bytes{BuildEmptyBamHeader()};
+    const auto framed{WithBlockSize(body)};
+    bytes.insert(bytes.end(), framed.begin(), framed.end());
+    RecordParser parser;
+    parser.Feed(0, std::span{bytes}.first(bytes.size() - 1));
+    EXPECT_FALSE(parser.NextRecord());
+    parser.Feed(1000, std::span{bytes}.last(1));
+    const auto entry{parser.NextRecord()};
+    ASSERT_TRUE(entry);
+    EXPECT_EQ(entry->Barcodes, pair);
+    parser.Finish();
+
+    std::vector<std::byte> tag{std::byte{'b'}, std::byte{'c'}, std::byte{'B'}, std::byte{'s'}};
+    AppendU32LE(tag, 2);
+    AppendU16LE(tag, 65535);  // signed -1
+    AppendU16LE(tag, 7);
+    EXPECT_EQ(detail::ParseBarcodes(tag), (BarcodePair{-1, 7}));
+    tag.back() = std::byte{255};  // negative ID other than -1
+    EXPECT_THROW(detail::ParseBarcodes(tag), std::runtime_error);
+    tag.pop_back();
+    EXPECT_THROW(detail::ParseBarcodes(tag), std::runtime_error);
+    tag[2] = std::byte{'Z'};
+    EXPECT_THROW(detail::ParseBarcodes(tag), std::runtime_error);
+    EXPECT_EQ(detail::ParseBarcodes({}), BarcodePair{});
+}
+
 // --- RecordParser ---
 
 TEST(ZmiIndexParser, EmptyHeaderNoRecords)

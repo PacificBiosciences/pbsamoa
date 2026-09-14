@@ -207,6 +207,10 @@ pbsamoa zmi-build input.bam output.bam
 # creates output.bam and output.bam.zmi
 ```
 
+Both ZMI builders capture ordered barcode IDs from the BAM `bc` tag in ZMI 1.1.
+The library's `ZmwIndex::FindBarcodes()` can retrieve matching record offsets;
+`zmi-query` continues to query by ZMW.
+
 ### zmi-index — build `.zmi` for an existing BAM
 
 Build a `.zmi` sidecar from an existing BAM without rewriting the BAM.

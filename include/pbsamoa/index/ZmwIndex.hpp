@@ -1,7 +1,9 @@
 #ifndef PBSAMOA_INDEX_ZMWINDEX_HPP
 #define PBSAMOA_INDEX_ZMWINDEX_HPP
 
+#include <compare>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -21,6 +23,15 @@ struct ZmwIdentity
     bool operator==(const ZmwIdentity&) const = default;
 };
 
+/// Ordered forward/reverse barcode IDs from the BAM bc tag, in [-1, 65535]; -1 means unassigned.
+struct BarcodePair
+{
+    std::int32_t Forward{-1};
+    std::int32_t Reverse{-1};
+
+    auto operator<=>(const BarcodePair&) const = default;
+};
+
 /// \brief The seek position and exact sizes for one contiguous ZMW chunk.
 struct ZmwChunk
 {
@@ -31,7 +42,8 @@ struct ZmwChunk
 
 /// \brief In-memory ZMW index loaded from .zmi or .pbi files.
 ///
-/// Stores (rgId, zmw, virtualOffset) per BAM record in file order.
+/// Stores (rgId, zmw, virtualOffset) per BAM record in file order, plus barcode
+/// offsets when loading ZMI 1.1.
 /// Supports point queries, batch queries, and chunking via UniqueZmws().
 class ZmwIndex
 {
@@ -52,6 +64,17 @@ public:
     /// \brief Auto-detect: tries .zmi first, falls back to .pbi.
     /// \param[in] bamPath path to the BAM file (index path derived from it)
     static ZmwIndex Open(const std::filesystem::path& bamPath);
+
+    /// Whether this index contains barcode information (ZMI 1.1 or later).
+    bool HasBarcodeData() const;
+
+    /// Matching offsets in BAM file order; the span remains valid while this index does.
+    /// Throws if barcode information is unavailable, including legacy ZMI/PBI loads.
+    std::span<const std::int64_t> FindBarcodes(BarcodePair barcodes) const;
+
+    /// Distinct barcode pairs, in lexicographic order, including unassigned pairs.
+    /// Throws if barcode information is unavailable.
+    std::vector<BarcodePair> BarcodePairs() const;
 
     // --- Point / batch queries ---
 
@@ -102,6 +125,8 @@ private:
     std::vector<std::int32_t> rgIds_;
     std::vector<std::int32_t> zmws_;
     std::vector<std::int64_t> offsets_;
+    bool hasBarcodeData_{false};
+    std::map<BarcodePair, std::vector<std::int64_t>> barcodeOffsets_;
 
     // Lazy hash indexes for O(1) lookups (built on first query)
     mutable std::unordered_map<std::int32_t, std::vector<std::ptrdiff_t>> zmwIndex_;

@@ -188,6 +188,20 @@ private:
 // BgzfWriter
 // ---------------------------------------------------------------------------
 
+/// \brief Shared compression workers and one ordered output thread for multiple writers.
+/// Writers retain ownership while work is outstanding. Closing one writer does not stop the pool.
+class BgzfWriterPool
+{
+public:
+    explicit BgzfWriterPool(std::size_t numWorkers, std::size_t queueMultiplier = 3);
+    ~BgzfWriterPool();
+
+private:
+    friend class BgzfWriter;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 struct BgzfWriterConfig
 {
     int CompressionLevel{6};
@@ -195,6 +209,9 @@ struct BgzfWriterConfig
     std::size_t InputQueueCapacity{256};
     std::int32_t BlocksPerBatch{32};
     bool UseTempFile{false};
+    /// Shared mode packs on the caller and uses no per-writer threads or input queue.
+    /// BgzfWorkers and InputQueueCapacity apply only when Pool is null.
+    std::shared_ptr<BgzfWriterPool> Pool;
 };
 
 /// \brief Metadata attached to a queued write for deferred callbacks.
@@ -248,7 +265,7 @@ public:
     ///
     /// Equals the begin offset a subsequent record would have had: the file offset of
     /// the last non-empty block paired with that block's uncompressed size. Meaningful
-    /// only after Close() (which joins the IO thread); a zero offset if nothing was
+    /// only after Close() drains this writer's output; a zero offset if nothing was
     /// written.
     VirtualOffset EndVirtualOffset() const;
 
@@ -259,7 +276,8 @@ public:
     /// destructor-driven close are suppressed.
     void Close();
 
-    /// \brief Snapshot writer metrics.
+    /// \brief Snapshot writer metrics. Pool metrics cover the entire pool when shared;
+    /// input-queue stall counters remain zero when packing on the caller.
     BgzfWriteMetrics GetMetrics() const;
 
 private:

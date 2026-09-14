@@ -27,6 +27,7 @@ struct RecordEntry
     std::int32_t rgId;
     std::int32_t zmw;
     VirtualOffset virtualOffset;
+    BarcodePair Barcodes;
 };
 
 // AuxValueLength, FindZTag, and ParseRecordIdentity now live in ZmwUtils.hpp. The ZMI
@@ -34,7 +35,7 @@ struct RecordEntry
 // resolves to the enclosing PacBio::Samoa::detail namespace.
 
 /// \brief Streams decompressed BGZF bytes (BAM header + records) and emits
-/// per-record `(rgId, zmw, virtualOffset)` index entries.
+/// per-record `(rgId, zmw, virtualOffset, barcodes)` index entries.
 class RecordParser
 {
 public:
@@ -217,10 +218,11 @@ inline std::optional<RecordEntry> RecordParser::TryEmitRecord()
     }
     const VirtualOffset vo{VirtualOffsetForCursor()};
     const std::span<const std::byte> body{CursorPtr() + 4U, blockSize};
-    const auto [rgId, zmw]{detail::ParseRecordIdentity(body)};
+    BarcodePair barcodes;
+    const auto [rgId, zmw]{detail::ParseRecordIdentity(body, &barcodes)};
     Advance(4U + static_cast<std::size_t>(blockSize));
     ++recordsEmitted_;
-    return RecordEntry{rgId, zmw, vo};
+    return RecordEntry{rgId, zmw, vo, barcodes};
 }
 
 inline std::optional<RecordEntry> RecordParser::NextRecord()
