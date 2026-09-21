@@ -719,6 +719,10 @@ struct BgzfWriter::Impl
     std::mutex inputMutex;
     std::condition_variable inputCv;
     std::atomic<bool> packerWaiting{false};
+    // Incremented (seq_cst) by the producer after every push; see WaitForInput().
+    std::atomic<std::uint64_t> pushSeq{0};
+    // Packer-thread-private: pushSeq value observed by the last WaitForInput() fast path.
+    std::uint64_t packerSeenPushSeq{0};
     std::jthread packerThread;
     std::jthread ioWriterThread;
     std::vector<detail::CompressorPtr> compressors;
@@ -896,25 +900,40 @@ struct BgzfWriter::Impl
 
     /// Block until the producer enqueues an item or the stop token fires. The wait is
     /// unbounded: a timed wait would wake every idle writer on each timeout, and a
-    /// demultiplexed run keeps hundreds of them open. Lost wakeups are prevented by the
-    /// Dekker-style handshake with NotifyInput(): the packer publishes packerWaiting before
-    /// it re-checks the queue, and the producer pushes before it reads packerWaiting, with a
-    /// full fence on both sides, so at least one of them observes the other's write.
+    /// demultiplexed run keeps hundreds of them open.
+    ///
+    /// Lost wakeups are prevented without fences, using only seq_cst operations so the
+    /// argument holds under the C++ memory model alone (and ThreadSanitizer can follow it):
+    /// the packer publishes packerWaiting and then reads pushSeq; the producer bumps pushSeq
+    /// after its push and then reads packerWaiting. All four operations sit in the single
+    /// seq_cst total order, so either the producer sees packerWaiting and notifies, or the
+    /// packer sees the new pushSeq and skips the wait. The window between the pushSeq check
+    /// and the actual wait is covered by inputMutex: the producer notifies under the mutex,
+    /// and the wait predicate re-checks the queue under it.
     void WaitForInput(const std::stop_token& stopToken)
     {
-        std::unique_lock lock{inputMutex};
         packerWaiting.store(true, std::memory_order_seq_cst);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        inputCv.wait(lock, [this, &stopToken] {
-            return (inputQueue->front() != nullptr) || stopToken.stop_requested();
-        });
+        const std::uint64_t seq{pushSeq.load(std::memory_order_seq_cst)};
+        if (seq != packerSeenPushSeq) {
+            // A push landed since we last looked; the queue is (or is about to be) non-empty.
+            packerSeenPushSeq = seq;
+            packerWaiting.store(false, std::memory_order_seq_cst);
+            return;
+        }
+        {
+            std::unique_lock lock{inputMutex};
+            inputCv.wait(lock, [this, &stopToken] {
+                return (inputQueue->front() != nullptr) || stopToken.stop_requested();
+            });
+        }
         packerWaiting.store(false, std::memory_order_seq_cst);
     }
 
-    /// Wake the packer after a push; skips the syscall while the packer is not waiting.
+    /// Wake the packer after a push; skips the mutex and syscall while the packer is not
+    /// waiting. Must be called after every push (see WaitForInput()).
     void NotifyInput()
     {
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        pushSeq.fetch_add(1, std::memory_order_seq_cst);
         if (packerWaiting.load(std::memory_order_seq_cst)) {
             const std::lock_guard lock{inputMutex};
             inputCv.notify_one();
