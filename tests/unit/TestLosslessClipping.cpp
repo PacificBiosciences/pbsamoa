@@ -3,6 +3,8 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/Tags.hpp>
 
+#include <pbcopper/json/JSON.h>
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -183,6 +185,82 @@ TEST(LosslessClipping, RoundTripRecoversFirstRetainedSkipViaPrefixFix)
     ASSERT_NE(mm, nullptr);
     EXPECT_EQ(std::get<std::string>(*mm), "C+m?,1,1;");
     EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{90, 80}));
+}
+
+// The `ls` blob has lima's shape, which lima-undo depends on: both flanks list every
+// modification type (an empty list when the flank holds none of its sites) under MM and ML,
+// and pMM lists every type, with 0 for a type that retains no site. lima-undo rewrites MM
+// sorted by type and reorders ML to match only when a flank carries an ML map, so without
+// the maps a record whose MM is not sorted (as here) gets its probabilities shuffled.
+// Sequence: C at 0, 2, 5, 7, 18 and A at 1, 3. "C+m?,0,1,0,0" marks the C at 0, 5, 7, 18
+// (skipping the one at 2), "A+a.,0" the A at 1, and "G-h?" has no site. Clip keeps [4,16).
+TEST(LosslessClipping, BaseModBlobListsEveryTypeInBothFlanksLikeLima)
+{
+    const std::string seq{"CACATCTCTTTTTTTTTTCT"};
+    BamRecord record;
+    record.Name("movie/1/ccs").Flag(0x4).Sequence(seq).Qualities(Ramp(20, 20));
+    TagMap tags;
+    tags.Set(TagKey{'M', 'M'}, std::string{"C+m?,0,1,0,0;A+a.,0;G-h?;"});
+    tags.Set(TagKey{'M', 'L'}, MakeUInt8Array({10, 20, 30, 40, 50}));
+    record.Tags(std::move(tags));
+
+    ClipToQueryLossless(record, 4, 16);
+
+    EXPECT_EQ(std::get<std::string>(*record.Tags().Get(TagKey{'M', 'M'})), "C+m?,0,0;A+a.;G-h?;");
+    EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{20, 30}));
+
+    const JSON::Json blob = JSON::Json::from_msgpack(TagValues(record, TagKey{'l', 's'}));
+    const JSON::Json expectedLeadMM = {{"C+m?", {0}}, {"A+a.", {0}}, {"G-h?", JSON::Json::array()}};
+    const JSON::Json expectedLeadML = {
+        {"C+m?", {10}}, {"A+a.", {50}}, {"G-h?", JSON::Json::array()}};
+    const JSON::Json expectedTrailMM = {
+        {"C+m?", {0}}, {"A+a.", JSON::Json::array()}, {"G-h?", JSON::Json::array()}};
+    const JSON::Json expectedTrailML = {
+        {"C+m?", {40}}, {"A+a.", JSON::Json::array()}, {"G-h?", JSON::Json::array()}};
+    // The C at 2 precedes the first retained site; the A at 3 has no retained site to join.
+    const JSON::Json expectedPrefixLost = {{"C+m?", 1}, {"A+a.", 0}, {"G-h?", 0}};
+    EXPECT_EQ(blob["lead"]["MM"], expectedLeadMM);
+    EXPECT_EQ(blob["lead"]["ML"], expectedLeadML);
+    EXPECT_EQ(blob["trail"]["MM"], expectedTrailMM);
+    EXPECT_EQ(blob["trail"]["ML"], expectedTrailML);
+    EXPECT_EQ(blob["pMM"], expectedPrefixLost);
+
+    // Restore, like lima-undo, writes the types sorted by name, with ML following.
+    ASSERT_TRUE(RestoreFromLossless(record));
+    EXPECT_EQ(record.Sequence(), seq);
+    EXPECT_EQ(std::get<std::string>(*record.Tags().Get(TagKey{'M', 'M'})),
+              "A+a.,0;C+m?,0,1,0,0;G-h?;");
+    EXPECT_EQ(TagValues(record, TagKey{'M', 'L'}), (std::vector<std::uint8_t>{50, 10, 20, 30, 40}));
+}
+
+// lima notes the barcode call that led to a clip in the blob and writes the pileup fixups
+// for every record, 0 without an `sa` tag. A record clipped before it is barcoded has no
+// call to note.
+TEST(LosslessClipping, BlobNotesBarcodeCallAndPileupFixupsLikeLima)
+{
+    BamRecord barcoded{MakeUnmappedRecord(20)};
+    TagArray call{'S'};
+    call.AppendUInt16(5);
+    call.AppendUInt16(270);
+    barcoded.MutableTags().Set(TagKey{'b', 'c'}, std::move(call));
+    barcoded.MutableTags().Set(TagKey{'b', 'q'}, std::int64_t{87});
+
+    ClipToQueryLossless(barcoded, 4, 16);
+
+    const JSON::Json blob = JSON::Json::from_msgpack(TagValues(barcoded, TagKey{'l', 's'}));
+    EXPECT_EQ(blob["bc"], "5--270");
+    EXPECT_EQ(blob["bq"], 87);
+    EXPECT_EQ(blob["psa"], 0);
+    EXPECT_EQ(blob["ssa"], 0);
+    EXPECT_EQ(blob["csa"], -1);
+    ASSERT_TRUE(RestoreFromLossless(barcoded));
+
+    BamRecord plain{MakeUnmappedRecord(20)};
+    ClipToQueryLossless(plain, 4, 16);
+    const JSON::Json plainBlob = JSON::Json::from_msgpack(TagValues(plain, TagKey{'l', 's'}));
+    EXPECT_FALSE(plainBlob.contains("bc"));
+    EXPECT_FALSE(plainBlob.contains("bq"));
+    EXPECT_EQ(plainBlob["csa"], -1);
 }
 
 // All modifications fall in the flanks with none retained, while canonical bases

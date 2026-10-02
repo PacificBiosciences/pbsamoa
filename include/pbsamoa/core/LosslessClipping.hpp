@@ -17,7 +17,9 @@ namespace Samoa {
 /// `nested` key (so repeated clips remain reversible). Forward tags (pw/ip/fp/fi)
 /// are stored in read orientation; reverse tags (rp/ri) are stored mirrored. The
 /// record is then clipped with the standard query clipper. The `ls` format matches
-/// lima, so `lima-undo` can reconstruct the read.
+/// lima, so `lima-undo` can reconstruct the read: both flanks list every base
+/// modification type, the pileup fixups (psa/ssa/csa) are always present, and a
+/// record that already carries its barcode call (bc, bq) has it noted as lima does.
 ///
 /// Sequence, qualities, per-base kinetics, base modifications (MM/ML), and the
 /// subread pileup summary (sa/sm/sx, with lima's psa/ssa run fixups) are all captured

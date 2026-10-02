@@ -29,6 +29,8 @@ namespace Samoa {
 namespace {
 
 constexpr TagKey LS_TAG{'l', 's'};
+constexpr TagKey BC_TAG{'b', 'c'};
+constexpr TagKey BQ_TAG{'b', 'q'};
 
 struct KineticTag
 {
@@ -287,32 +289,32 @@ void CaptureBasemods(const TagMap& tags, std::string_view sequence, std::int32_t
         // ML stride: each site occupies this many (interleaved) ML values.
         const std::size_t stride{ModCodeCount(rec.Prefix)};
 
-        if (frontN > 0) {
-            leadMM[rec.Prefix] =
-                std::vector<std::int32_t>(std::cbegin(rec.Skips), std::cbegin(rec.Skips) + frontN);
-            if (hasMl) {
-                leadML[rec.Prefix] =
-                    std::vector<std::int64_t>(std::cbegin(mlValues) + qvOffset,
-                                              std::cbegin(mlValues) + qvOffset + frontN * stride);
-            }
-        }
-        if (trailStart < total) {
-            trailMM[rec.Prefix] = std::vector<std::int32_t>(std::cbegin(rec.Skips) + trailStart,
-                                                            std::cend(rec.Skips));
-            if (hasMl) {
-                trailML[rec.Prefix] = std::vector<std::int64_t>(
-                    std::cbegin(mlValues) + qvOffset + trailStart * stride,
-                    std::cbegin(mlValues) + qvOffset + total * stride);
-            }
+        // Like lima, every modification type is written into both flanks, as an empty list when
+        // the flank holds none of its sites. lima-undo depends on it: it rewrites MM with the
+        // types sorted by name and reorders ML to match only when a flank carries an ML map.
+        // Without the maps, a record whose MM is not already sorted comes back from lima-undo
+        // with its ML probabilities assigned to the wrong modification types.
+        leadMM[rec.Prefix] =
+            std::vector<std::int32_t>(std::cbegin(rec.Skips), std::cbegin(rec.Skips) + frontN);
+        trailMM[rec.Prefix] =
+            std::vector<std::int32_t>(std::cbegin(rec.Skips) + trailStart, std::cend(rec.Skips));
+        if (hasMl) {
+            leadML[rec.Prefix] =
+                std::vector<std::int64_t>(std::cbegin(mlValues) + qvOffset,
+                                          std::cbegin(mlValues) + qvOffset + frontN * stride);
+            trailML[rec.Prefix] =
+                std::vector<std::int64_t>(std::cbegin(mlValues) + qvOffset + trailStart * stride,
+                                          std::cbegin(mlValues) + qvOffset + total * stride);
         }
 
         // prefix-lost-bases = canonical bases before the clip not consumed by the
         // front-removed mods, added back to the first retained skip on restore.
         // ClipBasemodRecord already computes this with the correct wildcard-aware count
         // (canonical 'N' matches every base, not the literal character 'N').
-        if (window.PrefixLost > 0) {
-            pMM[rec.Prefix] = window.PrefixLost;
-        }
+        // With no retained site there is no skip to add it to: the lead and trail lists
+        // concatenate to the original. Write 0 then, as lima-undo takes a positive count for
+        // a type with nothing retained as a cue to rewrite the trail skips.
+        pMM[rec.Prefix] = (window.Retained > 0) ? window.PrefixLost : 0;
 
         qvOffset += total * stride;
     }
@@ -494,10 +496,19 @@ void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t 
     if (!basemodPrefix.empty()) {
         root["pMM"] = std::move(basemodPrefix);
     }
-    if (retainedSa) {
-        root["psa"] = lostPrefixSa;
-        root["ssa"] = lostSuffixSa;
-        root["csa"] = -1;  // lima: coverage of an emptied window; impossible here
+    // lima writes the pileup fixups for every record, 0 when it has no `sa`.
+    root["psa"] = lostPrefixSa;
+    root["ssa"] = lostSuffixSa;
+    root["csa"] = -1;  // lima: coverage of an emptied window; impossible here
+    // lima also notes the barcode call that led to the clip.
+    if (const TagArray* call{GetArray(tags, BC_TAG)}; (call != nullptr) && (call->Count() == 2)) {
+        const std::vector<std::int64_t> pair{DecodeIntArray(*call)};
+        root["bc"] = std::to_string(pair.front()) + "--" + std::to_string(pair.back());
+    }
+    if (const TagValue* quality{tags.Get(BQ_TAG)}; quality != nullptr) {
+        if (const std::int64_t* value{std::get_if<std::int64_t>(quality)}; value != nullptr) {
+            root["bq"] = *value;
+        }
     }
     // Chain any prior lossless storage so repeated clips can all be undone.
     if (const TagArray* existing{GetArray(tags, LS_TAG)}; existing != nullptr) {
