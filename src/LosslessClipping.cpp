@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <format>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -500,10 +501,12 @@ void ClipToQueryLossless(BamRecord& record, std::int32_t clipLeft, std::int32_t 
     root["psa"] = lostPrefixSa;
     root["ssa"] = lostSuffixSa;
     root["csa"] = -1;  // lima: coverage of an emptied window; impossible here
-    // lima also notes the barcode call that led to the clip.
-    if (const TagArray* call{GetArray(tags, BC_TAG)}; (call != nullptr) && (call->Count() == 2)) {
-        const std::vector<std::int64_t> pair{DecodeIntArray(*call)};
-        root["bc"] = std::to_string(pair.front()) + "--" + std::to_string(pair.back());
+    // lima also notes the barcode call that led to the clip. Check the decoded size, not
+    // Count(): DecodeIntArray returns no values for a non-integer array such as `bc:B:f`.
+    if (const TagArray* call{GetArray(tags, BC_TAG)}; call != nullptr) {
+        if (const std::vector<std::int64_t> pair{DecodeIntArray(*call)}; std::ssize(pair) == 2) {
+            root["bc"] = std::format("{}--{}", pair[0], pair[1]);
+        }
     }
     if (const TagValue* quality{tags.Get(BQ_TAG)}; quality != nullptr) {
         if (const std::int64_t* value{std::get_if<std::int64_t>(quality)}; value != nullptr) {

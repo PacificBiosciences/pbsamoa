@@ -263,6 +263,23 @@ TEST(LosslessClipping, BlobNotesBarcodeCallAndPileupFixupsLikeLima)
     EXPECT_EQ(plainBlob["csa"], -1);
 }
 
+// A `bc` array with two elements of a non-integer type is not a barcode call. The blob
+// must leave it out and must not read past the empty decode (ASan: container overflow).
+TEST(LosslessClipping, BlobSkipsNonIntegerBarcodeCall)
+{
+    BamRecord record{MakeUnmappedRecord(20)};
+    TagArray call{'f'};
+    call.AppendFloat(1.0F);
+    call.AppendFloat(2.0F);
+    record.MutableTags().Set(TagKey{'b', 'c'}, std::move(call));
+
+    ClipToQueryLossless(record, 4, 16);
+
+    const JSON::Json blob = JSON::Json::from_msgpack(TagValues(record, TagKey{'l', 's'}));
+    EXPECT_FALSE(blob.contains("bc"));
+    ASSERT_TRUE(RestoreFromLossless(record));
+}
+
 // All modifications fall in the flanks with none retained, while canonical bases
 // before the clip are dropped (pMM > 0). The lead+trail skips must reconstruct the
 // original exactly without the (unused) prefix fixup leaking into the trail.
