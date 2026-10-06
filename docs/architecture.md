@@ -187,6 +187,13 @@ CRAM v3.x methods (`raw`, `gzip`, `bzip2`, `lzma`, `rANS`, `arith`,
 Reads BGZF blocks sequentially, decompressing each with libdeflate.
 Supports `Seek()` to any `VirtualOffset`.
 
+With `numWorkers > 0`, an IO thread reads groups of 32 blocks, a thread pool
+decompresses each group into one buffer, and a consumer thread finds the record
+boundaries in the group. The group buffer becomes a `RawRecordBatch`: `ReadBatch()`
+gives it to the caller and does not copy the records. A record that spans groups
+goes behind the data of the group where it ends. `ReadRecord()` copies one record
+out of the current batch.
+
 ### BgzfWriter
 
 Accumulates data into 64 KiB blocks and compresses each with libdeflate in a

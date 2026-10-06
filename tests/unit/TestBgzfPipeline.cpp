@@ -1,16 +1,24 @@
 #include "TestData.hpp"
 #include "TestTempDir.hpp"
 
+#include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/Bgzf.hpp>
+#include <pbsamoa/core/SamHeader.hpp>
 
 #include <pbsamoa/io/BamRawReader.hpp>
+#include <pbsamoa/io/BamWriter.hpp>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
+#include <fstream>
+#include <limits>
 #include <optional>
+#include <ostream>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <cstddef>
@@ -18,6 +26,105 @@
 
 namespace PacBio {
 namespace Samoa {
+namespace {
+
+constexpr std::size_t NO_LIMIT{std::numeric_limits<std::size_t>::max()};
+
+// Writes one unmapped record for each sequence length.
+void WriteUnmappedBam(const std::filesystem::path& path, const std::vector<std::size_t>& lengths)
+{
+    SamHeader header;
+    header.SetVersion("1.6");
+    BamWriter writer{path, header};
+    for (std::size_t i{0}; i < std::size(lengths); ++i) {
+        const std::size_t length{lengths[i]};
+        BamRecord record;
+        record.Name(std::format("r{}", i))
+            .Flag(0x4)
+            .RefId(-1)
+            .Pos(-1)
+            .NextRefId(-1)
+            .NextPos(-1)
+            .Sequence(std::string(length, 'C'))
+            .Qualities(std::vector<std::uint8_t>(length, 20));
+        writer.Write(record);
+    }
+}
+
+// The uncompressed BAM stream of a file: the header and the records.
+std::vector<std::byte> ReadStream(const std::filesystem::path& path)
+{
+    BgzfReader reader{path};
+    std::vector<std::byte> block(65536);
+    std::vector<std::byte> stream;
+    for (std::optional<std::size_t> n{reader.ReadBlock(block)}; n && (*n > 0);
+         n = reader.ReadBlock(block)) {
+        stream.insert(std::end(stream), std::begin(block), std::begin(block) + *n);
+    }
+    return stream;
+}
+
+// Writes the stream as BGZF blocks of blockSize bytes. With tiny blocks, the group
+// boundaries of the parallel reader fall at all positions in a record, also in its
+// block_size field.
+void WriteBgzf(const std::filesystem::path& path, const std::span<const std::byte> stream,
+               const std::size_t blockSize)
+{
+    std::ofstream out{path, std::ios::binary};
+    for (std::size_t pos{0}; pos < std::size(stream); pos += blockSize) {
+        const std::vector<std::byte> block{CompressBgzfBlock(
+            stream.subspan(pos, std::min(blockSize, std::size(stream) - pos)), 1)};
+        out.write(reinterpret_cast<const char*>(std::data(block)), std::ssize(block));
+    }
+    out.write(reinterpret_cast<const char*>(std::data(BGZF_EOF_MARKER)),
+              std::ssize(BGZF_EOF_MARKER));
+}
+
+struct RecordStream
+{
+    std::vector<std::size_t> Sizes;
+    std::vector<std::byte> Data;
+
+    bool operator==(const RecordStream&) const = default;
+};
+
+void PrintTo(const RecordStream& records, std::ostream* os)
+{
+    *os << std::format("{} records, {} bytes", std::size(records.Sizes), std::size(records.Data));
+}
+
+void Append(RecordStream& out, const std::span<const std::byte> record)
+{
+    out.Sizes.push_back(std::size(record));
+    out.Data.insert(std::end(out.Data), std::begin(record), std::end(record));
+}
+
+void Append(RecordStream& out, const RawRecordBatch& batch)
+{
+    for (std::size_t i{0}; i < batch.RecordCount(); ++i) {
+        Append(out, batch.RecordData(i));
+    }
+}
+
+RecordStream ReadAllBatches(BgzfReader& reader, const std::size_t maxBytes)
+{
+    RecordStream out;
+    while (const std::optional<RawRecordBatch> batch{reader.ReadBatch(maxBytes, NO_LIMIT)}) {
+        Append(out, *batch);
+    }
+    return out;
+}
+
+RecordStream ReadAllBatches(BamRawReader& reader)
+{
+    RecordStream out;
+    while (const std::optional<RawRecordBatch> batch{reader.ReadBatch()}) {
+        Append(out, *batch);
+    }
+    return out;
+}
+
+}  // namespace
 
 TEST(BgzfReaderBam, OpenValidBam)
 {
@@ -308,6 +415,103 @@ TEST(BgzfReaderBam, ParallelReadSurfacesTruncatedRecordBlock)
             }
         },
         std::runtime_error);
+}
+
+TEST(BgzfReaderBam, ParallelReadBatchMatchesSyncAtAllGroupBoundaries)
+{
+    const tests::TempDirGuard tempDir{"bgzf_tiny_blocks"};
+    const std::filesystem::path source{tempDir.File("source.bam")};
+    // The short records put a group boundary in a block_size field 24 times, most of
+    // them with blocks of 1 and 3 bytes.
+    std::vector<std::size_t> lengths{1, 2, 3, 10, 50, 333, 1000, 2000, 7, 1, 1500, 4, 900};
+    for (std::size_t length{1}; length <= 64; ++length) {
+        lengths.push_back(length);
+    }
+    WriteUnmappedBam(source, lengths);
+    const std::vector<std::byte> stream{ReadStream(source)};
+
+    for (const std::size_t blockSize : {1, 3, 7, 64, 1000}) {
+        SCOPED_TRACE(blockSize);
+        const std::filesystem::path path{tempDir.File(std::format("blocks{}.bam", blockSize))};
+        WriteBgzf(path, stream, blockSize);
+
+        BgzfReader sync{path, 0};
+        const RecordStream expected{ReadAllBatches(sync, NO_LIMIT)};
+        ASSERT_EQ(std::size(expected.Sizes), std::size(lengths));
+
+        // The batch takes over the group buffer.
+        BgzfReader parallel{path, 4};
+        EXPECT_EQ(ReadAllBatches(parallel, NO_LIMIT), expected);
+
+        // One record for each batch: the records are copied out of the group.
+        BgzfReader parallelOneRecord{path, 4};
+        EXPECT_EQ(ReadAllBatches(parallelOneRecord, 1), expected);
+    }
+}
+
+TEST(BgzfReaderBam, ParallelReadBatchKeepsARecordLargerThanAGroup)
+{
+    // A group is 32 blocks, about 2 MiB. The 2 Mbp record (about 3 MB) spans two groups
+    // and is larger than the spare capacity of the group where it ends.
+    const tests::TempDirGuard tempDir{"bgzf_large_record"};
+    const std::filesystem::path path{tempDir.File("large.bam")};
+    WriteUnmappedBam(path, {10, 2'000'000, 10, 100'000, 10});
+
+    BgzfReader sync{path, 0};
+    const RecordStream expected{ReadAllBatches(sync, NO_LIMIT)};
+    ASSERT_EQ(std::size(expected.Sizes), 5U);
+
+    BgzfReader parallel{path, 4};
+    EXPECT_EQ(ReadAllBatches(parallel, NO_LIMIT), expected);
+}
+
+TEST(BgzfReaderBam, ParallelReadRecordAndReadBatchMix)
+{
+    const tests::TempDirGuard tempDir{"bgzf_mix"};
+    const std::filesystem::path path{tempDir.File("mix.bam")};
+    WriteBgzf(path, ReadStream(tests::DataDir / "many_records.bam"), 512);
+
+    BgzfReader sync{path, 0};
+    const RecordStream expected{ReadAllBatches(sync, NO_LIMIT)};
+    ASSERT_EQ(std::size(expected.Sizes), 500U);
+
+    // A record, then a batch of at most 2 records, then the rest of the group.
+    BgzfReader parallel{path, 4};
+    RecordStream actual;
+    for (std::size_t step{0};; ++step) {
+        if ((step % 3) == 0) {
+            const std::optional<RawRecord> record{parallel.ReadRecord()};
+            if (!record) {
+                break;
+            }
+            Append(actual, record->RawData());
+            continue;
+        }
+        const std::size_t maxRecords{((step % 3) == 1) ? std::size_t{2} : NO_LIMIT};
+        const std::optional<RawRecordBatch> batch{parallel.ReadBatch(NO_LIMIT, maxRecords)};
+        if (!batch) {
+            break;
+        }
+        EXPECT_LE(batch->RecordCount(), maxRecords);
+        Append(actual, *batch);
+    }
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(BgzfReaderBam, ParallelRecordLimitCopiesPartOfAGroup)
+{
+    // A group of 32 blocks of 512 bytes holds about 46 records, so the record limit
+    // takes the first 7 records of the first group.
+    const tests::TempDirGuard tempDir{"bgzf_record_limit"};
+    const std::filesystem::path path{tempDir.File("limit.bam")};
+    WriteBgzf(path, ReadStream(tests::DataDir / "many_records.bam"), 512);
+
+    BamRawReader sync{path, BamRawReaderConfig{.RecordLimit = 7}};
+    const RecordStream expected{ReadAllBatches(sync)};
+    ASSERT_EQ(std::size(expected.Sizes), 7U);
+
+    BamRawReader parallel{path, BamRawReaderConfig{.BgzfWorkers = 4, .RecordLimit = 7}};
+    EXPECT_EQ(ReadAllBatches(parallel), expected);
 }
 
 TEST(BgzfReaderBam, ParseHeaderMatchesBamRawReader)

@@ -109,6 +109,10 @@ public:
     std::optional<RawRecord> ReadRecord();
 
     /// Read batch bounded by memory budget. Returns nullopt at EOF.
+    /// With BgzfWorkers == 0, the batch copies the records and grows to the limit.
+    /// With BgzfWorkers > 0, a batch holds records of at most one group of decompressed
+    /// BGZF blocks (about 2 MiB). If the group fits in the limit, the batch takes over its
+    /// buffer and does not copy the records. A larger limit does not join groups.
     std::optional<RawRecordBatch> ReadBatch(ByteLimit limit = ByteLimit{});
 
     void Seek(VirtualOffset offset);

@@ -103,6 +103,11 @@ while (auto batch = reader.ReadBatch(128_MiB)) {
 
 Returns `std::optional<RawRecordBatch>`. `nullopt` at EOF.
 
+With `BgzfWorkers > 0`, a batch holds the records of at most one group of
+decompressed BGZF blocks (about 2 MiB). If the group fits in the limit, the batch
+takes over the group buffer and does not copy the records. A larger limit does not
+join groups, so a large limit gives batches of about 2 MiB.
+
 ### Region query
 
 ```cpp

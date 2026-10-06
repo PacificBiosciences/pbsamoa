@@ -176,6 +176,17 @@ public:
     /// \returns owning RawRecord, or nullopt at EOF.
     std::optional<RawRecord> ReadRecord();
 
+    /// \brief Read the next BAM records as one batch.
+    ///
+    /// The batch ends after the record that reaches \p maxBytes, or at \p maxRecords.
+    /// In sync mode, the batch copies the records and grows to \p maxBytes. In parallel
+    /// mode, a batch holds records of at most one group of decompressed blocks (about
+    /// 2 MiB). If the group fits in \p maxBytes, the batch takes over its buffer and
+    /// does not copy the records.
+    /// \throws std::runtime_error in block-only mode.
+    /// \returns the batch, or nullopt at EOF.
+    std::optional<RawRecordBatch> ReadBatch(std::size_t maxBytes, std::size_t maxRecords);
+
     /// \brief Snapshot of read metrics.
     BgzfMetrics GetMetrics() const;
 

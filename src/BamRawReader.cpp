@@ -24,53 +24,6 @@ namespace PacBio {
 namespace Samoa {
 namespace {
 
-void AppendRecordToBatch(const RawRecord& record, std::vector<std::byte>& batchBuffer,
-                         std::vector<RawRecordBatch::RecordExtent>& extents)
-{
-    const auto raw{record.RawData()};
-    const auto offset{static_cast<std::uint32_t>(std::size(batchBuffer))};
-    batchBuffer.insert(std::ranges::end(batchBuffer), std::ranges::begin(raw),
-                       std::ranges::end(raw));
-    extents.emplace_back(offset, static_cast<std::uint32_t>(std::size(raw)));
-}
-
-template <typename Reader>
-std::optional<RawRecordBatch> ReadBatchFromReader(Reader& reader, ByteLimit limit,
-                                                  std::size_t remaining,
-                                                  std::size_t* recordCount = nullptr)
-{
-    const std::size_t byteLimit{limit.Value()};
-    std::vector<std::byte> batchBuffer;
-    batchBuffer.reserve(byteLimit);
-    std::vector<RawRecordBatch::RecordExtent> extents;
-
-    if (recordCount) {
-        *recordCount = 0;
-    }
-
-    while (std::size(extents) < remaining) {
-        if ((!std::empty(extents)) && (std::size(batchBuffer) >= byteLimit)) {
-            break;
-        }
-
-        const auto record{reader.ReadRecord()};
-        if (!record) {
-            break;
-        }
-        AppendRecordToBatch(*record, batchBuffer, extents);
-    }
-
-    if (std::empty(extents)) {
-        return std::nullopt;
-    }
-
-    if (recordCount) {
-        *recordCount = std::size(extents);
-    }
-
-    return RawRecordBatch{std::move(batchBuffer), std::move(extents)};
-}
-
 std::optional<std::size_t> ToRecordLimit(std::size_t recordLimit)
 {
     if (recordLimit == 0) {
@@ -466,9 +419,8 @@ struct BamRawReader::Impl
                 return std::nullopt;
             }
         }
-        std::size_t recordCount{0};
-        std::optional<RawRecordBatch> batch{
-            ReadBatchFromReader(*bgzf, limit, scatterRemaining, &recordCount)};
+        std::optional<RawRecordBatch> batch{bgzf->ReadBatch(limit.Value(), scatterRemaining)};
+        const std::size_t recordCount{batch ? batch->RecordCount() : 0};
         scatterRemaining -= recordCount;
         recordsRead += recordCount;
         return batch;
@@ -559,14 +511,12 @@ std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 
     const std::size_t remaining{impl_->RemainingRecordBudget()};
     if (!impl_->collection) {
-        std::size_t recordCount{0};
-        const std::optional<RawRecordBatch> batch{
-            ReadBatchFromReader(*impl_->bgzf, limit, remaining, &recordCount)};
-        impl_->recordsRead += recordCount;
+        std::optional<RawRecordBatch> batch{impl_->bgzf->ReadBatch(limit.Value(), remaining)};
+        impl_->recordsRead += batch ? batch->RecordCount() : 0;
         return batch;
     }
 
-    return ReadBatchFromReader(*this, limit, remaining);
+    return detail::ReadBatchFromReader(*this, limit.Value(), remaining);
 }
 
 void BamRawReader::Seek(VirtualOffset offset)

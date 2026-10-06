@@ -3,6 +3,7 @@
 #include "BinaryUtils.hpp"
 #include "LibdeflateUtils.hpp"
 #include "ParallelUtils.hpp"
+#include "ReaderUtils.hpp"
 #include "WriterUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
@@ -80,9 +81,14 @@ constexpr std::size_t MAX_UNCOMPRESSED_SIZE{0xFF00U};  // 65280
 
 // Pipeline constants
 constexpr std::size_t MAX_COMPRESSED_BLOCK_SIZE{65536U + 256U};
-constexpr std::size_t OUTPUT_QUEUE_CAPACITY{4096};
+// Record batches between the consumer thread and the reader. One batch holds one
+// group of BLOCKS_PER_BATCH blocks, about 2 MiB.
+constexpr std::size_t OUTPUT_QUEUE_CAPACITY{8};
 constexpr std::size_t RECORD_BLOCK_SIZE_FIELD{4};
 constexpr std::size_t BLOCKS_PER_BATCH{32};
+// Extra capacity of a group buffer: the record that ends in the group goes behind
+// its data without a reallocation in nearly all cases.
+constexpr std::size_t GROUP_SLACK{std::size_t{256} * 1024};
 
 // Number of spin iterations the consumer thread runs against a full output
 // queue before it yields the processor.
@@ -342,97 +348,92 @@ void NotifyReader(std::mutex& readyMutex, std::condition_variable& readyCv)
     readyCv.notify_one();
 }
 
-void ParseBufferedRecords(std::vector<std::byte>& accumulator, std::size_t& pos,
-                          rigtorp::SPSCQueue<RawRecord>& outputQueue,
-                          const std::stop_token& stopToken, PipelineCounters& counters,
-                          std::mutex& readyMutex, std::condition_variable& readyCv)
+namespace {
+
+// Turns the decompressed block groups of the pipeline into record batches in file
+// order. A group buffer becomes the batch buffer, so the records are not copied.
+// A record that spans groups collects in carry_ and goes behind the data of the
+// group where it ends.
+class GroupSplitter
 {
-    const ScopedTimer timer{counters.recordParseNs};
-    bool pushed{false};
+public:
+    // skipBytes: leading bytes to drop after a mid-block seek, so that the first
+    // batch starts at the requested record (parity with the sync reader's
+    // recordBufPos). They carry over to the next group if a group is shorter.
+    explicit GroupSplitter(const std::size_t skipBytes) : skipBytes_{skipBytes} {}
 
-    while (pos + RECORD_BLOCK_SIZE_FIELD <= std::size(accumulator)) {
-        const std::uint32_t blockSize{ReadU32LE(std::data(accumulator) + pos)};
-        if (blockSize == 0) {
-            pos += RECORD_BLOCK_SIZE_FIELD;
-            continue;
-        }
-
-        const std::size_t totalRecordBytes{RECORD_BLOCK_SIZE_FIELD + blockSize};
-        if (pos + totalRecordBytes > std::size(accumulator)) {
-            break;  // Need more data
-        }
-
-        // Create owning view from record bytes (after block_size field)
-        RawRecord view{std::span<const std::byte>{
-            std::data(accumulator) + pos + RECORD_BLOCK_SIZE_FIELD, blockSize}};
-
-        // Push to SPSC — spin while queue is full (reader drains on another core).
-        bool notifiedWhileFull{false};
-        std::uint32_t spins{0};
-        while (!outputQueue.try_push(std::move(view))) {
-            if (stopToken.stop_requested()) {
-                return;
-            }
-            // The reader thread can be asleep on readyCv because the queue was
-            // empty earlier. The end-of-batch call to NotifyReader() below cannot
-            // run until this push succeeds. Without a notification here, the
-            // consumer thread waits for the reader to drain the queue, and the
-            // reader waits for a notification that never comes. Both threads then
-            // stall forever.
-            if (!notifiedWhileFull) {
-                NotifyReader(readyMutex, readyCv);
-                notifiedWhileFull = true;
-            }
-            counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
-            if (++spins >= SPINS_BEFORE_YIELD) {
-                std::this_thread::yield();
-            }
-        }
-
-        counters.recordsProduced.fetch_add(1, std::memory_order_relaxed);
-        pushed = true;
-        pos += totalRecordBytes;
-    }
-
-    // Compact accumulator: remove consumed bytes
-    if (pos > 0) {
-        accumulator.erase(std::begin(accumulator),
-                          std::begin(accumulator) + static_cast<std::ptrdiff_t>(pos));
-        pos = 0;
-    }
-
-    if (pushed) {
-        NotifyReader(readyMutex, readyCv);
-    }
-}
-
-struct DecompressedBatchConsumer
-{
-    std::vector<std::byte>& accumulator;
-    std::size_t& pos;
-    rigtorp::SPSCQueue<RawRecord>& outputQueue;
-    std::stop_token stopToken;
-    PipelineCounters& counters;
-    std::mutex& readyMutex;
-    std::condition_variable& readyCv;
-    std::size_t& skipBytes;
-
-    void operator()(detail::DecompressedBatch batch) const
+    // Returns the records that end in this group, or nullopt if no record ends in it.
+    std::optional<RawRecordBatch> Split(std::vector<std::byte> data)
     {
-        accumulator.insert(accumulator.end(), batch.data.begin(), batch.data.end());
-        // Drop the leading bytes requested by a mid-block seek so parsing starts
-        // at the target record rather than the block boundary (parity with the
-        // sync reader's recordBufPos). Carried across batches if the first one is
-        // shorter than the requested offset.
-        if (skipBytes > 0) {
-            const std::size_t drop{std::min(skipBytes, std::size(accumulator) - pos)};
-            pos += drop;
-            skipBytes -= drop;
+        const std::size_t size{std::size(data)};
+        std::size_t pos{std::min(skipBytes_, size)};
+        skipBytes_ -= pos;
+
+        // 1. Complete the record that started in an earlier group.
+        while (!std::empty(carry_) && (pos < size) && (CarryNeed() > 0)) {
+            const std::size_t take{std::min(CarryNeed(), size - pos)};
+            carry_.insert(std::end(carry_), std::begin(data) + pos, std::begin(data) + pos + take);
+            pos += take;
         }
-        ParseBufferedRecords(accumulator, pos, outputQueue, stopToken, counters, readyMutex,
-                             readyCv);
+        if (!std::empty(carry_) && (CarryNeed() > 0)) {
+            return std::nullopt;  // the whole group belongs to one record
+        }
+        const bool carryDone{std::size(carry_) > RECORD_BLOCK_SIZE_FIELD};
+
+        // 2. The records that lie completely in this group. A zero block_size
+        //    has no record data: skip its field.
+        std::vector<RawRecordBatch::RecordExtent> extents;
+        if (carryDone) {
+            extents.emplace_back();  // set in step 4: keeps file order
+        }
+        while ((pos + RECORD_BLOCK_SIZE_FIELD) <= size) {
+            const std::uint32_t blockSize{ReadU32LE(std::data(data) + pos)};
+            if ((pos + RECORD_BLOCK_SIZE_FIELD + blockSize) > size) {
+                break;
+            }
+            if (blockSize > 0) {
+                extents.emplace_back(static_cast<std::uint32_t>(pos + RECORD_BLOCK_SIZE_FIELD),
+                                     blockSize);
+            }
+            pos += RECORD_BLOCK_SIZE_FIELD + blockSize;
+        }
+
+        // 3. The tail starts the next record that spans groups.
+        std::vector<std::byte> tail(std::begin(data) + pos, std::end(data));
+
+        // 4. Put the completed record behind the group data. The pipeline reserves
+        //    GROUP_SLACK, so this does not reallocate in nearly all cases.
+        if (carryDone) {
+            const std::size_t at{size};
+            data.insert(std::end(data), std::begin(carry_), std::end(carry_));
+            extents.front() = {
+                .offset = static_cast<std::uint32_t>(at + RECORD_BLOCK_SIZE_FIELD),
+                .size = static_cast<std::uint32_t>(std::size(carry_) - RECORD_BLOCK_SIZE_FIELD),
+            };
+        }
+        carry_ = std::move(tail);
+
+        if (std::empty(extents)) {
+            return std::nullopt;
+        }
+        return RawRecordBatch{std::move(data), std::move(extents)};
     }
+
+private:
+    // Bytes that carry_ still needs: first the block_size field, then the record.
+    std::size_t CarryNeed() const
+    {
+        if (std::size(carry_) < RECORD_BLOCK_SIZE_FIELD) {
+            return RECORD_BLOCK_SIZE_FIELD - std::size(carry_);
+        }
+        return RECORD_BLOCK_SIZE_FIELD + ReadU32LE(std::data(carry_)) - std::size(carry_);
+    }
+
+    std::vector<std::byte> carry_;
+    std::size_t skipBytes_;
 };
+
+}  // namespace
 
 struct BgzfPipelineState
 {
@@ -470,7 +471,7 @@ struct BgzfPipelineState
     std::unique_ptr<Parallel::ThreadPool<detail::DecompressedBatch>> pool;
     std::jthread ioThread;
     std::jthread consumerThread;
-    std::unique_ptr<rigtorp::SPSCQueue<RawRecord>> outputQueue;
+    std::unique_ptr<rigtorp::SPSCQueue<RawRecordBatch>> outputQueue;
     std::mutex readyMutex;
     std::condition_variable readyCv;
     std::atomic<bool> done{false};
@@ -480,6 +481,10 @@ struct BgzfPipelineState
 
     // Per-worker decompressors (indexed by ThreadIndex)
     std::vector<detail::DecompressorPtr> decompressors;
+
+    // Reader side: the batch that ReadRecord() and ReadBatch() take records from
+    std::optional<RawRecordBatch> currentBatch;
+    std::size_t currentIdx{0};
 
     // Always-on metrics
     PipelineCounters counters;
@@ -497,11 +502,15 @@ struct BgzfPipelineState
     static void RunConsumerLoop(std::stop_token stopToken, BgzfPipelineState* self);
     void IoLoop(std::stop_token stopToken);
     void ConsumerLoop(std::stop_token stopToken);
+    void PushBatch(RawRecordBatch batch, const std::stop_token& stopToken);
     std::optional<std::size_t> ReadBlockSync(std::span<std::byte> buffer);
     const SamHeader& Header() const;
-    std::optional<RawRecord> TryPopOutputRecord();
+    bool TryPopOutputBatch();
     bool OutputQueueReady() const;
+    bool NextBatch();
+    bool HasRecord();
     std::optional<RawRecord> ReadRecord();
+    std::optional<RawRecordBatch> ReadBatch(std::size_t maxBytes, std::size_t maxRecords);
     void Seek(VirtualOffset offset);
     VirtualOffset Tell() const;
     BgzfMetrics GetMetrics() const;
@@ -560,6 +569,7 @@ struct BgzfReader::Impl
     bool HasEofMarker() const;
     const SamHeader& Header() const;
     std::optional<RawRecord> ReadRecord();
+    std::optional<RawRecordBatch> ReadBatch(std::size_t maxBytes, std::size_t maxRecords);
     BgzfMetrics GetMetrics() const;
 };
 
@@ -588,6 +598,12 @@ VirtualOffset BgzfReader::Tell() const { return impl_->Tell(); }
 const SamHeader& BgzfReader::Header() const { return impl_->Header(); }
 
 std::optional<RawRecord> BgzfReader::ReadRecord() { return impl_->ReadRecord(); }
+
+std::optional<RawRecordBatch> BgzfReader::ReadBatch(const std::size_t maxBytes,
+                                                    const std::size_t maxRecords)
+{
+    return impl_->ReadBatch(maxBytes, maxRecords);
+}
 
 BgzfMetrics BgzfReader::GetMetrics() const { return impl_->GetMetrics(); }
 
@@ -1569,7 +1585,7 @@ void BgzfPipelineState::StartPipeline()
     }
 
     // Create output queue
-    outputQueue = std::make_unique<rigtorp::SPSCQueue<RawRecord>>(OUTPUT_QUEUE_CAPACITY);
+    outputQueue = std::make_unique<rigtorp::SPSCQueue<RawRecordBatch>>(OUTPUT_QUEUE_CAPACITY);
     done.store(false, std::memory_order_release);
     pipelineError.store(false, std::memory_order_release);
     errorPtr = nullptr;
@@ -1637,6 +1653,8 @@ void BgzfPipelineState::StopPipeline()
     pool.reset();
     outputQueue.reset();
     decompressors.clear();
+    currentBatch.reset();
+    currentIdx = 0;
 }
 
 void BgzfPipelineState::IoLoop(std::stop_token stopToken)
@@ -1788,20 +1806,27 @@ void BgzfPipelineState::IoLoop(std::stop_token stopToken)
 void BgzfPipelineState::ConsumerLoop(std::stop_token stopToken)
 {
     try {
-        std::vector<std::byte> accumulator{std::move(initialBytes)};
-        std::size_t pos{0};
-        // After a mid-block seek initialBytes is empty and the first batch begins
+        // After a mid-block seek initialBytes is empty and the first group begins
         // at the seeked block, so the leading bytes are dropped there, not here.
-        std::size_t skipBytes{seekSkipBytes};
+        GroupSplitter splitter{seekSkipBytes};
+        const auto split = [&](std::vector<std::byte> data) {
+            std::optional<RawRecordBatch> batch;
+            {
+                const ScopedTimer timer{counters.recordParseNs};
+                batch = splitter.Split(std::move(data));
+            }
+            if (batch) {
+                PushBatch(std::move(*batch), stopToken);
+            }
+        };
 
-        // Process any records already present from initialBytes (header block
-        // may contain record data when header + records fit in one BGZF block).
-        ParseBufferedRecords(accumulator, pos, *outputQueue, stopToken, counters, readyMutex,
-                             readyCv);
+        // The block that ends the header can also hold records.
+        split(std::move(initialBytes));
 
-        const DecompressedBatchConsumer consumeBatch{
-            accumulator, pos, *outputQueue, stopToken, counters, readyMutex, readyCv, skipBytes};
-        while (pool->ConsumeWith(consumeBatch)) {
+        const auto consumeGroup = [&](detail::DecompressedBatch group) {
+            split(std::move(group.data));
+        };
+        while (pool->ConsumeWith(consumeGroup)) {
             if (stopToken.stop_requested()) {
                 break;
             }
@@ -1884,20 +1909,52 @@ const SamHeader& BgzfPipelineState::Header() const
     return header;
 }
 
-std::optional<RawRecord> BgzfPipelineState::TryPopOutputRecord()
+void BgzfPipelineState::PushBatch(RawRecordBatch batch, const std::stop_token& stopToken)
 {
-    RawRecord* front{outputQueue->front()};
-    if (!front) {
-        return std::nullopt;
+    const std::size_t recordCount{batch.RecordCount()};
+
+    // Spin while the queue is full (the reader drains it on another core).
+    bool notifiedWhileFull{false};
+    std::uint32_t spins{0};
+    while (!outputQueue->try_push(std::move(batch))) {
+        if (stopToken.stop_requested()) {
+            return;
+        }
+        // The reader thread can be asleep on readyCv because the queue was empty
+        // earlier. The NotifyReader() call below cannot run until this push
+        // succeeds. Without a notification here, the consumer thread waits for the
+        // reader to drain the queue, and the reader waits for a notification that
+        // never comes. Both threads then stall forever.
+        if (!notifiedWhileFull) {
+            NotifyReader(readyMutex, readyCv);
+            notifiedWhileFull = true;
+        }
+        counters.consumerStalls.fetch_add(1, std::memory_order_relaxed);
+        if (++spins >= SPINS_BEFORE_YIELD) {
+            std::this_thread::yield();
+        }
     }
 
-    RawRecord result{std::move(*front)};
-    outputQueue->pop();
-    counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
-    return result;
+    counters.recordsProduced.fetch_add(recordCount, std::memory_order_relaxed);
+    NotifyReader(readyMutex, readyCv);
 }
 
-std::optional<RawRecord> BgzfPipelineState::ReadRecord()
+bool BgzfPipelineState::TryPopOutputBatch()
+{
+    RawRecordBatch* front{outputQueue->front()};
+    if (!front) {
+        return false;
+    }
+
+    currentBatch = std::move(*front);
+    currentIdx = 0;
+    outputQueue->pop();
+    return true;
+}
+
+// Makes the next batch of the output queue the current batch. Returns false at
+// the end of the file.
+bool BgzfPipelineState::NextBatch()
 {
     if (!headerParsed) {
         throw std::runtime_error{"BAM header not parsed"};
@@ -1908,14 +1965,14 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
 
     // Fast path: check SPSC queue without locking.
     while (true) {
-        if (auto record{TryPopOutputRecord()}) {
-            return std::move(*record);
+        if (TryPopOutputBatch()) {
+            return true;
         }
 
         // Queue empty — check termination before sleeping.
         if (pipelineError.load(std::memory_order_acquire)) {
-            if (auto record{TryPopOutputRecord()}) {
-                return std::move(*record);
+            if (TryPopOutputBatch()) {
+                return true;
             }
             {
                 const std::lock_guard lock{errorMutex};
@@ -1924,10 +1981,7 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
         }
 
         if (done.load(std::memory_order_acquire)) {
-            if (auto record{TryPopOutputRecord()}) {
-                return std::move(*record);
-            }
-            return std::nullopt;
+            return TryPopOutputBatch();
         }
 
         // Slow path: wait on condition variable for data/done/error.
@@ -1941,6 +1995,59 @@ std::optional<RawRecord> BgzfPipelineState::ReadRecord()
     }
 }
 
+bool BgzfPipelineState::HasRecord()
+{
+    return (currentBatch && (currentIdx < currentBatch->RecordCount())) || NextBatch();
+}
+
+std::optional<RawRecord> BgzfPipelineState::ReadRecord()
+{
+    if (!HasRecord()) {
+        return std::nullopt;
+    }
+
+    RawRecord record{currentBatch->RecordData(currentIdx)};
+    ++currentIdx;
+    counters.recordsConsumed.fetch_add(1, std::memory_order_relaxed);
+    return record;
+}
+
+std::optional<RawRecordBatch> BgzfPipelineState::ReadBatch(const std::size_t maxBytes,
+                                                           const std::size_t maxRecords)
+{
+    if (maxRecords == 0) {
+        return std::nullopt;
+    }
+    if (!HasRecord()) {
+        return std::nullopt;
+    }
+
+    // Give the whole group to the caller: this does not copy the records.
+    const std::size_t recordCount{currentBatch->RecordCount()};
+    if ((currentIdx == 0) && (recordCount <= maxRecords) &&
+        (currentBatch->BufferSize() <= maxBytes)) {
+        RawRecordBatch batch{std::move(*currentBatch)};
+        currentBatch.reset();
+        counters.recordsConsumed.fetch_add(recordCount, std::memory_order_relaxed);
+        return batch;
+    }
+
+    // Copy the records that fit the limits. Only a small limit, a record limit, or a
+    // mix with ReadRecord() comes here.
+    std::vector<std::byte> buffer;
+    std::vector<RawRecordBatch::RecordExtent> extents;
+    while ((currentIdx < recordCount) && (std::size(extents) < maxRecords) &&
+           (std::empty(extents) || (std::size(buffer) < maxBytes))) {
+        const std::span<const std::byte> record{currentBatch->RecordData(currentIdx)};
+        extents.emplace_back(static_cast<std::uint32_t>(std::size(buffer)),
+                             static_cast<std::uint32_t>(std::size(record)));
+        buffer.insert(std::end(buffer), std::begin(record), std::end(record));
+        ++currentIdx;
+    }
+    counters.recordsConsumed.fetch_add(std::size(extents), std::memory_order_relaxed);
+    return RawRecordBatch{std::move(buffer), std::move(extents)};
+}
+
 detail::DecompressedBatch BgzfPipelineState::DecompressBatchTask::operator()(
     Parallel::ThreadIndex threadIdx) const
 {
@@ -1952,6 +2059,7 @@ detail::DecompressedBatch BgzfPipelineState::DecompressBatchTask::operator()(
     }
 
     detail::DecompressedBatch batch{};
+    batch.data.reserve(totalIsize + GROUP_SLACK);
     batch.data.resize(totalIsize);
 
     std::size_t outOffset{0};
@@ -2363,6 +2471,15 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecord()
         recordsConsumed.fetch_add(1, std::memory_order_relaxed);
     }
     return rec;
+}
+
+std::optional<RawRecordBatch> BgzfReader::Impl::ReadBatch(const std::size_t maxBytes,
+                                                          const std::size_t maxRecords)
+{
+    if (mode == BgzfReaderMode::PARALLEL_BAM) {
+        return pipeline->ReadBatch(maxBytes, maxRecords);
+    }
+    return detail::ReadBatchFromReader(*this, maxBytes, maxRecords);
 }
 
 BgzfMetrics BgzfReader::Impl::GetMetrics() const
