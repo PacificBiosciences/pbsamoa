@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <span>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -97,9 +98,39 @@ std::int32_t DecodeChunkSize(std::int32_t recordCount, std::size_t decodeWorkers
         detail::ParallelChunkSize(static_cast<std::size_t>(recordCount), decodeWorkers));
 }
 
+// With parallel BGZF, one raw batch holds one group of blocks (about 2 MiB). Reads
+// batches up to the budget, so that one decode round keeps all decode workers busy.
+// Always reads one batch: with a zero budget, ReadBatch() gives one-record batches.
+std::vector<RawRecordBatch> ReadBatchesUpTo(BamRawReader& reader, const ByteLimit budget)
+{
+    std::vector<RawRecordBatch> batches;
+    std::size_t bytes{0};
+    while (std::empty(batches) || (bytes < budget.Value())) {
+        std::optional<RawRecordBatch> batch{reader.ReadBatch(budget)};
+        if (!batch) {
+            break;
+        }
+        bytes += batch->BufferSize();
+        batches.push_back(std::move(*batch));
+    }
+    return batches;
+}
+
+// The data of all records in the batches, in file order.
+std::vector<std::span<const std::byte>> RecordSpans(const std::vector<RawRecordBatch>& batches)
+{
+    std::vector<std::span<const std::byte>> records;
+    for (const RawRecordBatch& batch : batches) {
+        for (std::size_t i{0}; i < batch.RecordCount(); ++i) {
+            records.push_back(batch.RecordData(i));
+        }
+    }
+    return records;
+}
+
 struct DecodeBatchWorker
 {
-    const RawRecordBatch* Batch;
+    const std::vector<std::span<const std::byte>>* Records;
     std::vector<BamRecord>* Owned;
     const TagFilter* TagFilterState;
     std::int32_t RecordCount;
@@ -110,7 +141,7 @@ struct DecodeBatchWorker
         const std::int32_t first{chunkIdx * ChunkSize};
         const std::int32_t last{first + std::min(ChunkSize, RecordCount - first)};
         for (std::int32_t i{first}; i < last; ++i) {
-            const RawRecordView view{Batch->View(static_cast<std::size_t>(i))};
+            const RawRecordView view{(*Records)[static_cast<std::size_t>(i)]};
             (*Owned)[static_cast<std::size_t>(i)] = DecodeView(view, *TagFilterState);
         }
     }
@@ -251,7 +282,8 @@ struct BamRecordReader::Impl
         try {
             while (!stopToken.stop_requested()) {
                 const auto batchReadStart{std::chrono::steady_clock::now()};
-                std::optional<RawRecordBatch> batch{viewReader_.ReadBatch(batchBudget_)};
+                const std::vector<RawRecordBatch> batches{
+                    ReadBatchesUpTo(viewReader_, batchBudget_)};
                 counters_.batchReadNs.fetch_add(
                     static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -259,18 +291,18 @@ struct BamRecordReader::Impl
                             .count()),
                     std::memory_order_relaxed);
 
-                if (!batch) {
+                if (std::empty(batches)) {
                     break;
                 }
 
-                const std::int32_t n{static_cast<std::int32_t>(batch->RecordCount())};
+                const std::vector<std::span<const std::byte>> records{RecordSpans(batches)};
+                const std::int32_t n{static_cast<std::int32_t>(std::size(records))};
                 std::vector<BamRecord> owned(n);
 
                 const auto decodeStart{std::chrono::steady_clock::now()};
                 const std::int32_t chunkSize{DecodeChunkSize(n, decodeWorkers_)};
                 const std::int32_t chunkCount{(n / chunkSize) + ((n % chunkSize) != 0)};
-                const DecodeBatchWorker worker{std::addressof(*batch), &owned, &tagFilter_, n,
-                                               chunkSize};
+                const DecodeBatchWorker worker{&records, &owned, &tagFilter_, n, chunkSize};
                 PacBio::Parallel::Dispatch(pool_, worker, chunkCount);
                 counters_.decodeNs.fetch_add(
                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -278,7 +310,7 @@ struct BamRecordReader::Impl
                                                    .count()),
                     std::memory_order_relaxed);
 
-                counters_.batchesDecoded.fetch_add(1, std::memory_order_relaxed);
+                counters_.batchesDecoded.fetch_add(std::size(batches), std::memory_order_relaxed);
                 counters_.recordsDecoded.fetch_add(static_cast<std::uint64_t>(n),
                                                    std::memory_order_relaxed);
 

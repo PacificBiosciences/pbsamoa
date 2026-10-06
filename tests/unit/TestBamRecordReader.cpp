@@ -161,7 +161,8 @@ TEST(BamRecordReader, ChunkedDecodeMatchesSerialAcrossWorkerCounts)
     ASSERT_EQ(std::size(expected), 10000U);
 
     for (const std::size_t workers : {1U, 2U, 3U, 5U, 8U}) {
-        for (const ByteLimit budget : {ByteLimit{4 * 1024 * 1024}, ByteLimit{64 * 1024}}) {
+        for (const ByteLimit budget :
+             {ByteLimit{4 * 1024 * 1024}, ByteLimit{64 * 1024}, ByteLimit{0}}) {
             BamRecordReader parallel{path, BamRecordReaderConfig{
                                                .DecodeWorkers = workers,
                                                .BatchBudget = budget,
