@@ -466,6 +466,36 @@ WriterMetrics m = writer.GetMetrics();
 // m.Bgzf.BytesCompressed, m.Bgzf.BlocksWritten, m.TotalRecordsWritten, ...
 ```
 
+### Compression on the caller threads
+
+`BgzfBlockEncoder` and `BgzfBlockWriter` (`<pbsamoa/core/Bgzf.hpp>`) move the
+compression to the threads that make the records. Each thread fills its own
+encoder; the writer only appends the blocks, in the order of the `Write()` calls.
+
+```cpp
+BgzfBlockWriter out{"output.bam", BgzfBlockWriterConfig{.UseTempFile = true}};
+
+BgzfBlockEncoder headerEncoder{};
+headerEncoder.Write(header.ToBamHeaderBlock());
+headerEncoder.Finish();
+out.Write(headerEncoder.TakeBlocks());
+
+// On each worker thread, for one batch:
+BgzfBlockEncoder encoder{/*compressionLevel=*/2};
+for (const BamRecord& record : batch) {
+    EncodeBamRecord(record, encoder);
+}
+encoder.Finish();
+out.Write(encoder.TakeBlocks());  // thread-safe
+
+out.Close();  // writes the EOF marker
+```
+
+`Write()` blocks while the queue holds `MaxPendingBytes` (default 64 MiB) that
+the IO thread did not write yet. Thus slow storage cannot make the queue grow
+without limit. The writer does not track virtual offsets and has no index
+callback. Build a BAI from the finished file.
+
 ---
 
 ## SamWriter

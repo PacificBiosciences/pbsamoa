@@ -1,9 +1,11 @@
 #include <pbsamoa/io/BamWriter.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <format>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -16,7 +18,8 @@ namespace {
 
 constexpr std::size_t BAM_BLOCK_SIZE_PREFIX_BYTES{4};
 
-std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> rawData)
+std::array<std::byte, BAM_BLOCK_SIZE_PREFIX_BYTES> BlockSizePrefix(
+    std::span<const std::byte> rawData)
 {
     if (std::size(rawData) > std::size_t{std::numeric_limits<std::int32_t>::max()}) {
         throw std::invalid_argument{
@@ -25,12 +28,19 @@ std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> raw
     }
 
     const std::uint32_t blockSize{static_cast<std::uint32_t>(std::size(rawData))};
+    return {
+        static_cast<std::byte>(blockSize & 0xFFU),
+        static_cast<std::byte>((blockSize >> 8U) & 0xFFU),
+        static_cast<std::byte>((blockSize >> 16U) & 0xFFU),
+        static_cast<std::byte>((blockSize >> 24U) & 0xFFU),
+    };
+}
 
+std::vector<std::byte> BuildCombinedRecordPayload(std::span<const std::byte> rawData)
+{
+    const auto prefix{BlockSizePrefix(rawData)};
     std::vector<std::byte> combined(BAM_BLOCK_SIZE_PREFIX_BYTES + std::size(rawData));
-    combined[0] = static_cast<std::byte>(blockSize & 0xFFU);
-    combined[1] = static_cast<std::byte>((blockSize >> 8U) & 0xFFU);
-    combined[2] = static_cast<std::byte>((blockSize >> 16U) & 0xFFU);
-    combined[3] = static_cast<std::byte>((blockSize >> 24U) & 0xFFU);
+    std::ranges::copy(prefix, std::ranges::begin(combined));
     std::ranges::copy(rawData, std::ranges::begin(combined) + BAM_BLOCK_SIZE_PREFIX_BYTES);
     return combined;
 }
@@ -166,6 +176,13 @@ WriterMetrics BamWriter::GetMetrics() const
 }
 
 VirtualOffset BamWriter::EndVirtualOffset() const { return impl_->bgzf.EndVirtualOffset(); }
+
+void EncodeBamRecord(const BamRecord& record, BgzfBlockEncoder& encoder)
+{
+    const std::vector<std::byte> serialized{record.SerializeToBam()};
+    encoder.Write(BlockSizePrefix(serialized));
+    encoder.Write(serialized);
+}
 
 }  // namespace Samoa
 }  // namespace PacBio

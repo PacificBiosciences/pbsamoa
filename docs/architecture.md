@@ -204,6 +204,17 @@ When a callback is configured (via `BamWriter`), callback dispatch happens on
 the BGZF IO writer thread after block file offsets are known, not on the caller
 thread. Callbacks can be deferred until `Close()`.
 
+### BgzfBlockEncoder and BgzfBlockWriter
+
+`BgzfBlockEncoder` compresses bytes into complete BGZF blocks on the calling
+thread. `BgzfBlockWriter` takes these blocks from many threads and writes them
+in the order of the `Write()` calls on one IO thread. Use the pair when the
+producer threads must do the compression, for example when an aligner holds an
+output lock: the lock then covers only a queue push. `Write()` blocks while the
+queue holds `MaxPendingBytes`, so slow storage stops the producers. The writer does not track
+virtual offsets and has no index callback. `EncodeBamRecord()` adds a BAM
+record to an encoder.
+
 ### VirtualOffset
 
 A 64-bit value encoding position within a BGZF file: upper 48 bits are the

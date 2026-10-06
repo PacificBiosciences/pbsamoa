@@ -296,6 +296,80 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// ---------------------------------------------------------------------------
+// BgzfBlockEncoder / BgzfBlockWriter
+// ---------------------------------------------------------------------------
+
+/// \brief Compresses bytes into complete BGZF blocks on the calling thread.
+///
+/// Many threads can each fill their own encoder and give the blocks to one
+/// BgzfBlockWriter. The compression then runs on the producer threads, and the
+/// shared output only appends bytes. A block holds at most
+/// BGZF_MAX_UNCOMPRESSED_BLOCK bytes; data can continue in the next block.
+class BgzfBlockEncoder
+{
+public:
+    /// \throws std::invalid_argument if \p compressionLevel is not in [1, 12]
+    explicit BgzfBlockEncoder(int compressionLevel = 6);
+    ~BgzfBlockEncoder();
+
+    BgzfBlockEncoder(const BgzfBlockEncoder&) = delete;
+    BgzfBlockEncoder& operator=(const BgzfBlockEncoder&) = delete;
+    BgzfBlockEncoder(BgzfBlockEncoder&&) noexcept;
+    BgzfBlockEncoder& operator=(BgzfBlockEncoder&&) noexcept;
+
+    /// \brief Append uncompressed bytes. Each full block is compressed at once.
+    void Write(std::span<const std::byte> data);
+
+    /// \brief Compress the remaining bytes into a last, partly filled block.
+    void Finish();
+
+    /// \brief Move out the framed blocks compressed so far. Call Finish() first to
+    ///        end the output on a block boundary.
+    [[nodiscard]] std::vector<std::byte> TakeBlocks() noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+struct BgzfBlockWriterConfig
+{
+    bool UseTempFile{false};
+    /// Queued bytes that the IO thread has not written yet. Write() blocks above it.
+    std::size_t MaxPendingBytes{std::size_t{64} * 1024 * 1024};
+};
+
+/// \brief Writes complete BGZF blocks, for example from BgzfBlockEncoder, to a file.
+///
+/// Write() is thread-safe and queues the blocks; one IO thread writes them in the
+/// order of the Write() calls. If the queue holds MaxPendingBytes, Write() blocks
+/// until the IO thread makes space. An empty queue takes a write of any size.
+/// Close() appends the EOF marker. The writer does not track virtual offsets and
+/// has no index callback.
+class BgzfBlockWriter
+{
+public:
+    explicit BgzfBlockWriter(const std::filesystem::path& path,
+                             const BgzfBlockWriterConfig& config = BgzfBlockWriterConfig{});
+    ~BgzfBlockWriter();
+
+    BgzfBlockWriter(const BgzfBlockWriter&) = delete;
+    BgzfBlockWriter& operator=(const BgzfBlockWriter&) = delete;
+
+    /// \brief Queue framed BGZF blocks. Blocks while the queue is full.
+    /// Rethrows an earlier IO error.
+    void Write(std::vector<std::byte>&& blocks);
+
+    /// \brief Write the queued blocks and the EOF marker, then close.
+    /// Called automatically by destructor, which suppresses errors.
+    void Close();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace Samoa
 }  // namespace PacBio
 

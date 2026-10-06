@@ -5,7 +5,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <mutex>
@@ -13,7 +16,12 @@
 #include <ranges>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace PacBio {
 namespace Samoa {
@@ -387,6 +395,194 @@ TEST_F(BgzfWriterTest, SharedPoolMoveAssignmentDrainsPreviousWriter)
     EXPECT_TRUE(BgzfReader{tmpPath_}.HasEofMarker());
     first.Close();
     EXPECT_TRUE(BgzfReader{secondPath}.HasEofMarker());
+}
+
+class BgzfBlockWriterTest : public ::testing::Test
+{
+protected:
+    tests::TempDirGuard tempDir_;
+    std::filesystem::path tmpPath_{};
+
+    void SetUp() override
+    {
+        tempDir_.Reset("bgzf_block_writer");
+        tmpPath_ = tempDir_.File("output.bgzf");
+    }
+
+    std::vector<std::byte> ReadAll() const
+    {
+        BgzfReader reader{tmpPath_};
+        std::vector<std::byte> output{};
+        std::vector<std::byte> buffer(65536U);
+        while (true) {
+            const std::optional<std::size_t> bytesRead{reader.ReadBlock(buffer)};
+            if (!bytesRead || (*bytesRead == 0U)) {
+                break;
+            }
+            output.insert(std::ranges::end(output), std::ranges::begin(buffer),
+                          std::ranges::begin(buffer) + *bytesRead);
+        }
+        return output;
+    }
+};
+
+TEST(BgzfBlockEncoderTest, RejectsInvalidCompressionLevel)
+{
+    EXPECT_THROW(BgzfBlockEncoder{0}, std::invalid_argument);
+    EXPECT_THROW(BgzfBlockEncoder{13}, std::invalid_argument);
+}
+
+TEST(BgzfBlockEncoderTest, FinishWithoutDataEmitsNothing)
+{
+    BgzfBlockEncoder encoder{};
+    encoder.Finish();
+    EXPECT_TRUE(std::empty(encoder.TakeBlocks()));
+}
+
+TEST_F(BgzfBlockWriterTest, BlocksFromSeveralEncodersReadBackInWriteOrder)
+{
+    std::vector<std::byte> expected{};
+    {
+        BgzfBlockWriter writer{tmpPath_};
+        for (std::size_t part{0}; part < 3; ++part) {
+            // 150000 bytes fill two full blocks and a part of a third one.
+            std::vector<std::byte> data(150000U);
+            for (std::size_t i{0}; i < std::size(data); ++i) {
+                data[i] = static_cast<std::byte>((i * 7U + part) & 0xFFU);
+            }
+            BgzfBlockEncoder encoder{2};
+            encoder.Write(data);
+            encoder.Finish();
+            writer.Write(encoder.TakeBlocks());
+            expected.insert(std::ranges::end(expected), std::ranges::begin(data),
+                            std::ranges::end(data));
+        }
+        writer.Close();
+    }
+
+    EXPECT_TRUE(BgzfReader{tmpPath_}.HasEofMarker());
+    EXPECT_TRUE(std::ranges::equal(ReadAll(), expected));
+}
+
+TEST_F(BgzfBlockWriterTest, IncompressibleDataFitsInBlocks)
+{
+    // A xorshift sequence does not compress; each full block must still fit.
+    std::vector<std::byte> data(200000U);
+    std::uint64_t state{0x9E3779B97F4A7C15ULL};
+    for (std::byte& b : data) {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        b = static_cast<std::byte>(state & 0xFFU);
+    }
+    {
+        BgzfBlockWriter writer{tmpPath_};
+        BgzfBlockEncoder encoder{12};
+        encoder.Write(data);
+        encoder.Finish();
+        writer.Write(encoder.TakeBlocks());
+    }
+
+    EXPECT_TRUE(std::ranges::equal(ReadAll(), data));
+}
+
+TEST_F(BgzfBlockWriterTest, EmptyFileHasEofMarker)
+{
+    {
+        const BgzfBlockWriter writer{tmpPath_};
+    }
+
+    EXPECT_TRUE(BgzfReader{tmpPath_}.HasEofMarker());
+    EXPECT_TRUE(std::empty(ReadAll()));
+}
+
+TEST_F(BgzfBlockWriterTest, UseTempFileAtomicWrite)
+{
+    {
+        BgzfBlockWriter writer{tmpPath_, BgzfBlockWriterConfig{.UseTempFile = true}};
+        EXPECT_FALSE(std::filesystem::exists(tmpPath_));
+        writer.Close();
+    }
+
+    EXPECT_TRUE(std::filesystem::exists(tmpPath_));
+}
+
+TEST_F(BgzfBlockWriterTest, WriteAfterCloseThrows)
+{
+    BgzfBlockWriter writer{tmpPath_};
+    writer.Close();
+    EXPECT_THROW(writer.Write(std::vector<std::byte>(4U)), std::runtime_error);
+}
+
+TEST_F(BgzfBlockWriterTest, WriteBlocksWhenOutputStalls)
+{
+    // A FIFO with no active reader stalls the IO thread. The FIFO buffer (64 KiB at most on
+    // Linux and macOS) is smaller than one chunk, so at most CAP / CHUNK writes can return.
+    constexpr std::size_t CHUNK{std::size_t{256} * 1024};
+    constexpr std::size_t CAP{4 * CHUNK};
+    constexpr std::int32_t CHUNKS{16};
+    const std::filesystem::path fifoPath{tempDir_.File("stall.fifo")};
+    ASSERT_EQ(::mkfifo(fifoPath.c_str(), 0600), 0);
+    // Open the read end first without blocking, so that the writer can open the FIFO.
+    const int readFd{::open(fifoPath.c_str(), O_RDONLY | O_NONBLOCK)};
+    ASSERT_GE(readFd, 0);
+
+    std::vector<std::byte> expected{};
+    {
+        BgzfBlockWriter writer{fifoPath, BgzfBlockWriterConfig{.MaxPendingBytes = CAP}};
+        ASSERT_EQ(::fcntl(readFd, F_SETFL, 0), 0);
+
+        std::atomic<std::int32_t> written{0};
+        std::thread producer{[&writer, &written] {
+            for (std::int32_t i{0}; i < CHUNKS; ++i) {
+                writer.Write(std::vector<std::byte>(CHUNK, static_cast<std::byte>(i)));
+                written.fetch_add(1, std::memory_order_relaxed);
+            }
+        }};
+        // A longer wait only lets more writes return, so the bound below cannot fail by timing.
+        std::this_thread::sleep_for(std::chrono::milliseconds{200});
+        EXPECT_LE(written.load(std::memory_order_relaxed), CAP / CHUNK);
+
+        std::vector<std::byte> drained{};
+        std::thread reader{[readFd, &drained] {
+            std::vector<std::byte> buffer(CHUNK);
+            while (true) {
+                const ssize_t n{::read(readFd, std::data(buffer), std::size(buffer))};
+                if (n <= 0) {
+                    break;
+                }
+                drained.insert(std::ranges::end(drained), std::ranges::begin(buffer),
+                               std::ranges::begin(buffer) + n);
+            }
+        }};
+        producer.join();
+        EXPECT_EQ(written.load(std::memory_order_relaxed), CHUNKS);
+        writer.Close();
+        reader.join();
+
+        for (std::int32_t i{0}; i < CHUNKS; ++i) {
+            expected.insert(std::ranges::end(expected), CHUNK, static_cast<std::byte>(i));
+        }
+        expected.insert(std::ranges::end(expected), std::ranges::begin(BGZF_EOF_MARKER),
+                        std::ranges::end(BGZF_EOF_MARKER));
+        EXPECT_TRUE(std::ranges::equal(drained, expected));
+    }
+    ::close(readFd);
+}
+
+TEST_F(BgzfBlockWriterTest, WriteAboveCapPassesWhenQueueIsEmpty)
+{
+    {
+        BgzfBlockWriter writer{tmpPath_, BgzfBlockWriterConfig{.MaxPendingBytes = 0}};
+        for (std::size_t part{0}; part < 3; ++part) {
+            BgzfBlockEncoder encoder{};
+            encoder.Write(std::vector<std::byte>(100000U, static_cast<std::byte>(part)));
+            encoder.Finish();
+            writer.Write(encoder.TakeBlocks());
+        }
+    }
+
+    EXPECT_EQ(std::size(ReadAll()), 300000U);
 }
 
 }  // namespace Samoa

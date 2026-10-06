@@ -82,6 +82,14 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+/// \brief Append one record (block_size field and record bytes) to \p encoder.
+///
+/// Use it with BgzfBlockWriter to serialize and compress records on many threads:
+/// each thread fills its own encoder, and the writer only appends the blocks.
+/// Write the BAM header block (SamHeader::ToBamHeaderBlock()) first.
+/// \throws std::invalid_argument if the record exceeds the BAM block_size limit
+void EncodeBamRecord(const BamRecord& record, BgzfBlockEncoder& encoder);
+
 }  // namespace Samoa
 }  // namespace PacBio
 

@@ -19,7 +19,7 @@ Cram tests resolve tool paths via env vars in `tests/meson.build` — run via `m
 
 ## Architecture (five layers, bottom-up)
 
-**Compression** — `VirtualOffset`, `BgzfReader` (sync or parallel via `numWorkers`, 3-stage pipeline internally), `BgzfWriter`.
+**Compression** — `VirtualOffset`, `BgzfReader` (sync or parallel via `numWorkers`, 3-stage pipeline internally), `BgzfWriter`, `BgzfBlockEncoder` + `BgzfBlockWriter` (callers compress on their own threads; the writer only appends blocks).
 
 **Record** — `RawRecordView` (non-owning, inline decode-on-demand over borrowed bytes), `RawRecord` (owns a copy of the record bytes; borrow via `View()`), `RawRecordBatch` (owns decompressed buffers; `View(i)` for copy-free access), `BamRecord` (structured fields, zero-cost mutation, serialize once in writer), `CigarOp`, `TagMap`.
 

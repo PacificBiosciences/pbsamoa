@@ -173,6 +173,45 @@ TEST_F(BamWriterTest, WriteMultipleRecords)
     EXPECT_EQ(count, 10u);
 }
 
+TEST_F(BamWriterTest, EncodedRecordsMatchBamWriterRecords)
+{
+    const SamHeader header = MakeMinimalHeader();
+    const std::filesystem::path expectedPath{tempDir_.File("expected.bam")};
+    {
+        BamWriter writer{expectedPath, header};
+        BgzfBlockWriter blockWriter{tmpPath};
+        BgzfBlockEncoder headerEncoder{};
+        headerEncoder.Write(header.ToBamHeaderBlock());
+        headerEncoder.Finish();
+        blockWriter.Write(headerEncoder.TakeBlocks());
+        // Two encoders model two worker threads that each give one batch.
+        for (int batch{0}; batch < 2; ++batch) {
+            BgzfBlockEncoder encoder{};
+            for (int i{0}; i < 5; ++i) {
+                BamRecord rec = MakeTestRecord();
+                rec.Name(std::format("read{}", (batch * 5) + i));
+                writer.Write(rec);
+                EncodeBamRecord(rec, encoder);
+            }
+            encoder.Finish();
+            blockWriter.Write(encoder.TakeBlocks());
+        }
+    }
+
+    BamRawReader expectedReader{expectedPath};
+    BamRawReader reader{tmpPath};
+    std::vector<std::vector<std::byte>> expected;
+    for (const auto& rec : expectedReader.Records()) {
+        expected.emplace_back(std::ranges::begin(rec.RawData()), std::ranges::end(rec.RawData()));
+    }
+    std::vector<std::vector<std::byte>> actual;
+    for (const auto& rec : reader.Records()) {
+        actual.emplace_back(std::ranges::begin(rec.RawData()), std::ranges::end(rec.RawData()));
+    }
+    EXPECT_EQ(std::size(actual), 10U);
+    EXPECT_EQ(actual, expected);
+}
+
 TEST_F(BamWriterTest, WrittenBamHasEofMarker)
 {
     const SamHeader header = MakeMinimalHeader();

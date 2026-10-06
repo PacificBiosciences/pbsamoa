@@ -16,16 +16,19 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <cstddef>
@@ -1441,6 +1444,271 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
         m.Pool.PeakResultQueueDepth = snap.PeakResultQueueDepth;
     }
     return m;
+}
+
+// =============================================================================
+// BgzfBlockEncoder
+// =============================================================================
+
+struct BgzfBlockEncoder::Impl
+{
+    detail::CompressorPtr compressor;
+    std::vector<std::byte> pending;
+    std::vector<std::byte> blocks;
+
+    explicit Impl(const int compressionLevel)
+    {
+        if ((compressionLevel < 1) || (compressionLevel > 12)) {
+            throw std::invalid_argument{"BgzfBlockEncoder: compression level must be in [1, 12]"};
+        }
+        compressor.reset(libdeflate_alloc_compressor(compressionLevel));
+        if (!compressor) {
+            throw std::runtime_error{"BgzfBlockEncoder: libdeflate_alloc_compressor failed"};
+        }
+        pending.reserve(MAX_UNCOMPRESSED_SIZE);
+    }
+
+    void CompressPending()
+    {
+        constexpr std::size_t FRAME_SIZE{BGZF_HEADER_SIZE + GZIP_TRAILER_SIZE};
+        const std::size_t start{std::size(blocks)};
+        blocks.resize(start + BGZF_MAX_BLOCK_SIZE);
+        std::byte* const block{std::data(blocks) + start};
+        // A full payload at level >= 1 always fits: the libdeflate bound for
+        // MAX_UNCOMPRESSED_SIZE bytes is below BGZF_MAX_BLOCK_SIZE - FRAME_SIZE.
+        const std::size_t compressedSize{libdeflate_deflate_compress(
+            compressor.get(), std::data(pending), std::size(pending), block + BGZF_HEADER_SIZE,
+            BGZF_MAX_BLOCK_SIZE - FRAME_SIZE)};
+        if (compressedSize == 0U) {
+            throw std::runtime_error{"BgzfBlockEncoder: libdeflate_deflate_compress failed"};
+        }
+        const std::size_t blockSize{FRAME_SIZE + compressedSize};
+        const std::uint16_t bsize = blockSize - 1U;
+        const auto frameHeader{MakeBgzfFrameHeader(bsize)};
+        std::ranges::copy(std::as_bytes(std::span{frameHeader}), block);
+        std::byte* const trailer{block + BGZF_HEADER_SIZE + compressedSize};
+        WriteLE<std::uint32_t>(trailer,
+                               libdeflate_crc32(0, std::data(pending), std::size(pending)));
+        WriteLE<std::uint32_t>(trailer + 4U, std::size(pending));
+        blocks.resize(start + blockSize);
+        pending.clear();
+    }
+};
+
+BgzfBlockEncoder::BgzfBlockEncoder(const int compressionLevel)
+    : impl_{std::make_unique<Impl>(compressionLevel)}
+{
+}
+
+BgzfBlockEncoder::~BgzfBlockEncoder() = default;
+BgzfBlockEncoder::BgzfBlockEncoder(BgzfBlockEncoder&&) noexcept = default;
+BgzfBlockEncoder& BgzfBlockEncoder::operator=(BgzfBlockEncoder&&) noexcept = default;
+
+void BgzfBlockEncoder::Write(std::span<const std::byte> data)
+{
+    while (!std::empty(data)) {
+        const std::size_t n{
+            std::ranges::min(MAX_UNCOMPRESSED_SIZE - std::size(impl_->pending), std::size(data))};
+        impl_->pending.insert(std::end(impl_->pending), std::begin(data),
+                              std::begin(data) + static_cast<std::ptrdiff_t>(n));
+        data = data.subspan(n);
+        if (std::size(impl_->pending) == MAX_UNCOMPRESSED_SIZE) {
+            impl_->CompressPending();
+        }
+    }
+}
+
+void BgzfBlockEncoder::Finish()
+{
+    if (!std::empty(impl_->pending)) {
+        impl_->CompressPending();
+    }
+}
+
+std::vector<std::byte> BgzfBlockEncoder::TakeBlocks() noexcept
+{
+    return std::exchange(impl_->blocks, {});
+}
+
+// =============================================================================
+// BgzfBlockWriter
+// =============================================================================
+
+struct BgzfBlockWriter::Impl
+{
+    std::filesystem::path finalPath;
+    std::filesystem::path writePath;
+    bool useTempFile{false};
+    std::ofstream file;
+    std::mutex queueMutex;
+    std::condition_variable queueCv;
+    // Wakes producers in Write() when the IO thread writes bytes or fails.
+    std::condition_variable spaceCv;
+    std::deque<std::vector<std::byte>> queue;
+    // Bytes in queue plus the bytes that the IO thread took and did not write yet.
+    std::size_t pendingBytes{0};
+    std::size_t maxPendingBytes;
+    bool inputDone{false};
+    std::atomic<bool> ioError{false};
+    std::exception_ptr errorPtr;
+    bool closed{false};
+    // Declared last: the IO thread stops before the queue and the file go away.
+    std::jthread ioThread;
+
+    Impl(const std::filesystem::path& path, const BgzfBlockWriterConfig& config)
+        : finalPath{path}
+        , writePath{detail::ResolveWritePath(path, config.UseTempFile)}
+        , useTempFile{config.UseTempFile}
+        , maxPendingBytes{config.MaxPendingBytes}
+    {
+        file.open(writePath, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            throw std::runtime_error{"Cannot open file for writing: " + writePath.string()};
+        }
+        ioThread = std::jthread{[this] { IoLoop(); }};
+    }
+
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+
+    void WriteBytes(const std::span<const std::byte> data)
+    {
+        file.write(reinterpret_cast<const char*>(std::data(data)),
+                   static_cast<std::streamsize>(std::size(data)));
+        if (!file.good()) {
+            throw std::runtime_error{"BgzfBlockWriter: write failed"};
+        }
+    }
+
+    void IoLoop()
+    {
+        std::deque<std::vector<std::byte>> local;
+        while (true) {
+            {
+                std::unique_lock lock{queueMutex};
+                queueCv.wait(lock, [this] { return inputDone || !std::empty(queue); });
+                if (std::empty(queue)) {
+                    return;
+                }
+                local.swap(queue);
+            }
+            try {
+                for (const auto& blocks : local) {
+                    WriteBytes(blocks);
+                    ReleasePending(std::size(blocks));
+                }
+            } catch (...) {
+                {
+                    // Set the flag under the lock: a producer in Write() checks it in
+                    // its wait predicate and must not miss the notification.
+                    const std::scoped_lock lock{queueMutex};
+                    errorPtr = std::current_exception();
+                    ioError.store(true, std::memory_order_release);
+                }
+                spaceCv.notify_all();
+                return;
+            }
+            local.clear();
+        }
+    }
+
+    void ReleasePending(const std::size_t bytes)
+    {
+        {
+            const std::scoped_lock lock{queueMutex};
+            pendingBytes -= bytes;
+        }
+        spaceCv.notify_all();
+    }
+
+    void StopIoThread()
+    {
+        {
+            const std::scoped_lock lock{queueMutex};
+            inputDone = true;
+        }
+        queueCv.notify_one();
+        if (ioThread.joinable()) {
+            ioThread.join();
+        }
+    }
+
+    void RethrowIfError()
+    {
+        if (!ioError.load(std::memory_order_acquire)) {
+            return;
+        }
+        const std::scoped_lock lock{queueMutex};
+        std::rethrow_exception(errorPtr);
+    }
+};
+
+BgzfBlockWriter::BgzfBlockWriter(const std::filesystem::path& path,
+                                 const BgzfBlockWriterConfig& config)
+    : impl_{std::make_unique<Impl>(path, config)}
+{
+}
+
+BgzfBlockWriter::~BgzfBlockWriter()
+{
+    if (impl_ && !impl_->closed) {
+        try {
+            Close();
+        } catch (...) {
+        }
+    }
+}
+
+void BgzfBlockWriter::Write(std::vector<std::byte>&& blocks)
+{
+    if (impl_->closed) {
+        throw std::runtime_error{"BgzfBlockWriter: Write() called after Close()"};
+    }
+    impl_->RethrowIfError();
+    if (std::empty(blocks)) {
+        return;
+    }
+    const std::size_t size{std::size(blocks)};
+    {
+        std::unique_lock lock{impl_->queueMutex};
+        // An empty queue takes any size, so a write above the cap cannot wait forever.
+        impl_->spaceCv.wait(lock, [this, size] {
+            return impl_->ioError.load(std::memory_order_acquire) || (impl_->pendingBytes == 0) ||
+                   ((impl_->pendingBytes + size) <= impl_->maxPendingBytes);
+        });
+        if (impl_->ioError.load(std::memory_order_acquire)) {
+            std::rethrow_exception(impl_->errorPtr);
+        }
+        impl_->pendingBytes += size;
+        impl_->queue.push_back(std::move(blocks));
+    }
+    impl_->queueCv.notify_one();
+}
+
+void BgzfBlockWriter::Close()
+{
+    if (impl_->closed) {
+        return;
+    }
+    // Enter terminal state first: no write is valid after Close() starts.
+    impl_->closed = true;
+    impl_->StopIoThread();
+    try {
+        impl_->RethrowIfError();
+        impl_->WriteBytes(BGZF_EOF_MARKER);
+        impl_->file.close();
+        if (impl_->file.fail()) {
+            throw std::runtime_error{"BgzfBlockWriter: close failed"};
+        }
+        if (impl_->useTempFile) {
+            detail::AtomicRename(impl_->writePath, impl_->finalPath, "BgzfBlockWriter");
+        }
+    } catch (...) {
+        if (impl_->file.is_open()) {
+            impl_->file.close();
+        }
+        throw;
+    }
 }
 
 // =============================================================================
