@@ -294,6 +294,32 @@ TEST(BaiIndex, BuiltIndexQueryWorks)
     EXPECT_FALSE(std::empty(chunks));
 }
 
+TEST(BaiIndex, QueryPastTheLastLinearWindowPrunesWithTheLastWindow)
+{
+    const tests::TempDirGuard tempDir{"bai_query_past_last_window"};
+    const auto bamPath = tempDir.File("past_last_window.bam");
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.SetSortOrder("coordinate");
+    header.AddReferenceSequence(ReferenceSequence{"ref", 1'000'000});
+    {
+        BamWriter writer{bamPath, header};
+        // [0, 200000) crosses the 128 kbp bin boundary: it goes to the bin of [0, 1 Mbp).
+        BamRecord longRecord{MakeMappedRecord("long", 0)};
+        longRecord.Cigar({CigarOp{CigarOpType::M, 200'000}})
+            .Sequence(std::string(200'000, 'A'))
+            .Qualities(std::vector<std::uint8_t>(200'000, 30));
+        writer.Write(longRecord);
+        writer.Write(MakeMappedRecord("short", 300'000));
+    }
+    const auto index = BaiIndex::Build(bamPath);
+    // The last linear window holds 300000; [400000, 410000) starts past it. htslib prunes the
+    // chunk of the long record with the last window and returns nothing.
+    ASSERT_LT(std::size(index.Reference(0).linearIndex), 400'000U / 16'384U);
+    EXPECT_TRUE(std::empty(index.Query(0, 400'000, 410'000)));
+    EXPECT_FALSE(std::empty(index.Query(0, 100'000, 100'010)));
+}
+
 TEST(BaiIndex, BuildQueryRoundTripDiverseBam)
 {
     const auto bamPath = ::tests::DataDir / "diverse.bam";

@@ -605,11 +605,15 @@ std::vector<Chunk> BaiIndex::Query(std::int32_t refId, std::int32_t beg, std::in
         return {};
     }
 
-    // 3. Linear index pruning: find minimum offset for the query start window
+    // 3. Linear index pruning: find minimum offset for the query start window. A query that
+    //    starts past the last window takes the last window, as htslib hts_itr_query does;
+    //    otherwise a query at the end of a reference keeps the chunks of large bins that
+    //    start far before it.
     const std::size_t linearIdx = normalizedBeg / BAI_LINEAR_INDEX_WINDOW;
     // Discard chunks that end before the minimum offset
-    if (linearIdx < std::size(ref.linearIndex)) {
-        const VirtualOffset threshold{ref.linearIndex[linearIdx]};
+    if (!std::empty(ref.linearIndex)) {
+        const VirtualOffset threshold{
+            ref.linearIndex[std::min(linearIdx, std::size(ref.linearIndex) - 1)]};
         std::erase_if(candidates,
                       [threshold](const Chunk& chunk) { return chunk.End <= threshold; });
     }
