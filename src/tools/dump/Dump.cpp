@@ -34,7 +34,6 @@
 #include <filesystem>
 #include <format>
 #include <functional>
-#include <future>
 #include <memory>
 #include <optional>
 #include <print>
@@ -496,23 +495,18 @@ void DumpBam(const std::filesystem::path& path, std::size_t numWorkers,
                                 std::ref(consumerException)};
 
     try {
-        // Double-buffer: read next batch while formatting current
-        auto currentBatch{reader.ReadBatch()};
-
-        while (currentBatch) {
-            // Start reading next batch concurrently
-            auto nextBatchFuture{
-                std::async(std::launch::async, &BamRawReader::ReadBatch, &reader, ByteLimit{})};
-
-            const auto batch{std::make_shared<RawRecordBatch>(std::move(*currentBatch))};
+        // With parallel BGZF, the pipeline reads ahead on its own threads, and ReadBatch()
+        // only takes the next group of blocks (about 2 MiB). The pool gets the next batch
+        // at once, so the chunks do not have to spread one batch over all threads.
+        // Smaller chunks only add task overhead.
+        constexpr std::size_t CHUNK_SIZE{detail::MAX_PARALLEL_CHUNK_SIZE};
+        while (std::optional<RawRecordBatch> nextBatch{reader.ReadBatch()}) {
+            const auto batch{std::make_shared<RawRecordBatch>(std::move(*nextBatch))};
             const std::size_t recordCount{batch->RecordCount()};
-            const std::size_t chunkSize{detail::ParallelChunkSize(recordCount, numFormatThreads)};
-            for (std::size_t first{0}; first < recordCount; first += chunkSize) {
+            for (std::size_t first{0}; first < recordCount; first += CHUNK_SIZE) {
                 formatPool.Submit(FormatBatchChunk, batch, std::cref(header), first,
-                                  std::min(recordCount, first + chunkSize));
+                                  std::min(recordCount, first + CHUNK_SIZE));
             }
-
-            currentBatch = nextBatchFuture.get();
         }
 
         formatPool.Finalize();
