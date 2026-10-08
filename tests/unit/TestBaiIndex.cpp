@@ -446,5 +446,42 @@ TEST(BaiIndex, BuildParallelMatchesSerialBytes)
     }
 }
 
+TEST(BaiIndex, BuildGivesTheLastRecordTheEndOfItsBytes)
+{
+    // The last record (50 kb of sequence and qualities, ~75 KiB) is longer than a BGZF block.
+    // After it, more than 64 KiB wait in the accumulator of Build, and the compaction drops all
+    // block segments. The index must still end the record where BamWriter ends it; with the end
+    // offset 0, a region query missed the record.
+    const tests::TempDirGuard tempDir{"bai_long_last_record"};
+    const auto bamPath = tempDir.File("long_last.bam");
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.SetSortOrder("coordinate");
+    header.AddReferenceSequence(ReferenceSequence{"ref", 100'000});
+    constexpr std::int32_t LONG_LENGTH{50'000};
+    VirtualOffset end;
+    {
+        BamWriter writer{bamPath, header};
+        for (std::int32_t i{0}; i < 100; ++i) {
+            writer.Write(MakeMappedRecord("read-" + std::to_string(i), i));
+        }
+        BamRecord longRecord{MakeMappedRecord("long", 500)};
+        longRecord.Cigar({CigarOp{CigarOpType::M, LONG_LENGTH}})
+            .Sequence(std::string(LONG_LENGTH, 'A'))
+            .Qualities(std::vector<std::uint8_t>(LONG_LENGTH, 30));
+        writer.Write(longRecord);
+        writer.Close();
+        end = writer.EndVirtualOffset();
+    }
+
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{4}}) {
+        const BaiIndex index{BaiIndex::Build(bamPath, workers)};
+        const std::vector<Chunk> chunks{index.Query(0, 500, 501)};
+        ASSERT_FALSE(chunks.empty()) << "workers=" << workers;
+        EXPECT_EQ(chunks.back().End, end) << "workers=" << workers;
+        EXPECT_EQ(index.Reference(0).bins.at(37450).front().End, end) << "workers=" << workers;
+    }
+}
+
 }  // namespace Samoa
 }  // namespace PacBio

@@ -948,6 +948,7 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
 
     bool eof{false};
     std::size_t accumPos{0};
+    std::optional<VirtualOffset> lastRecordEnd;
 
     while (true) {
         // Ensure we have at least 4 bytes for block_size
@@ -977,6 +978,11 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
             recordVo, std::span<const std::byte>{std::data(recordAccum) + accumPos + 4, blockSize});
 
         accumPos += totalRecordBytes;
+        // The end offset of this record, taken before the compaction below: when the record
+        // ends at the end of the loaded blocks, the compaction drops every segment, and the
+        // end could not be found after it (the last record of a file then got the end offset
+        // 0, and a region query missed it).
+        lastRecordEnd = VirtualOffsetAt(segments, accumPos);
 
         // Compact the accumulator periodically to avoid unbounded growth
         if (accumPos > MAX_DECOMPRESSED_BLOCK_SIZE) {
@@ -984,10 +990,10 @@ BaiIndex BaiIndex::Build(const std::filesystem::path& bamPath, std::size_t numWo
         }
     }
 
-    // accumPos now sits just past the last complete record. By VirtualOffsetAt's
-    // past-the-end mapping that is the end offset of the last record (the begin offset a
-    // following record would have had) — exactly what Finalize() needs.
-    const VirtualOffset endVo{VirtualOffsetAt(segments, accumPos)};
+    // The end offset of the last record (by VirtualOffsetAt's past-the-end mapping, the begin
+    // offset a following record would have had) is what Finalize() needs. Without a record,
+    // accumPos sits just past the header.
+    const VirtualOffset endVo{lastRecordEnd ? *lastRecordEnd : VirtualOffsetAt(segments, accumPos)};
     return builder.Finalize(endVo);
 }
 
