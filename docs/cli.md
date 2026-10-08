@@ -57,7 +57,7 @@ Options:
 | `--block-compression METHOD` | Default CRAM block method |
 | `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
-| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines get `M5`. Readers then need the reference |
+| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines get `M5`. Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error |
 
 Supported `METHOD` values:
 

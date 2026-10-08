@@ -33,3 +33,19 @@ The reference-free output of the same input stores all bases:
 
   $ "${PBSAMOA}" convert in.sam free.cram
   $ samtools view free.cram | cut -f 1-11 | diff - samtools.sam
+
+A reference file without sequences (empty, or gzip: the reader takes plain FASTA only) stops the
+run before the output exists; it does not give reference-free CRAM.
+
+  $ : > empty.fa
+  $ "${PBSAMOA}" convert --reference empty.fa in.sam empty.cram 2> empty.err
+  [1]
+  $ grep -o 'reference FASTA empty.fa has no sequences' empty.err
+  reference FASTA empty.fa has no sequences
+  $ gzip -n -c ref.fa > ref.fa.gz
+  $ "${PBSAMOA}" convert --reference ref.fa.gz in.sam gz.cram 2> gz.err
+  [1]
+  $ grep -o 'reference FASTA ref.fa.gz has no sequences' gz.err
+  reference FASTA ref.fa.gz has no sequences
+  $ test -e empty.cram || test -e gz.cram
+  [1]
