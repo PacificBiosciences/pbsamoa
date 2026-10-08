@@ -127,7 +127,9 @@ Key relationships:
   slice boundaries; `SlicesPerContainer` controls container flush boundaries.
   Slice encode/compress can run in parallel, while container writes are kept
   ordered with an async write future. It can emit a samtools-compatible CRAI
-  sidecar with per-slice offsets.
+  sidecar with per-slice offsets. With reference sequences it writes
+  reference-based CRAM. `EncodeContainer` encodes a container on any thread,
+  and `WriteContainer` writes it in order.
 
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.

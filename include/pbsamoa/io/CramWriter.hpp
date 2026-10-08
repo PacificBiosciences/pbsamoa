@@ -5,11 +5,16 @@
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
 #include <pbsamoa/cram/CramStructs.hpp>
+#include <pbsamoa/index/CraiIndex.hpp>
 
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +67,29 @@ struct CramWriterConfig
 
     /// \brief Write through a temporary file and atomically rename on Close().
     bool UseTempFile{false};
+
+    /// \brief The reference sequence of each @SQ line, in header order, for reference-based
+    /// CRAM: a mapped record stores only its differences to the reference, the slices carry
+    /// the MD5 of their reference bases, and @SQ lines without M5 get one. Readers then need
+    /// the reference. Empty (the default): the records store all their bases.
+    ///
+    /// The case of the reference does not matter. The views must stay valid until Close().
+    std::vector<std::string_view> ReferenceSequences{};
+};
+
+/// \brief The M5 value of a reference sequence: the MD5 of its bases in upper case, as 32
+/// lowercase hex digits (SAM spec).
+[[nodiscard]] std::string CramReferenceMd5(std::string_view sequence);
+
+/// \brief A container that CramWriter::EncodeContainer encoded, for CramWriter::WriteContainer.
+struct CramEncodedContainer
+{
+    /// \brief The compressed slices; their record counters start at 0 until the write.
+    CramContainer Container;
+
+    /// \brief The CRAI entries of each slice, without their file offsets (empty without
+    /// WriteCrai).
+    std::vector<std::vector<CraiEntry>> SliceIndex;
 };
 
 /// \brief Writes CRAM files from BamRecord, RawRecordView, and RawRecord inputs.
@@ -94,6 +122,16 @@ public:
 
     /// \brief Write a batch of raw records.
     void WriteBatch(const RawRecordBatch& batch);
+
+    /// \brief Encode records into one container (slices of RecordsPerSlice records) for
+    /// WriteContainer.
+    ///
+    /// Several threads can encode at the same time, also while another thread writes: this
+    /// uses the calling thread only, not the compression workers.
+    [[nodiscard]] CramEncodedContainer EncodeContainer(std::span<const BamRecord> records) const;
+
+    /// \brief Write a container of EncodeContainer after all records written before.
+    void WriteContainer(CramEncodedContainer container);
 
     /// \brief Flush and close. Called automatically by destructor.
     void Close();

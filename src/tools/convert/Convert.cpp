@@ -1,5 +1,6 @@
 #include "Convert.hpp"
 
+#include "../../CramInternal.hpp"
 #include "../ParseUtils.hpp"
 
 #include <pbsamoa/PbSamoaLibraryInfo.hpp>
@@ -23,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <cctype>
@@ -97,6 +99,14 @@ const CLI_v2::Option WriteCrai{
     R"({
     "names" : ["write-crai"],
     "description" : "Write CRAI index alongside output CRAM."
+})"};
+
+const CLI_v2::Option Reference{
+    R"({
+    "names" : ["reference"],
+    "description" : "Reference FASTA: write reference-based CRAM (readers need the reference).",
+    "type" : "file",
+    "default" : ""
 })"};
 
 const CLI_v2::PositionalArgument Input{
@@ -201,14 +211,35 @@ std::expected<std::pair<CramDataSeries, CramBlockMethod>, std::string> ParseSeri
     return std::pair{*parsedSeries, *parsedMethod};
 }
 
+using FastaSequences = std::unordered_map<std::string, std::string>;
+
+// the config with the reference of each @SQ line of the header (none without a FASTA)
+CramWriterConfig WithReferences(CramWriterConfig config, const SamHeader& header,
+                                const FastaSequences& fasta)
+{
+    if (fasta.empty()) {
+        return config;
+    }
+    config.ReferenceSequences.clear();
+    for (const ReferenceSequence& sq : header.ReferenceSequences()) {
+        const auto it{fasta.find(std::string{sq.Name()})};
+        if (it == fasta.end()) {
+            throw std::runtime_error{
+                std::format("reference sequence {} is not in the FASTA file", sq.Name())};
+        }
+        config.ReferenceSequences.push_back(it->second);
+    }
+    return config;
+}
+
 void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
                          const std::filesystem::path& outputPath, const CramWriterConfig& config,
-                         std::size_t bgzfWorkers)
+                         std::size_t bgzfWorkers, const FastaSequences& fasta)
 {
     BamRawReader reader{inputPath, BamRawReaderConfig{
                                        .BgzfWorkers = bgzfWorkers,
                                    }};
-    CramWriter writer{outputPath, reader.Header(), config};
+    CramWriter writer{outputPath, reader.Header(), WithReferences(config, reader.Header(), fasta)};
     for (const RawRecord& record : reader.Records()) {
         writer.Write(record);
     }
@@ -217,7 +248,7 @@ void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
 void ConvertBamToCramViaBamRecord(const std::filesystem::path& inputPath,
                                   const std::filesystem::path& outputPath,
                                   const CramWriterConfig& config, std::size_t bgzfWorkers,
-                                  std::size_t decodeWorkers)
+                                  std::size_t decodeWorkers, const FastaSequences& fasta)
 {
     BamRecordReader reader{inputPath, BamRecordReaderConfig{
                                           .RawReaderConfig =
@@ -226,17 +257,18 @@ void ConvertBamToCramViaBamRecord(const std::filesystem::path& inputPath,
                                               },
                                           .DecodeWorkers = decodeWorkers,
                                       }};
-    CramWriter writer{outputPath, reader.Header(), config};
+    CramWriter writer{outputPath, reader.Header(), WithReferences(config, reader.Header(), fasta)};
     for (const BamRecord& record : reader.Records()) {
         writer.Write(record);
     }
 }
 
 void ConvertSamToCram(const std::filesystem::path& inputPath,
-                      const std::filesystem::path& outputPath, const CramWriterConfig& config)
+                      const std::filesystem::path& outputPath, const CramWriterConfig& config,
+                      const FastaSequences& fasta)
 {
     SamReader reader{inputPath};
-    CramWriter writer{outputPath, reader.Header(), config};
+    CramWriter writer{outputPath, reader.Header(), WithReferences(config, reader.Header(), fasta)};
     for (const BamRecord& record : reader.Records()) {
         writer.Write(record);
     }
@@ -251,7 +283,8 @@ CLI_v2::Interface CreateInterface()
     // convert has no --num-threads flag; disable the built-in to avoid shadowing.
     interface.DisableNumThreadsOption();
     interface.AddOptions({RecordsPerSlice, BgzfThreads, DecodeThreads, ConvertToBamRecord,
-                          CompressionThreads, BlockCompression, SeriesCompression, WriteCrai});
+                          CompressionThreads, BlockCompression, SeriesCompression, WriteCrai,
+                          Reference});
     interface.AddPositionalArguments({Input, Output});
     return interface;
 }
@@ -321,6 +354,11 @@ int Runner(const CLI_v2::Results& results)
 
     config.WriteCrai = results[WriteCrai];
 
+    // --reference: the sequences stay alive until the writer closes
+    const std::string referencePath = results[Reference];
+    const FastaSequences fasta{referencePath.empty() ? FastaSequences{}
+                                                     : LoadFastaSequences(referencePath)};
+
     // CLIv2 does not enforce required positional count — guard before indexing.
     const std::vector<std::string>& positional{results.PositionalArguments()};
     if (positional.size() != 2) {
@@ -343,14 +381,15 @@ int Runner(const CLI_v2::Results& results)
 
     if (inputPath.extension() == ".bam") {
         if (convertToBamRecord || (decodeThreadsOpt >= 0)) {
-            ConvertBamToCramViaBamRecord(inputPath, outputPath, config, bgzfWorkers, decodeWorkers);
+            ConvertBamToCramViaBamRecord(inputPath, outputPath, config, bgzfWorkers, decodeWorkers,
+                                         fasta);
         } else {
-            ConvertBamToCramRaw(inputPath, outputPath, config, bgzfWorkers);
+            ConvertBamToCramRaw(inputPath, outputPath, config, bgzfWorkers, fasta);
         }
         return EXIT_SUCCESS;
     }
     if (inputPath.extension() == ".sam") {
-        ConvertSamToCram(inputPath, outputPath, config);
+        ConvertSamToCram(inputPath, outputPath, config, fasta);
         return EXIT_SUCCESS;
     }
 

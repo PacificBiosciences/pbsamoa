@@ -2,6 +2,7 @@
 #include "TestTempDir.hpp"
 
 #include "../../src/CramInternal.hpp"
+#include "../../src/Md5.hpp"
 
 #include <pbsamoa/cram/CramCodec.hpp>
 #include <pbsamoa/cram/CramCompression.hpp>
@@ -16,14 +17,18 @@
 #include <gtest/gtest.h>
 #include <libdeflate.h>
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <cstddef>
@@ -2826,6 +2831,370 @@ TEST_F(CramWriterReaderTest, CraiRegionEmptyRangeReturnsNoRecords)
     const auto queried = reader.Query(index, 0, 0, 10);
 
     EXPECT_TRUE(std::empty(queried));
+}
+
+// ===========================================================================
+// Reference-based CRAM
+// ===========================================================================
+
+namespace {
+
+constexpr std::int32_t TEST_REFERENCE_LENGTH{1000};
+
+std::string PseudoRandomBases(const std::int32_t length)
+{
+    constexpr std::string_view BASES{"ACGT"};
+    std::string bases;
+    bases.reserve(length);
+    std::uint32_t state{12345};
+    for (std::int32_t i = 0; i < length; ++i) {
+        state = (state * 1103515245U) + 12345U;
+        bases.push_back(BASES[(state >> 16) & 3U]);
+    }
+    return bases;
+}
+
+// 1000 pseudo-random bases with a lowercase stretch (300-339), an N (150) and an IUPAC code (160)
+std::string MakeTestReference()
+{
+    std::string reference{PseudoRandomBases(TEST_REFERENCE_LENGTH)};
+    for (std::int32_t i = 300; i < 340; ++i) {
+        reference[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(reference[i])));
+    }
+    reference[150] = 'N';
+    reference[160] = 'R';
+    return reference;
+}
+
+std::string Uppercase(std::string_view bases)
+{
+    std::string result{bases};
+    for (char& c : result) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return result;
+}
+
+// a base other than the given one
+char OtherBase(const char base) { return (base == 'A') ? 'C' : 'A'; }
+
+void WriteFasta(const std::filesystem::path& path,
+                const std::vector<std::pair<std::string, std::string>>& sequences)
+{
+    std::ofstream out{path};
+    for (const auto& [name, bases] : sequences) {
+        out << '>' << name << '\n' << bases << '\n';
+    }
+}
+
+BamRecord MakeAlignedRecord(std::string_view name, const std::int32_t refId, const std::int32_t pos,
+                            std::vector<CigarOp> cigar, std::string seq, const bool reverse = false)
+{
+    BamRecord record;
+    record.Name(std::string{name})
+        .Flag(reverse ? 16 : 0)
+        .RefId(refId)
+        .Pos(pos)
+        .MapQ(30)
+        .Cigar(std::move(cigar))
+        .NextRefId(-1)
+        .NextPos(-1)
+        .Tlen(0);
+    std::vector<std::uint8_t> quals(std::size(seq));
+    for (std::size_t i = 0; i < std::size(quals); ++i) {
+        quals[i] = static_cast<std::uint8_t>(i % 40);
+    }
+    record.Sequence(std::move(seq));
+    record.Qualities(std::move(quals));
+    return record;
+}
+
+// the CIGAR as a CRAM reader gives it back: = and X become M, and neighbouring Ms merge
+std::vector<CigarOp> AsDecodedCigar(const std::span<const CigarOp> cigar)
+{
+    std::vector<CigarOp> result;
+    for (const CigarOp& op : cigar) {
+        CigarOpType type{op.Type()};
+        if ((type == CigarOpType::EQ) || (type == CigarOpType::X)) {
+            type = CigarOpType::M;
+        }
+        if (!std::empty(result) && (result.back().Type() == type)) {
+            result.back() = CigarOp{type, result.back().Length() + op.Length()};
+        } else {
+            result.emplace_back(type, op.Length());
+        }
+    }
+    return result;
+}
+
+std::vector<BamRecord> ReadAll(const std::filesystem::path& path,
+                               const std::filesystem::path& reference)
+{
+    CramReader reader{path, CramReaderConfig{.ReferencePath = reference}};
+    std::vector<BamRecord> records;
+    for (const BamRecord& record : reader.Records()) {
+        records.push_back(record);
+    }
+    return records;
+}
+
+void ExpectSameRecords(const std::vector<BamRecord>& expected,
+                       const std::vector<BamRecord>& decoded)
+{
+    ASSERT_EQ(std::size(decoded), std::size(expected));
+    for (std::size_t i = 0; i < std::size(expected); ++i) {
+        SCOPED_TRACE(expected[i].Name());
+        EXPECT_EQ(decoded[i].Name(), expected[i].Name());
+        EXPECT_EQ(decoded[i].Flag(), expected[i].Flag());
+        EXPECT_EQ(decoded[i].RefId(), expected[i].RefId());
+        EXPECT_EQ(decoded[i].Pos(), expected[i].Pos());
+        EXPECT_EQ(decoded[i].Sequence(), expected[i].Sequence());
+        EXPECT_TRUE(std::ranges::equal(decoded[i].Qualities(), expected[i].Qualities()));
+        EXPECT_TRUE(std::ranges::equal(decoded[i].Cigar(), AsDecodedCigar(expected[i].Cigar())));
+    }
+}
+
+}  // namespace
+
+TEST(CramReferenceMd5, IsTheMd5OfTheUppercaseBases)
+{
+    EXPECT_EQ(CramReferenceMd5("acgT"), "f1f8f4bf413b16ad135722aa4591043e");
+    // lengths around the 64-byte blocks and the 4096-byte chunks of the hash
+    const std::string reference{MakeTestReference()};
+    std::string bases;
+    while (std::ssize(bases) < 10'000) {
+        bases += reference;
+    }
+    for (const std::size_t n :
+         {0UZ, 1UZ, 55UZ, 56UZ, 63UZ, 64UZ, 65UZ, 119UZ, 120UZ, 4095UZ, 4096UZ, 4097UZ, 10'000UZ}) {
+        const std::string_view prefix{std::string_view{bases}.substr(0, n)};
+        EXPECT_EQ(CramReferenceMd5(prefix), detail::Md5Hex(Uppercase(prefix))) << n;
+    }
+}
+
+TEST_F(CramWriterReaderTest, ReferenceBasedRoundTripStoresOnlyTheDifferences)
+{
+    const std::string reference{MakeTestReference()};
+    const std::string upper{Uppercase(reference)};
+    const std::filesystem::path fasta{tmpPath.parent_path() / "ref.fa"};
+    WriteFasta(fasta, {{"ref", reference}});
+    const SamHeader header = MakeMinimalHeader();
+    const auto at = [&](const std::int32_t pos, const std::int32_t length) {
+        return upper.substr(pos, length);
+    };
+    using enum CigarOpType;
+
+    std::vector<BamRecord> records;
+    records.push_back(MakeAlignedRecord("match", 0, 100, {{M, 50}}, at(100, 50)));
+
+    // substitutions: in ACGT, a read N, against the reference N (150) and the IUPAC R (160),
+    // and an IUPAC read base
+    std::string subst{at(140, 30)};
+    subst[0] = OtherBase(subst[0]);
+    subst[5] = 'N';
+    subst[10] = 'A';
+    subst[20] = 'G';
+    subst[25] = 'R';
+    records.push_back(MakeAlignedRecord("subst", 0, 140, {{M, 30}}, subst));
+
+    // clips, an insertion and a deletion
+    std::string indel{"TTGCA" + at(200, 20) + "TT" + at(220, 10) + at(233, 15) + "CAGT"};
+    records.push_back(MakeAlignedRecord(
+        "indel", 0, 200, {{S, 5}, {M, 20}, {I, 2}, {M, 10}, {D, 3}, {M, 15}, {S, 4}}, indel));
+
+    // the reference is lowercase here
+    records.push_back(MakeAlignedRecord("lowercase", 0, 310, {{M, 20}}, at(310, 20)));
+
+    // = and X come back as M
+    std::string eqx{at(400, 20)};
+    eqx[10] = OtherBase(eqx[10]);
+    records.push_back(MakeAlignedRecord("eqx", 0, 400, {{EQ, 10}, {X, 1}, {EQ, 9}}, eqx));
+
+    std::string reverse{at(500, 30)};
+    reverse[3] = OtherBase(reverse[3]);
+    reverse[29] = OtherBase(reverse[29]);
+    records.push_back(MakeAlignedRecord("reverse", 0, 500, {{M, 30}}, reverse, true));
+    records.push_back(MakeUnmappedRecord("unmapped", "ACGTN"));
+
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    ExpectSameRecords(records, ReadAll(tmpPath, fasta));
+
+    CramReader reader{tmpPath, CramReaderConfig{.ReferencePath = fasta}};
+    const std::string* m5{reader.Header().ReferenceSequences()[0].GetTag("M5")};
+    ASSERT_TRUE(m5);
+    EXPECT_EQ(*m5, CramReferenceMd5(reference));
+}
+
+TEST_F(CramWriterReaderTest, ReferenceBasedCramIsSmallerThanReferenceFree)
+{
+    // 200 reads of 300 pseudo-random bases that do not overlap: about 2 bits per base without
+    // the reference, nearly nothing with it
+    constexpr std::int32_t NUM_READS{200};
+    constexpr std::int32_t READ_LENGTH{300};
+    const std::string reference{PseudoRandomBases(NUM_READS * READ_LENGTH)};
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.SetSortOrder("coordinate");
+    header.AddReferenceSequence(ReferenceSequence{"long", NUM_READS * READ_LENGTH});
+
+    std::vector<BamRecord> records;
+    for (std::int32_t i = 0; i < NUM_READS; ++i) {
+        const std::int32_t pos{i * READ_LENGTH};
+        records.push_back(MakeAlignedRecord(std::format("read{}", i), 0, pos,
+                                            {{CigarOpType::M, READ_LENGTH}},
+                                            reference.substr(pos, READ_LENGTH)));
+    }
+    const std::filesystem::path refFree{tmpPath.parent_path() / "free.cram"};
+    {
+        CramWriter writer{refFree, header};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    EXPECT_LT(std::filesystem::file_size(tmpPath) + (NUM_READS * READ_LENGTH / 8),
+              std::filesystem::file_size(refFree));
+}
+
+TEST_F(CramWriterReaderTest, ReferenceBasedRecordsOnSeveralReferencesAndPastTheEnd)
+{
+    const std::string first{MakeTestReference()};
+    std::string second{Uppercase(first)};
+    std::ranges::reverse(second);
+    const std::filesystem::path fasta{tmpPath.parent_path() / "refs.fa"};
+    WriteFasta(fasta, {{"ref", first}, {"ref2", second}});
+    SamHeader header = MakeMinimalHeader();
+    header.AddReferenceSequence(ReferenceSequence{"ref2", TEST_REFERENCE_LENGTH});
+
+    // one slice with records on both references (RI per record), and a record that reaches 10
+    // bases past the end of its reference (bases without a reference base are stored)
+    std::vector<BamRecord> records;
+    records.push_back(
+        MakeAlignedRecord("first", 0, 10, {{CigarOpType::M, 40}}, Uppercase(first.substr(10, 40))));
+    records.push_back(
+        MakeAlignedRecord("second", 1, 20, {{CigarOpType::M, 40}}, second.substr(20, 40)));
+    records.push_back(MakeAlignedRecord("past_end", 1, 990, {{CigarOpType::M, 20}},
+                                        second.substr(990, 10) + "ACGTACGTAC"));
+
+    CramWriterConfig config;
+    config.ReferenceSequences = {first, second};
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    ExpectSameRecords(records, ReadAll(tmpPath, fasta));
+}
+
+TEST_F(CramWriterReaderTest, ReferenceBasedSliceMd5FindsAnotherReference)
+{
+    const std::string reference{MakeTestReference()};
+    const std::filesystem::path fasta{tmpPath.parent_path() / "ref.fa"};
+    std::string changed{reference};
+    changed[120] = OtherBase(Uppercase(changed.substr(120, 1))[0]);
+    WriteFasta(fasta, {{"ref", changed}});
+
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    {
+        CramWriter writer{tmpPath, MakeMinimalHeader(), config};
+        writer.Write(MakeAlignedRecord("read", 0, 100, {{CigarOpType::M, 50}},
+                                       Uppercase(reference.substr(100, 50))));
+    }
+    EXPECT_THROW(ReadAll(tmpPath, fasta), std::runtime_error);
+}
+
+TEST_F(CramWriterReaderTest, ContainersEncodedOnThreadsKeepTheirOrder)
+{
+    const std::string reference{MakeTestReference()};
+    const std::string upper{Uppercase(reference)};
+    std::vector<BamRecord> records;
+    for (std::int32_t i = 0; i < 30; ++i) {
+        const std::int32_t pos{(i * 29) % 900};
+        std::string seq{upper.substr(pos, 60)};
+        seq[i % 60] = OtherBase(seq[i % 60]);
+        records.push_back(MakeAlignedRecord(std::format("read{}", i), 0, pos,
+                                            {{CigarOpType::M, 60}}, std::move(seq)));
+    }
+    records.push_back(MakeUnmappedRecord("unmapped", "ACGT"));
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    config.RecordsPerSlice = 4;
+    config.WriteCrai = true;
+    const std::span<const BamRecord> all{records};
+
+    // two records one by one, then the containers [2, 12) and [12, 31), encoded on two threads
+    // in reverse order, or on this thread
+    const auto write = [&](const std::filesystem::path& path, const bool threads) {
+        CramWriter writer{path, MakeMinimalHeader(), config};
+        writer.Write(records[0]);
+        writer.Write(records[1]);
+        std::vector<CramEncodedContainer> encoded(2);
+        if (threads) {
+            std::thread second{[&]() { encoded[1] = writer.EncodeContainer(all.subspan(12)); }};
+            std::thread first{[&]() { encoded[0] = writer.EncodeContainer(all.subspan(2, 10)); }};
+            first.join();
+            second.join();
+        } else {
+            encoded[0] = writer.EncodeContainer(all.subspan(2, 10));
+            encoded[1] = writer.EncodeContainer(all.subspan(12));
+        }
+        writer.WriteContainer(writer.EncodeContainer({}));  // no records: no container
+        writer.WriteContainer(std::move(encoded[0]));
+        writer.WriteContainer(std::move(encoded[1]));
+    };
+    const std::filesystem::path serial{tmpPath.parent_path() / "serial.cram"};
+    write(serial, false);
+    write(tmpPath, true);
+
+    const auto bytes = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, {}};
+    };
+    EXPECT_EQ(bytes(tmpPath), bytes(serial));
+    EXPECT_EQ(bytes(tmpCraiPath), bytes(DefaultCraiPathFor(serial)));
+
+    const std::filesystem::path fasta{tmpPath.parent_path() / "ref.fa"};
+    WriteFasta(fasta, {{"ref", reference}});
+    ExpectSameRecords(records, ReadAll(tmpPath, fasta));
+
+    // the CRAI finds each mapped record through its slice
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    CramReader reader{tmpPath, CramReaderConfig{.ReferencePath = fasta}};
+    for (const BamRecord& record : all.first(30)) {
+        const std::vector<BamRecord> found{reader.Query(index, 0, record.Pos(), record.Pos() + 1)};
+        EXPECT_TRUE(std::ranges::any_of(found, [&](const BamRecord& hit) {
+            return hit.Name() == record.Name();
+        })) << record.Name();
+    }
+}
+
+TEST_F(CramWriterReaderTest, ReferenceSequencesMustFitTheHeader)
+{
+    const std::string reference{MakeTestReference()};
+    CramWriterConfig twoReferences;
+    twoReferences.ReferenceSequences = {reference, reference};
+    EXPECT_THROW((CramWriter{tmpPath, MakeMinimalHeader(), twoReferences}), std::runtime_error);
+
+    CramWriterConfig shortReference;
+    const std::string shorter{reference.substr(0, 999)};
+    shortReference.ReferenceSequences = {shorter};
+    EXPECT_THROW((CramWriter{tmpPath, MakeMinimalHeader(), shortReference}), std::runtime_error);
 }
 
 }  // namespace Samoa

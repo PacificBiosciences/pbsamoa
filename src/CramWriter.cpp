@@ -8,6 +8,7 @@
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
 #include "CramStructs.hpp"
+#include "Md5.hpp"
 #include "WriterUtils.hpp"
 
 #include <pbcopper/parallel/ThreadPool.h>
@@ -146,6 +147,7 @@ constexpr std::int32_t FP_BLOCK_ID = BlockIdFor(CramDataSeries::FP);
 constexpr std::int32_t MQ_BLOCK_ID = BlockIdFor(CramDataSeries::MQ);
 constexpr std::int32_t BA_BLOCK_ID = BlockIdFor(CramDataSeries::BA);
 constexpr std::int32_t QS_BLOCK_ID = BlockIdFor(CramDataSeries::QS);
+constexpr std::int32_t BS_BLOCK_ID = BlockIdFor(CramDataSeries::BS);
 constexpr std::int32_t BB_BLOCK_ID = BlockIdFor(CramDataSeries::BB);
 constexpr std::int32_t QQ_BLOCK_ID = BlockIdFor(CramDataSeries::QQ);
 constexpr std::int32_t IN_BLOCK_ID = BlockIdFor(CramDataSeries::IN);
@@ -439,6 +441,70 @@ void WriteFeatureHeader(CramExternalBlockStore& extStore, char code, std::int32_
     previousFeaturePos = featurePos;
 }
 
+// The code of a substitution of the reference base by the read base in the default substitution
+// matrix (each row lists the other bases of ACGTN in order: code 0..3), or -1 when one of the
+// bases is not in ACGTN.
+std::int32_t SubstitutionCode(const char refBase, const char readBase)
+{
+    constexpr std::string_view BASES{"ACGTN"};
+    const std::size_t ref{BASES.find(refBase)};
+    const std::size_t read{BASES.find(readBase)};
+    if ((ref == std::string_view::npos) || (read == std::string_view::npos) || (ref == read)) {
+        return -1;
+    }
+    return static_cast<std::int32_t>((read < ref) ? read : (read - 1));
+}
+
+char UppercaseBase(const char base)
+{
+    return ((base >= 'a') && (base <= 'z')) ? static_cast<char>(base - ('a' - 'A')) : base;
+}
+
+// Writes the read features of the bases of an M, = or X operation against the reference: nothing
+// for a base equal to the reference, a substitution (X) where both bases are in ACGTN, else a run
+// of bases (b), e.g. for a base past the end of the reference or an IUPAC code.
+void WriteBasesAgainstReference(CramExternalBlockStore& extStore, std::span<const std::byte> bases,
+                                const std::string_view reference, const std::int64_t refPos,
+                                const std::int32_t readPos, std::int32_t& previousFeaturePos,
+                                std::int32_t& numFeatures)
+{
+    std::int32_t runStart{-1};
+    const auto flushRun = [&](const std::int32_t end) {
+        if (runStart >= 0) {
+            WriteFeatureHeader(extStore, 'b', readPos + runStart, previousFeaturePos);
+            WriteByteArrayLen(extStore, BB_BLOCK_ID,
+                              bases.subspan(static_cast<std::size_t>(runStart),
+                                            static_cast<std::size_t>(end - runStart)));
+            ++numFeatures;
+            runStart = -1;
+        }
+    };
+    const auto n = static_cast<std::int32_t>(std::size(bases));
+    for (std::int32_t i = 0; i < n; ++i) {
+        const auto readBase = static_cast<char>(std::to_integer<std::uint8_t>(bases[i]));
+        const std::int64_t r{refPos + i};
+        const bool onReference{(r >= 0) && (r < static_cast<std::int64_t>(std::size(reference)))};
+        const char refBase{onReference ? UppercaseBase(reference[static_cast<std::size_t>(r)])
+                                       : '\0'};
+        if (onReference && (readBase == refBase)) {
+            flushRun(i);
+            continue;
+        }
+        const std::int32_t code{onReference ? SubstitutionCode(refBase, readBase) : -1};
+        if (code >= 0) {
+            flushRun(i);
+            WriteFeatureHeader(extStore, 'X', readPos + i, previousFeaturePos);
+            extStore.WriteByte(BS_BLOCK_ID, static_cast<std::byte>(code));
+            ++numFeatures;
+            continue;
+        }
+        if (runStart < 0) {
+            runStart = i;
+        }
+    }
+    flushRun(n);
+}
+
 }  // namespace CramWriterInternal
 
 using namespace CramWriterInternal;
@@ -463,7 +529,8 @@ struct CramWriter::Impl
     std::unordered_map<std::string, std::int32_t> readGroupIndex;
     std::vector<CraiEntry> craiEntries;
     std::future<void> pendingWrite;
-    LibdeflateCompressorPtr gzipCompressor;
+    // the compressor of the writer thread; EncodeContainer uses thread-local ones
+    mutable LibdeflateCompressorPtr gzipCompressor;
     std::shared_ptr<Parallel::ThreadPool<>> compressionPool;
 
     CramBlockMethod DefaultDataSeriesMethod(CramDataSeries ds) const
@@ -549,6 +616,45 @@ struct CramWriter::Impl
         }
     }
 
+    bool ReferenceBased() const { return !std::empty(config.ReferenceSequences); }
+
+    // the reference of a mapped record; empty for reference-free CRAM
+    std::string_view ReferenceOf(const BamRecord& record) const
+    {
+        const std::int32_t refId{record.RefId()};
+        if ((refId < 0) ||
+            (static_cast<std::size_t>(refId) >= std::size(config.ReferenceSequences))) {
+            return {};
+        }
+        return config.ReferenceSequences[static_cast<std::size_t>(refId)];
+    }
+
+    // Reference-based CRAM: one reference per @SQ line, of its length; M5 where it is missing.
+    void PrepareReferences()
+    {
+        if (!ReferenceBased()) {
+            return;
+        }
+        std::vector<ReferenceSequence>& sequences{header.ReferenceSequences()};
+        if (std::size(sequences) != std::size(config.ReferenceSequences)) {
+            throw std::runtime_error{
+                std::format("CramWriter: {} reference sequences for {} @SQ lines",
+                            std::size(config.ReferenceSequences), std::size(sequences))};
+        }
+        for (std::size_t i = 0; i < std::size(sequences); ++i) {
+            ReferenceSequence& sq{sequences[i]};
+            const std::string_view bases{config.ReferenceSequences[i]};
+            if (std::cmp_not_equal(std::size(bases), sq.Length())) {
+                throw std::runtime_error{
+                    std::format("CramWriter: reference {} has {} bases, its @SQ line says {}",
+                                sq.Name(), std::size(bases), sq.Length())};
+            }
+            if (!sq.GetTag("M5")) {
+                sq.SetTag("M5", CramReferenceMd5(bases));
+            }
+        }
+    }
+
     void WaitForPendingWrite()
     {
         if (pendingWrite.valid()) {
@@ -565,6 +671,8 @@ struct CramWriter::Impl
         if (!gzipCompressor) {
             throw std::runtime_error("CramWriter: failed to allocate gzip compressor");
         }
+
+        PrepareReferences();
 
         writePath = detail::ResolveWritePath(path, config.UseTempFile);
         file.open(writePath, std::ios::binary | std::ios::trunc);
@@ -636,25 +744,27 @@ struct CramWriter::Impl
         });
     }
 
-    void CaptureCraiEntries(const std::vector<BamRecord>& sliceRecords,
-                            const CramSliceHeader& sliceHeader, std::int64_t containerOffset,
-                            std::int64_t sliceOffset, std::int64_t sliceSize)
+    // the CRAI entries of a slice, without their file offsets
+    std::vector<CraiEntry> SliceCraiEntries(std::span<const BamRecord> sliceRecords,
+                                            const CramSliceHeader& sliceHeader) const
     {
+        std::vector<CraiEntry> entries;
         if (!config.WriteCrai) {
-            return;
+            return entries;
         }
 
         const auto containerRefId = sliceHeader.RefSeqId;
         if (containerRefId >= 0) {
             const std::int64_t span = std::max<std::int64_t>(sliceHeader.AlignmentSpan, 1);
-            AddCraiEntry(containerRefId, sliceHeader.AlignmentStart, span, containerOffset,
-                         sliceOffset, sliceSize);
-            return;
+            entries.push_back(CraiEntry{.SequenceId = containerRefId,
+                                        .AlignmentStart = sliceHeader.AlignmentStart,
+                                        .AlignmentSpan = span});
+            return entries;
         }
 
         if (containerRefId == -1) {
-            AddCraiEntry(-1, 0, 1, containerOffset, sliceOffset, sliceSize);
-            return;
+            entries.push_back(CraiEntry{.SequenceId = -1, .AlignmentStart = 0, .AlignmentSpan = 1});
+            return entries;
         }
 
         if (containerRefId != -2) {
@@ -678,15 +788,18 @@ struct CramWriter::Impl
 
         for (const RefSpan& span : spans) {
             if (span.SequenceId == -1 || !span.HasMappedSpan) {
-                AddCraiEntry(-1, 0, 1, containerOffset, sliceOffset, sliceSize);
+                entries.push_back(
+                    CraiEntry{.SequenceId = -1, .AlignmentStart = 0, .AlignmentSpan = 1});
                 continue;
             }
 
             const std::int64_t alignmentStart = span.MinPos + 1;
             const std::int64_t alignmentSpan = std::max<std::int64_t>(span.MaxEnd - span.MinPos, 1);
-            AddCraiEntry(span.SequenceId, alignmentStart, alignmentSpan, containerOffset,
-                         sliceOffset, sliceSize);
+            entries.push_back(CraiEntry{.SequenceId = span.SequenceId,
+                                        .AlignmentStart = alignmentStart,
+                                        .AlignmentSpan = alignmentSpan});
         }
+        return entries;
     }
 
     void WriteCraiSidecar()
@@ -793,14 +906,15 @@ struct CramWriter::Impl
         std::int32_t NumRecords{0};
     };
 
-    ContainerEncodingPlan BuildContainerEncodingPlan() const
+    ContainerEncodingPlan BuildContainerEncodingPlan(
+        std::span<const std::span<const BamRecord>> slices) const
     {
         ContainerEncodingPlan plan;
-        plan.SliceData.resize(std::size(pendingSlices));
+        plan.SliceData.resize(std::size(slices));
 
         plan.CompressionHeader.PreservationMap.ReadNamesIncluded = true;
         plan.CompressionHeader.PreservationMap.ApDelta = false;
-        plan.CompressionHeader.PreservationMap.ReferenceRequired = false;
+        plan.CompressionHeader.PreservationMap.ReferenceRequired = ReferenceBased();
 
         plan.DataSeriesMethods.reserve(std::size(DATA_SERIES));
         for (const auto& [series, blockId] : DATA_SERIES) {
@@ -819,8 +933,8 @@ struct CramWriter::Impl
         std::map<std::vector<TagTriple>, std::int32_t> tagSetIndex;
         tagSetIndex.emplace(std::vector<TagTriple>{}, 0);
 
-        for (std::size_t sliceIndex = 0; sliceIndex < std::size(pendingSlices); ++sliceIndex) {
-            const auto& sliceRecords = pendingSlices[sliceIndex];
+        for (std::size_t sliceIndex = 0; sliceIndex < std::size(slices); ++sliceIndex) {
+            const auto& sliceRecords = slices[sliceIndex];
             auto& prepared = plan.SliceData[sliceIndex];
             prepared.RecordTags.reserve(std::size(sliceRecords));
 
@@ -863,9 +977,9 @@ struct CramWriter::Impl
         return plan;
     }
 
-    ContainerStats ComputeContainerStats() const
+    static ContainerStats ComputeContainerStats(std::span<const std::span<const BamRecord>> slices)
     {
-        if (std::empty(pendingSlices)) {
+        if (std::empty(slices)) {
             return {};
         }
 
@@ -876,7 +990,7 @@ struct CramWriter::Impl
         std::int32_t firstRefId = -2;
         bool allSameRef = true;
 
-        for (const auto& sliceRecords : pendingSlices) {
+        for (const auto& sliceRecords : slices) {
             for (const auto& rec : sliceRecords) {
                 const auto refId = rec.RefId();
                 if (!haveFirstRef) {
@@ -915,7 +1029,7 @@ struct CramWriter::Impl
         std::span<const BamRecord> records, std::span<const RecordTagData> recordTagData,
         const std::unordered_map<std::int32_t, CramBlockMethod>& dataSeriesMethods,
         std::int32_t containerRefId, std::int64_t recordCounterStart, bool useThreadLocalGzip,
-        bool allowBlockParallel)
+        bool allowBlockParallel) const
     {
         if (std::size(records) != std::size(recordTagData)) {
             throw std::runtime_error("CramWriter: per-slice record/tag metadata size mismatch");
@@ -1008,6 +1122,16 @@ struct CramWriter::Impl
         sliceHeader.NumRecords = numRecords;
         sliceHeader.RecordCounter = recordCounterStart;
         sliceHeader.EmbeddedRefBlockId = -1;
+        // The MD5 of the reference bases of a slice on one reference (zero where the slice
+        // reaches past the end of the reference: no check).
+        if (ReferenceBased() && (containerRefId >= 0) && (maxEnd > minPos)) {
+            const std::string_view reference{
+                config.ReferenceSequences[static_cast<std::size_t>(containerRefId)]};
+            if (std::cmp_less_equal(maxEnd, std::size(reference))) {
+                sliceHeader.RefMd5 = detail::ComputeUppercaseMd5(reference.substr(
+                    static_cast<std::size_t>(minPos), static_cast<std::size_t>(maxEnd - minPos)));
+            }
+        }
 
         const auto contentIds = extStore.ContentIds();
         sliceHeader.BlockContentIds = contentIds;
@@ -1122,63 +1246,82 @@ struct CramWriter::Impl
         nextContainerOffset += bytesWritten;
     }
 
-    void FlushContainer()
+    // Encodes slices into one container. The record counters start at 0; WriteEncoded moves
+    // them. Without the workers (any thread may call it), with thread-local compressors.
+    CramEncodedContainer EncodeSlices(std::span<const std::span<const BamRecord>> sliceRecords,
+                                      const bool useWorkers) const
     {
-        if (std::empty(pendingSlices)) {
-            return;
-        }
+        const ContainerStats containerStats = ComputeContainerStats(sliceRecords);
+        const ContainerEncodingPlan encodingPlan = BuildContainerEncodingPlan(sliceRecords);
 
-        const ContainerStats containerStats = ComputeContainerStats();
-        const ContainerEncodingPlan encodingPlan = BuildContainerEncodingPlan();
-
-        std::vector<std::int64_t> sliceRecordCounters(std::size(pendingSlices), 0);
-        std::int64_t runningRecordCounter = globalRecordCounter;
-        for (std::size_t i = 0; i < std::size(pendingSlices); ++i) {
+        std::vector<std::int64_t> sliceRecordCounters(std::size(sliceRecords), 0);
+        std::int64_t runningRecordCounter = 0;
+        for (std::size_t i = 0; i < std::size(sliceRecords); ++i) {
             sliceRecordCounters[i] = runningRecordCounter;
-            runningRecordCounter += static_cast<std::int64_t>(std::size(pendingSlices[i]));
+            runningRecordCounter += static_cast<std::int64_t>(std::size(sliceRecords[i]));
         }
 
-        std::vector<CramSlice> slices(std::size(pendingSlices));
-        const bool useParallelSlices =
-            compressionPool && config.CompressionWorkers > 1 && std::size(pendingSlices) > 1;
+        std::vector<CramSlice> slices(std::size(sliceRecords));
+        const bool useParallelSlices = useWorkers && compressionPool &&
+                                       config.CompressionWorkers > 1 && std::size(sliceRecords) > 1;
         if (useParallelSlices) {
             std::atomic<std::size_t> nextSlice{0};
-            const std::size_t sliceCount = std::size(pendingSlices);
+            const std::size_t sliceCount = std::size(sliceRecords);
             const auto taskCount = static_cast<std::int32_t>(
-                std::ranges::min(config.CompressionWorkers, std::size(pendingSlices)));
+                std::ranges::min(config.CompressionWorkers, std::size(sliceRecords)));
             Parallel::Dispatch(
                 compressionPool,
                 MakeWorkStealingTask(
                     &nextSlice, sliceCount,
-                    [this, &slices, &encodingPlan, &containerStats,
+                    [this, &slices, &sliceRecords, &encodingPlan, &containerStats,
                      &sliceRecordCounters](std::size_t sliceIndex) {
-                        slices[sliceIndex] =
-                            EncodeSlice(pendingSlices[sliceIndex],
-                                        encodingPlan.SliceData[sliceIndex].RecordTags,
-                                        encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
-                                        sliceRecordCounters[sliceIndex],
-                                        /*useThreadLocalGzip=*/true, /*allowBlockParallel=*/false);
+                        slices[sliceIndex] = EncodeSlice(
+                            sliceRecords[sliceIndex], encodingPlan.SliceData[sliceIndex].RecordTags,
+                            encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
+                            sliceRecordCounters[sliceIndex],
+                            /*useThreadLocalGzip=*/true, /*allowBlockParallel=*/false);
                     }),
                 taskCount);
         } else {
-            for (std::size_t sliceIndex = 0; sliceIndex < std::size(pendingSlices); ++sliceIndex) {
+            for (std::size_t sliceIndex = 0; sliceIndex < std::size(sliceRecords); ++sliceIndex) {
                 slices[sliceIndex] = EncodeSlice(
-                    pendingSlices[sliceIndex], encodingPlan.SliceData[sliceIndex].RecordTags,
+                    sliceRecords[sliceIndex], encodingPlan.SliceData[sliceIndex].RecordTags,
                     encodingPlan.DataSeriesMethods, containerStats.RefSeqId,
                     sliceRecordCounters[sliceIndex],
-                    /*useThreadLocalGzip=*/false, /*allowBlockParallel=*/true);
+                    /*useThreadLocalGzip=*/!useWorkers, /*allowBlockParallel=*/useWorkers);
             }
         }
 
-        CramContainer container;
+        CramEncodedContainer encoded;
+        CramContainer& container{encoded.Container};
         container.Header.RefSeqId = containerStats.RefSeqId;
         container.Header.StartPos = containerStats.StartPos;
         container.Header.AlignmentSpan = containerStats.AlignmentSpan;
         container.Header.NumRecords = containerStats.NumRecords;
-        container.Header.RecordCounter = globalRecordCounter;
+        container.Header.RecordCounter = 0;
         container.Header.Bases = containerStats.Bases;
         container.CompressionHeader = encodingPlan.CompressionHeader;
         container.Slices = std::move(slices);
+        encoded.SliceIndex.reserve(std::size(sliceRecords));
+        for (std::size_t i = 0; i < std::size(sliceRecords); ++i) {
+            encoded.SliceIndex.push_back(
+                SliceCraiEntries(sliceRecords[i], container.Slices[i].Header));
+        }
+        return encoded;
+    }
+
+    // Writes an encoded container after the containers written before: the record counters
+    // continue, and the CRAI entries get their file offsets.
+    void WriteEncoded(CramEncodedContainer encoded)
+    {
+        CramContainer& container{encoded.Container};
+        if (std::size(encoded.SliceIndex) != std::size(container.Slices)) {
+            throw std::runtime_error("CramWriter: encoded container without its slice index");
+        }
+        container.Header.RecordCounter = globalRecordCounter;
+        for (CramSlice& slice : container.Slices) {
+            slice.Header.RecordCounter += globalRecordCounter;
+        }
 
         const std::int64_t containerOffset = nextContainerOffset;
         std::vector<std::byte> serialized = SerializeContainer(container);
@@ -1199,13 +1342,36 @@ struct CramWriter::Impl
             if (sliceSize <= 0) {
                 throw std::runtime_error("CramWriter: non-positive serialized slice size");
             }
-            CaptureCraiEntries(pendingSlices[i], container.Slices[i].Header, containerOffset,
-                               sliceOffset, sliceSize);
+            for (const CraiEntry& entry : encoded.SliceIndex[i]) {
+                AddCraiEntry(entry.SequenceId, entry.AlignmentStart, entry.AlignmentSpan,
+                             containerOffset, sliceOffset, sliceSize);
+            }
         }
 
         QueueContainerWrite(std::move(serialized));
-        globalRecordCounter += containerStats.NumRecords;
+        globalRecordCounter += container.Header.NumRecords;
+    }
+
+    void FlushContainer()
+    {
+        if (std::empty(pendingSlices)) {
+            return;
+        }
+        const std::vector<std::span<const BamRecord>> slices(std::begin(pendingSlices),
+                                                             std::end(pendingSlices));
+        WriteEncoded(EncodeSlices(slices, /*useWorkers=*/true));
         pendingSlices.clear();
+    }
+
+    // the records written one by one go before a container of EncodeContainer
+    void FlushPendingRecords()
+    {
+        if (!std::empty(pendingRecords)) {
+            pendingSlices.push_back(std::move(pendingRecords));
+            pendingRecords.clear();
+            pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
+        }
+        FlushContainer();
     }
 
     void MaybeFlush()
@@ -1225,7 +1391,7 @@ struct CramWriter::Impl
     }
 
     void EncodeRecord(const BamRecord& record, const RecordTagData& recordTagData,
-                      CramExternalBlockStore& extStore, std::int32_t containerRefId)
+                      CramExternalBlockStore& extStore, std::int32_t containerRefId) const
     {
         const auto seq = record.Sequence();
         const auto readLength = static_cast<std::int32_t>(std::size(seq));
@@ -1261,40 +1427,14 @@ struct CramWriter::Impl
         }
 
         if (!isUnmapped) {
+            // The features go to their own external blocks, so FN can follow them.
+            const std::string_view reference{ReferenceOf(record)};
+            const bool againstReference{!std::empty(reference)};
             std::int32_t numFeatures = 0;
-            std::int32_t seqOffset = 0;
-            for (const auto& op : record.Cigar()) {
-                const auto length = static_cast<std::int32_t>(op.Length());
-                if (length <= 0) {
-                    continue;
-                }
-
-                switch (op.Type()) {
-                    case CigarOpType::M:
-                    case CigarOpType::EQ:
-                    case CigarOpType::X:
-                    case CigarOpType::I:
-                    case CigarOpType::S:
-                        if (QueryCopyLength(readLength, length, seqOffset) > 0) {
-                            ++numFeatures;
-                        }
-                        seqOffset += length;
-                        break;
-                    case CigarOpType::D:
-                    case CigarOpType::N:
-                    case CigarOpType::H:
-                    case CigarOpType::P:
-                        ++numFeatures;
-                        break;
-                }
-            }
-            if (numFeatures == 0 && !std::empty(seq)) {
-                numFeatures = 1;
-            }
-            extStore.WriteItf8(FN_BLOCK_ID, numFeatures);
-
             std::int32_t readPos = 1;
-            seqOffset = 0;
+            std::int32_t seqOffset = 0;
+            std::int64_t refPos = record.Pos();
+            std::int32_t basesCovered = 0;
             std::int32_t previousFeaturePos = 0;
             bool wroteFeature = false;
 
@@ -1310,19 +1450,30 @@ struct CramWriter::Impl
                     case CigarOpType::X: {
                         const auto data = QuerySpan(seq, seqOffset, length);
                         if (!std::empty(data)) {
-                            WriteFeatureHeader(extStore, 'b', readPos, previousFeaturePos);
-                            WriteByteArrayLen(extStore, BB_BLOCK_ID, data);
-                            wroteFeature = true;
+                            basesCovered += static_cast<std::int32_t>(std::size(data));
+                            if (againstReference) {
+                                WriteBasesAgainstReference(extStore, data, reference, refPos,
+                                                           readPos, previousFeaturePos,
+                                                           numFeatures);
+                            } else {
+                                WriteFeatureHeader(extStore, 'b', readPos, previousFeaturePos);
+                                WriteByteArrayLen(extStore, BB_BLOCK_ID, data);
+                                ++numFeatures;
+                                wroteFeature = true;
+                            }
                         }
                         readPos += length;
                         seqOffset += length;
+                        refPos += length;
                         break;
                     }
                     case CigarOpType::I: {
                         const auto data = QuerySpan(seq, seqOffset, length);
                         if (!std::empty(data)) {
+                            basesCovered += static_cast<std::int32_t>(std::size(data));
                             WriteFeatureHeader(extStore, 'I', readPos, previousFeaturePos);
                             WriteByteArrayStop(extStore, IN_BLOCK_ID, data, std::byte{0});
+                            ++numFeatures;
                             wroteFeature = true;
                         }
                         readPos += length;
@@ -1332,8 +1483,10 @@ struct CramWriter::Impl
                     case CigarOpType::S: {
                         const auto data = QuerySpan(seq, seqOffset, length);
                         if (!std::empty(data)) {
+                            basesCovered += static_cast<std::int32_t>(std::size(data));
                             WriteFeatureHeader(extStore, 'S', readPos, previousFeaturePos);
                             WriteByteArrayStop(extStore, SC_BLOCK_ID, data, std::byte{0});
+                            ++numFeatures;
                             wroteFeature = true;
                         }
                         readPos += length;
@@ -1343,31 +1496,40 @@ struct CramWriter::Impl
                     case CigarOpType::D:
                         WriteFeatureHeader(extStore, 'D', readPos, previousFeaturePos);
                         extStore.WriteItf8(DL_BLOCK_ID, length);
+                        ++numFeatures;
                         wroteFeature = true;
+                        refPos += length;
                         break;
                     case CigarOpType::N:
                         WriteFeatureHeader(extStore, 'N', readPos, previousFeaturePos);
                         extStore.WriteItf8(RS_BLOCK_ID, length);
+                        ++numFeatures;
                         wroteFeature = true;
+                        refPos += length;
                         break;
                     case CigarOpType::H:
                         WriteFeatureHeader(extStore, 'H', readPos, previousFeaturePos);
                         extStore.WriteItf8(HC_BLOCK_ID, length);
+                        ++numFeatures;
                         wroteFeature = true;
                         break;
                     case CigarOpType::P:
                         WriteFeatureHeader(extStore, 'P', readPos, previousFeaturePos);
                         extStore.WriteItf8(PD_BLOCK_ID, length);
+                        ++numFeatures;
                         wroteFeature = true;
                         break;
                 }
             }
 
-            if (!wroteFeature && !std::empty(seq)) {
+            // A CIGAR without the bases of the read: store them as one run.
+            if (!wroteFeature && (basesCovered == 0) && !std::empty(seq)) {
                 WriteFeatureHeader(extStore, 'b', 1, previousFeaturePos);
                 const auto* seqPtr = reinterpret_cast<const std::byte*>(seq.data());
                 WriteByteArrayLen(extStore, BB_BLOCK_ID, {seqPtr, std::size(seq)});
+                ++numFeatures;
             }
+            extStore.WriteItf8(FN_BLOCK_ID, numFeatures);
 
             extStore.WriteItf8(MQ_BLOCK_ID, record.MapQ());
             WriteQualities(extStore, qualities, readLength);
@@ -1463,6 +1625,30 @@ void CramWriter::WriteBatch(const RawRecordBatch& batch)
 }
 
 void CramWriter::Close() { impl_->Close(); }
+
+CramEncodedContainer CramWriter::EncodeContainer(const std::span<const BamRecord> records) const
+{
+    std::vector<std::span<const BamRecord>> slices;
+    const auto perSlice = static_cast<std::size_t>(impl_->config.RecordsPerSlice);
+    for (std::size_t first = 0; first < std::size(records); first += perSlice) {
+        slices.push_back(records.subspan(first, std::min(perSlice, std::size(records) - first)));
+    }
+    return impl_->EncodeSlices(slices, /*useWorkers=*/false);
+}
+
+void CramWriter::WriteContainer(CramEncodedContainer container)
+{
+    if (std::empty(container.Container.Slices)) {
+        return;
+    }
+    impl_->FlushPendingRecords();
+    impl_->WriteEncoded(std::move(container));
+}
+
+std::string CramReferenceMd5(const std::string_view sequence)
+{
+    return detail::Md5DigestToHex(detail::ComputeUppercaseMd5(sequence));
+}
 
 }  // namespace Samoa
 }  // namespace PacBio

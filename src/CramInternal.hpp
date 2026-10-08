@@ -10,6 +10,8 @@
 #include <compare>
 #include <filesystem>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <cstddef>
@@ -73,6 +75,10 @@ inline std::filesystem::path DefaultCraiPath(const std::filesystem::path& cramPa
 {
     return SidecarPath(cramPath, ".crai");
 }
+
+/// \brief The sequences of a FASTA file by name (the first word of the header line), in upper
+/// case. Used by CramReader and by the convert tool.
+std::unordered_map<std::string, std::string> LoadFastaSequences(const std::filesystem::path& path);
 
 }  // namespace Samoa
 }  // namespace PacBio

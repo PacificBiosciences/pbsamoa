@@ -534,45 +534,6 @@ void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenc
     }
 }
 
-std::unordered_map<std::string, std::string> LoadFastaSequences(const std::filesystem::path& path)
-{
-    std::ifstream in{path};
-    if (!in) {
-        throw std::runtime_error{
-            std::format("CramReader: cannot open reference FASTA {}", path.string())};
-    }
-
-    std::unordered_map<std::string, std::string> references;
-    std::string currentName;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!std::empty(line) && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (std::empty(line)) {
-            continue;
-        }
-        if (line[0] == '>') {
-            line.erase(0, 1);
-            const auto wsPos = line.find_first_of(" \t");
-            currentName = line.substr(0, wsPos);
-            references.try_emplace(currentName);
-            continue;
-        }
-        if (std::empty(currentName)) {
-            continue;
-        }
-
-        auto& seq = references[currentName];
-        for (const unsigned char c : line) {
-            if (std::isspace(c) == 0) {
-                seq.push_back(static_cast<char>(std::toupper(c)));
-            }
-        }
-    }
-    return references;
-}
-
 void ResolveDownstreamMates(std::vector<BamRecord>& records,
                             std::span<const std::int32_t> downstreamMateDistance)
 {
@@ -686,6 +647,45 @@ bool KeepRecordForQuery(const BamRecord& record, std::int32_t refId, std::int32_
 }
 
 }  // namespace
+
+std::unordered_map<std::string, std::string> LoadFastaSequences(const std::filesystem::path& path)
+{
+    std::ifstream in{path};
+    if (!in) {
+        throw std::runtime_error{
+            std::format("CramReader: cannot open reference FASTA {}", path.string())};
+    }
+
+    std::unordered_map<std::string, std::string> references;
+    std::string currentName;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!std::empty(line) && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (std::empty(line)) {
+            continue;
+        }
+        if (line[0] == '>') {
+            line.erase(0, 1);
+            const auto wsPos = line.find_first_of(" \t");
+            currentName = line.substr(0, wsPos);
+            references.try_emplace(currentName);
+            continue;
+        }
+        if (std::empty(currentName)) {
+            continue;
+        }
+
+        auto& seq = references[currentName];
+        for (const unsigned char c : line) {
+            if (std::isspace(c) == 0) {
+                seq.push_back(static_cast<char>(std::toupper(c)));
+            }
+        }
+    }
+    return references;
+}
 
 // ---------------------------------------------------------------------------
 // Impl

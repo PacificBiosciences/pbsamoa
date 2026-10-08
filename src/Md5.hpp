@@ -26,6 +26,10 @@ std::string Md5Hex(std::span<const std::byte> data);
 /// \brief Convenience overload for string data.
 std::string Md5Hex(std::string_view text);
 
+/// \brief Compute the raw 16-byte MD5 digest of the bases in upper case, without a copy of
+///        them (the M5 of a CRAM reference and the reference MD5 of a CRAM slice).
+std::array<std::byte, 16> ComputeUppercaseMd5(std::string_view bases);
+
 }  // namespace detail
 }  // namespace Samoa
 }  // namespace PacBio

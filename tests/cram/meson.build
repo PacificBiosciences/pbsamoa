@@ -28,6 +28,7 @@ if cram_script.found()
         'cram_write_fqz_slices_1000',
         'cram_write_methods',
         'cram_write_optional_methods',
+        'cram_write_reference',
         'cram_write_series_overrides',
         'edge_cases_diverse',
         'edge_cases_empty',

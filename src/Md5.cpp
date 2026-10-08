@@ -91,6 +91,57 @@ void Md5Transform(std::array<std::uint32_t, 4>& state, std::span<const std::uint
     state[3] += d;
 }
 
+// MD5 of data that comes in pieces
+class Md5Context
+{
+public:
+    void Update(std::span<const std::uint8_t> data)
+    {
+        length_ += std::size(data);
+        if (buffered_ > 0) {
+            const std::size_t take{std::min(std::size(data), 64 - buffered_)};
+            std::copy_n(std::data(data), take, std::data(buffer_) + buffered_);
+            buffered_ += take;
+            data = data.subspan(take);
+            if (buffered_ < 64) {
+                return;
+            }
+            Md5Transform(state_, std::span<const std::uint8_t, 64>{buffer_});
+            buffered_ = 0;
+        }
+        while (std::size(data) >= 64) {
+            Md5Transform(state_, data.first<64>());
+            data = data.subspan(64);
+        }
+        std::copy_n(std::data(data), std::size(data), std::data(buffer_));
+        buffered_ = std::size(data);
+    }
+
+    std::array<std::byte, 16> Final()
+    {
+        const std::uint64_t bitLen{length_ * 8};
+        std::array<std::uint8_t, 72> pad{};
+        pad[0] = 0x80;
+        const std::size_t padLen{(buffered_ < 56) ? (56 - buffered_) : (120 - buffered_)};
+        std::memcpy(std::data(pad) + padLen, &bitLen, 8);
+        Update(std::span<const std::uint8_t>{pad}.first(padLen + 8));
+
+        std::array<std::byte, 16> md5{};
+        for (std::size_t i{0}; i < std::size(state_); ++i) {
+            for (std::size_t j{0}; j < 4; ++j) {
+                md5[i * 4 + j] = static_cast<std::byte>((state_[i] >> (8 * j)) & 0xFFu);
+            }
+        }
+        return md5;
+    }
+
+private:
+    std::array<std::uint32_t, 4> state_{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+    std::array<std::uint8_t, 64> buffer_{};
+    std::size_t buffered_{0};
+    std::uint64_t length_{0};
+};
+
 }  // namespace
 
 std::string Md5DigestToHex(std::span<const std::byte, 16> digest)
@@ -148,6 +199,21 @@ std::array<std::byte, 16> ComputeMd5(std::span<const std::byte> data)
 std::string Md5Hex(std::span<const std::byte> data) { return Md5DigestToHex(ComputeMd5(data)); }
 
 std::string Md5Hex(std::string_view text) { return Md5Hex(std::as_bytes(std::span{text})); }
+
+std::array<std::byte, 16> ComputeUppercaseMd5(const std::string_view bases)
+{
+    Md5Context context;
+    std::array<std::uint8_t, 4096> chunk{};
+    for (std::size_t offset{0}; offset < std::size(bases); offset += std::size(chunk)) {
+        const std::size_t n{std::min(std::size(chunk), std::size(bases) - offset)};
+        for (std::size_t i{0}; i < n; ++i) {
+            const auto c{static_cast<std::uint8_t>(bases[offset + i])};
+            chunk[i] = ((c >= 'a') && (c <= 'z')) ? (c - ('a' - 'A')) : c;
+        }
+        context.Update(std::span<const std::uint8_t>{chunk}.first(n));
+    }
+    return context.Final();
+}
 
 }  // namespace detail
 }  // namespace Samoa

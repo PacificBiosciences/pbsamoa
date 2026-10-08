@@ -342,10 +342,35 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `CompressionWorkers`           | `size_t`                                         | `0`     | CRAM block compression threads (`0` = synchronous)                |
 | `CompressionLevel`             | `optional<int>`                                  | `{}`    | Optional gzip compression level (`[0,12]`)                        |
 | `UseTempFile`                  | `bool`                                           | `false` | Write to a temporary path and rename atomically on `Close()`      |
+| `ReferenceSequences`           | `vector<string_view>`                            | `{}`    | The sequence of each @SQ line: reference-based CRAM (see below)   |
 
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
 - `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
+
+### Reference-based CRAM
+
+With `ReferenceSequences` (one view per @SQ line, in header order, of the @SQ length; any case;
+valid until `Close()`), a mapped record stores only its differences to the reference: a
+substitution (`X`, default substitution matrix) where both bases are in ACGTN, else a run of bases
+(`b`), for example an IUPAC code or a base past the end of the reference. The preservation map
+says `RR`, each single-reference slice carries the MD5 of its reference bases, and @SQ lines
+without `M5` get one (`CramReferenceMd5(sequence)`: the MD5 of the bases in upper case). Readers
+need the reference (`CramReaderConfig::ReferencePath`, `samtools view -T`). As with every CRAM,
+readers give `M` for `=` and `X`, and htslib adds `MD` unless `decode_md=0`.
+
+### Encoding containers on several threads
+
+```cpp
+// any thread: one container (slices of RecordsPerSlice records)
+CramEncodedContainer encoded = writer.EncodeContainer(std::span<const BamRecord>{records});
+// one thread, in output order: record counters and CRAI offsets continue
+writer.WriteContainer(std::move(encoded));
+```
+
+`EncodeContainer` uses the calling thread only (thread-local compressors, not the compression
+workers), so several threads can encode while another writes. `WriteContainer` first writes the
+records given one by one before it.
 
 ### Containerization and CRAI behavior
 
