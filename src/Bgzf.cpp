@@ -22,6 +22,8 @@
 #include <format>
 #include <fstream>
 #include <future>
+#include <iterator>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -547,6 +549,18 @@ struct BgzfReader::Impl
     std::size_t recordBufSize{0};
     std::size_t recordBufPos{0};
     bool syncEof{false};
+
+    // Sync BAM mode: where each block in recordBuf starts, for an exact Tell(). BufBegin is
+    // signed: after a compaction, the first block can start before recordBuf[0].
+    struct BufferedBlock
+    {
+        std::uint64_t FileOffset{0};
+        std::int64_t BufBegin{0};
+    };
+
+    std::vector<BufferedBlock> recordBufBlocks{};
+    std::size_t syncBlockSize{0};          // decompressed size of the last block read
+    std::uint64_t syncNextBlockOffset{0};  // file offset of the next block to read
 
     // Parallel BAM mode state
     std::unique_ptr<BgzfPipelineState> pipeline{};
@@ -2561,6 +2575,8 @@ std::optional<std::size_t> BgzfReader::Impl::ReadBlockSync(std::span<std::byte> 
             return std::nullopt;
         }
 
+        syncBlockSize = actualOut;
+        syncNextBlockOffset = syncBlockOffset + blockSize;
         return actualOut;
     }
 }
@@ -2580,6 +2596,14 @@ void BgzfReader::Impl::ParseHeaderSync()
     recordBufSize = remaining;
     recordBufPos = 0;
     syncEof = eofReached;
+
+    // the header ends in the last block read; the leftover is the tail of that block
+    recordBufBlocks.clear();
+    if (syncBlockSize > 0) {
+        recordBufBlocks.push_back({.FileOffset = syncBlockOffset,
+                                   .BufBegin = static_cast<std::int64_t>(remaining) -
+                                               static_cast<std::int64_t>(syncBlockSize)});
+    }
 }
 
 bool BgzfReader::Impl::RefillRecordBuffer()
@@ -2589,6 +2613,19 @@ bool BgzfReader::Impl::RefillRecordBuffer()
         if (remaining > 0) {
             std::memmove(std::data(recordBuf), std::data(recordBuf) + recordBufPos, remaining);
         }
+        const std::int64_t shift{static_cast<std::int64_t>(recordBufPos)};
+        for (BufferedBlock& block : recordBufBlocks) {
+            block.BufBegin -= shift;
+        }
+        // drop the blocks that end before the new buffer start; keep the block that ends at
+        // it, so that Tell() stays the same across a compaction
+        std::size_t firstKept{0};
+        while (((firstKept + 1) < std::size(recordBufBlocks)) &&
+               (recordBufBlocks[firstKept + 1].BufBegin < 0)) {
+            ++firstKept;
+        }
+        recordBufBlocks.erase(std::begin(recordBufBlocks),
+                              std::begin(recordBufBlocks) + static_cast<std::ptrdiff_t>(firstKept));
         recordBufPos = 0;
         recordBufSize = remaining;
     }
@@ -2615,6 +2652,8 @@ bool BgzfReader::Impl::RefillRecordBuffer()
         return remaining > 0;
     }
 
+    recordBufBlocks.push_back(
+        {.FileOffset = syncBlockOffset, .BufBegin = static_cast<std::int64_t>(recordBufSize)});
     recordBufSize += *bytesRead;
     return true;
 }
@@ -2666,6 +2705,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
     syncFile.clear();
     syncFile.seekg(static_cast<std::streamoff>(offset.BlockOffset()), std::ios::beg);
     syncBlockOffset = offset.BlockOffset();
+    syncNextBlockOffset = offset.BlockOffset();
 
     if (mode != BgzfReaderMode::SYNC_BAM) {
         return;
@@ -2673,6 +2713,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
 
     recordBufPos = 0;
     recordBufSize = 0;
+    recordBufBlocks.clear();
     syncEof = false;
 
     const std::uint16_t withinBlock{offset.WithinBlockOffset()};
@@ -2692,6 +2733,7 @@ void BgzfReader::Impl::Seek(VirtualOffset offset)
     }
 
     recordBufSize = *bytesRead;
+    recordBufBlocks.push_back({.FileOffset = syncBlockOffset, .BufBegin = 0});
     if (recordBufSize >= withinBlock) {
         recordBufPos = withinBlock;
     }
@@ -2702,7 +2744,28 @@ VirtualOffset BgzfReader::Impl::Tell() const
     if (mode == BgzfReaderMode::PARALLEL_BAM) {
         return pipeline->Tell();
     }
-    return VirtualOffset{syncBlockOffset, std::uint16_t{0}};
+    if (mode != BgzfReaderMode::SYNC_BAM) {
+        return VirtualOffset{syncBlockOffset, std::uint16_t{0}};
+    }
+    // The exact offset of the next unread byte. At a block border it is the end of the
+    // earlier block, (block, size), not the start of the next one, (next, 0): both name the
+    // same byte, and the earlier form is <= a BAI chunk end in either form (htslib writes the
+    // next-block form, BaiIndex::Build the earlier one), so a record that ends at a chunk end
+    // stays in the chunk, and every later byte compares greater.
+    if (std::empty(recordBufBlocks)) {
+        return VirtualOffset{syncNextBlockOffset, std::uint16_t{0}};
+    }
+    const std::int64_t pos{static_cast<std::int64_t>(recordBufPos)};
+    const auto it{std::ranges::lower_bound(recordBufBlocks, pos, {}, &BufferedBlock::BufBegin)};
+    const BufferedBlock& block{(it == std::begin(recordBufBlocks)) ? *it : *std::prev(it)};
+    const std::int64_t within{pos - block.BufBegin};
+    if (within > std::numeric_limits<std::uint16_t>::max()) {
+        // a full 64 KiB block: only the next-block form fits
+        return VirtualOffset{
+            (it != std::end(recordBufBlocks)) ? it->FileOffset : syncNextBlockOffset,
+            std::uint16_t{0}};
+    }
+    return VirtualOffset{block.FileOffset, static_cast<std::uint16_t>(within)};
 }
 
 bool BgzfReader::Impl::HasEofMarker() const

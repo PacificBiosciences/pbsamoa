@@ -9,6 +9,7 @@
 #include <pbsamoa/index/ZmwWhitelist.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
+#include <pbsamoa/io/BamWriter.hpp>
 #include <pbsamoa/io/ZmiBamWriter.hpp>
 
 #include <gtest/gtest.h>
@@ -883,6 +884,109 @@ TEST(BamRawReaderScatter, CoversEveryRecordExactlyOnceViaRecordReader)
 
     EXPECT_EQ(std::ranges::adjacent_find(all), std::ranges::end(all));  // no duplicates
     EXPECT_EQ(all, expected);                                           // exact partition
+}
+
+namespace {
+
+// A mapped record with a short SEQ; a D operation gives it a long reference span.
+BamRecord MakeSpanRecord(std::string name, const std::int32_t pos, const std::uint32_t span)
+{
+    std::vector<CigarOp> cigar{CigarOp{CigarOpType::M, 10}};
+    if (span > 20) {
+        cigar.push_back(CigarOp{CigarOpType::D, span - 20});
+        cigar.push_back(CigarOp{CigarOpType::M, 10});
+    }
+    const std::size_t readLength{(span > 20) ? 20U : 10U};
+    BamRecord record;
+    record.Name(std::move(name))
+        .Flag(0)
+        .RefId(0)
+        .Pos(pos)
+        .MapQ(60)
+        .Cigar(std::move(cigar))
+        .NextRefId(-1)
+        .NextPos(-1)
+        .Tlen(0)
+        .Sequence(std::string(readLength, 'A'))
+        .Qualities(std::vector<std::uint8_t>(readLength, 30));
+    return record;
+}
+
+SamHeader MakeOneReferenceHeader()
+{
+    SamHeader header;
+    header.SetVersion("1.6");
+    header.SetSortOrder("coordinate");
+    header.AddReferenceSequence(ReferenceSequence{"ref", 1'000'000});
+    return header;
+}
+
+}  // namespace
+
+TEST(BamRawReader, QueryGivesEachRecordOnceWhenTwoChunksShareABlock)
+{
+    // One BGZF block holds, in file order: A (bin [0, 128k)), G0..G9 (bin [0, 16k)), R (bin
+    // [0, 128k)). A query of [20000, 20010) uses the bin of A and R, not the bin of the Gs, so
+    // its chunks are [A] and [R], with the Gs between them in the same block.
+    const tests::TempDirGuard tempDir{"raw_reader_query_shared_block"};
+    const auto bamPath{tempDir.File("shared_block.bam")};
+    {
+        BamWriter writer{bamPath, MakeOneReferenceHeader()};
+        writer.Write(MakeSpanRecord("A", 100, 30'000));
+        for (std::int32_t i{0}; i < 10; ++i) {
+            writer.Write(MakeSpanRecord(std::format("G{}", i), 200 + i, 10));
+        }
+        writer.Write(MakeSpanRecord("R", 300, 25'000));
+    }
+    const BaiIndex index{BaiIndex::Build(bamPath)};
+    ASSERT_EQ(std::ssize(index.Query(0, 20'000, 20'010)), 2);
+
+    BamRawReader reader{bamPath};
+    std::vector<std::string> names;
+    for (const auto& view : reader.Query(index, 0, 20'000, 20'010)) {
+        names.emplace_back(view.Name());
+    }
+    EXPECT_EQ(names, (std::vector<std::string>{"A", "R"}));
+}
+
+TEST(BamRawReader, SyncTellIsTheExactOffsetOfTheNextRecord)
+{
+    // Records in several BGZF blocks: a Seek to the Tell() after record k reads record k + 1.
+    const tests::TempDirGuard tempDir{"raw_reader_sync_tell"};
+    const auto bamPath{tempDir.File("tell.bam")};
+    constexpr std::int32_t NUM_RECORDS{3'000};
+    {
+        BamWriter writer{bamPath, MakeOneReferenceHeader()};
+        for (std::int32_t i{0}; i < NUM_RECORDS; ++i) {
+            BamRecord record{MakeSpanRecord(std::format("r{}", i), i * 10, 10)};
+            record.Sequence(std::string(100, 'C')).Qualities(std::vector<std::uint8_t>(100, 30));
+            record.Cigar({CigarOp{CigarOpType::M, 100}});
+            writer.Write(record);
+        }
+    }
+
+    BamRawReader reader{bamPath};
+    std::vector<VirtualOffset> tells;
+    std::vector<std::string> names;
+    tells.push_back(reader.Tell());
+    while (const auto rec{reader.ReadRecord()}) {
+        names.emplace_back(rec->Name());
+        tells.push_back(reader.Tell());
+    }
+    ASSERT_EQ(std::ssize(names), NUM_RECORDS);
+    ASSERT_GT(tells.back().BlockOffset(), tells.front().BlockOffset());  // several blocks
+
+    // each offset is a distinct, increasing position
+    ASSERT_TRUE(std::ranges::is_sorted(tells, std::ranges::less{}));
+    ASSERT_EQ(std::ranges::adjacent_find(tells), std::ranges::end(tells));
+
+    for (std::int32_t k{0}; k < NUM_RECORDS; k += 7) {
+        reader.Seek(tells[k]);
+        const auto rec{reader.ReadRecord()};
+        ASSERT_TRUE(rec.has_value());
+        EXPECT_EQ(rec->Name(), names[k]) << "record " << k;
+        EXPECT_EQ(reader.Tell(), tells[k + 1]) << "record " << k;
+    }
 }
 
 }  // namespace Samoa
