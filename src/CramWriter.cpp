@@ -23,6 +23,7 @@
 #include <future>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -460,6 +461,76 @@ char UppercaseBase(const char base)
     return ((base >= 'a') && (base <= 'z')) ? static_cast<char>(base - ('a' - 'A')) : base;
 }
 
+// The reference of CramWriterConfig::ReferenceSequences: views of the text, no copy.
+class TextReference final : public CramReference
+{
+public:
+    explicit TextReference(std::vector<std::string_view> sequences)
+        : sequences_{std::move(sequences)}
+    {
+    }
+
+    std::int32_t NumSequences() const override
+    {
+        return static_cast<std::int32_t>(std::size(sequences_));
+    }
+
+    std::int64_t Length(const std::int32_t refId) const override
+    {
+        return static_cast<std::int64_t>(std::size(sequences_[static_cast<std::size_t>(refId)]));
+    }
+
+    std::string_view Bases(const std::int32_t refId, const std::int64_t start,
+                           const std::int64_t length, std::string& /*buffer*/) const override
+    {
+        return sequences_[static_cast<std::size_t>(refId)].substr(static_cast<std::size_t>(start),
+                                                                  static_cast<std::size_t>(length));
+    }
+
+private:
+    std::vector<std::string_view> sequences_;
+};
+
+// The MD5 of the bases [start, start + length) of a reference in upper case, from windows of
+// 64 KiB: a slice can span megabases, and a packed reference decodes each window to buffer.
+std::array<std::byte, 16> ReferenceMd5(const CramReference& reference, const std::int32_t refId,
+                                       const std::int64_t start, const std::int64_t length,
+                                       std::string& buffer)
+{
+    constexpr std::int64_t WINDOW_BASES{std::int64_t{1} << 16};
+    const std::int64_t end{start + length};
+    std::int64_t next{start};
+    return detail::ComputeUppercaseMd5([&]() -> std::string_view {
+        if (next >= end) {
+            return {};
+        }
+        const std::int64_t n{std::min(WINDOW_BASES, end - next)};
+        const std::string_view bases{reference.Bases(refId, next, n, buffer)};
+        next += n;
+        return bases;
+    });
+}
+
+// The reference bases that the CIGAR operations of a record cover.
+std::int64_t ReferenceSpan(const BamRecord& record)
+{
+    std::int64_t span{0};
+    for (const auto& op : record.Cigar()) {
+        switch (op.Type()) {
+            case CigarOpType::M:
+            case CigarOpType::EQ:
+            case CigarOpType::X:
+            case CigarOpType::D:
+            case CigarOpType::N:
+                span += op.Length();
+                break;
+            default:
+                break;
+        }
+    }
+    return span;
+}
+
 // Writes the read features of the bases of an M, = or X operation against the reference: nothing
 // for a base equal to the reference, a substitution (X) where both bases are in ACGTN, else a run
 // of bases (b), e.g. for a base past the end of the reference or an IUPAC code.
@@ -520,6 +591,8 @@ struct CramWriter::Impl
     std::ofstream file;
     SamHeader header;
     CramWriterConfig config;
+    // the reference of reference-based CRAM (Reference, or a view of ReferenceSequences)
+    std::shared_ptr<const CramReference> reference;
     bool closed{false};
 
     std::vector<BamRecord> pendingRecords;
@@ -616,41 +689,46 @@ struct CramWriter::Impl
         }
     }
 
-    bool ReferenceBased() const { return !std::empty(config.ReferenceSequences); }
+    bool ReferenceBased() const { return reference != nullptr; }
 
-    // the reference of a mapped record; empty for reference-free CRAM
-    std::string_view ReferenceOf(const BamRecord& record) const
+    // the reference of a mapped record with a reference sequence of at least one base
+    bool HasReference(const BamRecord& record) const
     {
         const std::int32_t refId{record.RefId()};
-        if ((refId < 0) ||
-            (static_cast<std::size_t>(refId) >= std::size(config.ReferenceSequences))) {
-            return {};
-        }
-        return config.ReferenceSequences[static_cast<std::size_t>(refId)];
+        return ReferenceBased() && (refId >= 0) && (refId < reference->NumSequences()) &&
+               (reference->Length(refId) > 0);
     }
 
     // Reference-based CRAM: one reference per @SQ line, of its length; M5 where it is missing.
     void PrepareReferences()
     {
+        if (!std::empty(config.ReferenceSequences) && config.Reference) {
+            throw std::runtime_error{"CramWriter: set ReferenceSequences or Reference, not both"};
+        }
+        reference = config.Reference;
+        if (!std::empty(config.ReferenceSequences)) {
+            reference = std::make_shared<const TextReference>(config.ReferenceSequences);
+        }
         if (!ReferenceBased()) {
             return;
         }
         std::vector<ReferenceSequence>& sequences{header.ReferenceSequences()};
-        if (std::size(sequences) != std::size(config.ReferenceSequences)) {
+        if (std::cmp_not_equal(std::size(sequences), reference->NumSequences())) {
             throw std::runtime_error{
                 std::format("CramWriter: {} reference sequences for {} @SQ lines",
-                            std::size(config.ReferenceSequences), std::size(sequences))};
+                            reference->NumSequences(), std::size(sequences))};
         }
         for (std::size_t i = 0; i < std::size(sequences); ++i) {
             ReferenceSequence& sq{sequences[i]};
-            const std::string_view bases{config.ReferenceSequences[i]};
-            if (std::cmp_not_equal(std::size(bases), sq.Length())) {
+            const auto refId = static_cast<std::int32_t>(i);
+            const std::int64_t length{reference->Length(refId)};
+            if (length != sq.Length()) {
                 throw std::runtime_error{
                     std::format("CramWriter: reference {} has {} bases, its @SQ line says {}",
-                                sq.Name(), std::size(bases), sq.Length())};
+                                sq.Name(), length, sq.Length())};
             }
             if (!sq.GetTag("M5")) {
-                sq.SetTag("M5", CramReferenceMd5(bases));
+                sq.SetTag("M5", CramReferenceMd5(*reference, refId));
             }
         }
     }
@@ -1111,8 +1189,9 @@ struct CramWriter::Impl
             extStore.ReserveBlock(SC_BLOCK_ID, baseBytes / 8U);
         }
 
+        std::string referenceBuffer;  // the reference bases of a record or of the slice
         for (std::size_t i = 0; i < std::size(records); ++i) {
-            EncodeRecord(records[i], recordTagData[i], extStore, containerRefId);
+            EncodeRecord(records[i], recordTagData[i], extStore, containerRefId, referenceBuffer);
         }
 
         CramSliceHeader sliceHeader;
@@ -1125,11 +1204,9 @@ struct CramWriter::Impl
         // The MD5 of the reference bases of a slice on one reference (zero where the slice
         // reaches past the end of the reference: no check).
         if (ReferenceBased() && (containerRefId >= 0) && (maxEnd > minPos)) {
-            const std::string_view reference{
-                config.ReferenceSequences[static_cast<std::size_t>(containerRefId)]};
-            if (std::cmp_less_equal(maxEnd, std::size(reference))) {
-                sliceHeader.RefMd5 = detail::ComputeUppercaseMd5(reference.substr(
-                    static_cast<std::size_t>(minPos), static_cast<std::size_t>(maxEnd - minPos)));
+            if (maxEnd <= reference->Length(containerRefId)) {
+                sliceHeader.RefMd5 = ReferenceMd5(*reference, containerRefId, minPos,
+                                                  maxEnd - minPos, referenceBuffer);
             }
         }
 
@@ -1391,7 +1468,8 @@ struct CramWriter::Impl
     }
 
     void EncodeRecord(const BamRecord& record, const RecordTagData& recordTagData,
-                      CramExternalBlockStore& extStore, std::int32_t containerRefId) const
+                      CramExternalBlockStore& extStore, std::int32_t containerRefId,
+                      std::string& referenceBuffer) const
     {
         const auto seq = record.Sequence();
         const auto readLength = static_cast<std::int32_t>(std::size(seq));
@@ -1428,8 +1506,19 @@ struct CramWriter::Impl
 
         if (!isUnmapped) {
             // The features go to their own external blocks, so FN can follow them.
-            const std::string_view reference{ReferenceOf(record)};
-            const bool againstReference{!std::empty(reference)};
+            // The reference bases under the alignment (fewer past the end of the reference),
+            // from windowStart.
+            const bool againstReference{HasReference(record)};
+            std::string_view window;
+            std::int64_t windowStart{0};
+            if (againstReference) {
+                const std::int64_t length{reference->Length(record.RefId())};
+                windowStart = std::clamp<std::int64_t>(record.Pos(), 0, length);
+                const std::int64_t windowEnd{std::clamp<std::int64_t>(
+                    record.Pos() + ReferenceSpan(record), windowStart, length)};
+                window = reference->Bases(record.RefId(), windowStart, windowEnd - windowStart,
+                                          referenceBuffer);
+            }
             std::int32_t numFeatures = 0;
             std::int32_t readPos = 1;
             std::int32_t seqOffset = 0;
@@ -1452,9 +1541,9 @@ struct CramWriter::Impl
                         if (!std::empty(data)) {
                             basesCovered += static_cast<std::int32_t>(std::size(data));
                             if (againstReference) {
-                                WriteBasesAgainstReference(extStore, data, reference, refPos,
-                                                           readPos, previousFeaturePos,
-                                                           numFeatures);
+                                WriteBasesAgainstReference(extStore, data, window,
+                                                           refPos - windowStart, readPos,
+                                                           previousFeaturePos, numFeatures);
                             } else {
                                 WriteFeatureHeader(extStore, 'b', readPos, previousFeaturePos);
                                 WriteByteArrayLen(extStore, BB_BLOCK_ID, data);
@@ -1648,6 +1737,13 @@ void CramWriter::WriteContainer(CramEncodedContainer container)
 std::string CramReferenceMd5(const std::string_view sequence)
 {
     return detail::Md5DigestToHex(detail::ComputeUppercaseMd5(sequence));
+}
+
+std::string CramReferenceMd5(const CramReference& reference, const std::int32_t refId)
+{
+    std::string buffer;
+    return detail::Md5DigestToHex(
+        ReferenceMd5(reference, refId, 0, reference.Length(refId), buffer));
 }
 
 }  // namespace Samoa

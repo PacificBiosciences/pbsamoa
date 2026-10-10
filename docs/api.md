@@ -343,6 +343,7 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `CompressionLevel`             | `optional<int>`                                  | `{}`    | Optional gzip compression level (`[0,12]`)                        |
 | `UseTempFile`                  | `bool`                                           | `false` | Write to a temporary path and rename atomically on `Close()`      |
 | `ReferenceSequences`           | `vector<string_view>`                            | `{}`    | The sequence of each @SQ line: reference-based CRAM (see below)   |
+| `Reference`                    | `shared_ptr<const CramReference>`                | `{}`    | The reference in windows, in place of `ReferenceSequences`        |
 
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
@@ -358,6 +359,13 @@ says `RR`, each single-reference slice carries the MD5 of its reference bases, a
 without `M5` get one (`CramReferenceMd5(sequence)`: the MD5 of the bases in upper case). Readers
 need the reference (`CramReaderConfig::ReferencePath`, `samtools view -T`). As with every CRAM,
 readers give `M` for `=` and `X`, and htslib adds `MD` unless `decode_md=0`.
+
+`Reference` gives the same file without the text of the whole reference in memory: a
+`CramReference` gives the number of sequences, their lengths, and the bases of a window
+(`Bases(refId, start, length, buffer)`, called from several threads; the result can be a view of
+`buffer`). The writer asks for the bases under each mapped record and of each single-reference
+slice. `CramReferenceMd5(reference, refId)` gives the M5 from windows of 64 KiB. Set
+`ReferenceSequences` or `Reference`, not both.
 
 ### Encoding containers on several threads
 

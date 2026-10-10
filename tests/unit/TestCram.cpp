@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -3195,6 +3196,129 @@ TEST_F(CramWriterReaderTest, ReferenceSequencesMustFitTheHeader)
     const std::string shorter{reference.substr(0, 999)};
     shortReference.ReferenceSequences = {shorter};
     EXPECT_THROW((CramWriter{tmpPath, MakeMinimalHeader(), shortReference}), std::runtime_error);
+}
+
+namespace {
+
+// A reference that copies each window into the buffer, as from a packed form, and counts the
+// requests outside a sequence.
+class CopyingReference final : public CramReference
+{
+public:
+    explicit CopyingReference(std::vector<std::string> sequences) : sequences_{std::move(sequences)}
+    {
+    }
+
+    std::int32_t NumSequences() const override
+    {
+        return static_cast<std::int32_t>(std::size(sequences_));
+    }
+
+    std::int64_t Length(const std::int32_t refId) const override
+    {
+        return std::ssize(sequences_.at(static_cast<std::size_t>(refId)));
+    }
+
+    std::string_view Bases(const std::int32_t refId, const std::int64_t start,
+                           const std::int64_t length, std::string& buffer) const override
+    {
+        const std::string& sequence{sequences_.at(static_cast<std::size_t>(refId))};
+        if ((start < 0) || (length < 0) || ((start + length) > std::ssize(sequence))) {
+            ++outside_;
+            return {};
+        }
+        buffer.assign(sequence, static_cast<std::size_t>(start), static_cast<std::size_t>(length));
+        return buffer;
+    }
+
+    std::int32_t Outside() const { return outside_; }
+
+private:
+    std::vector<std::string> sequences_;
+    mutable std::atomic<std::int32_t> outside_{0};
+};
+
+}  // namespace
+
+TEST_F(CramWriterReaderTest, WindowedReferenceGivesTheSameFile)
+{
+    const std::string first{MakeTestReference()};
+    std::string second{Uppercase(first)};
+    std::ranges::reverse(second);
+    SamHeader header = MakeMinimalHeader();
+    header.AddReferenceSequence(ReferenceSequence{"ref2", TEST_REFERENCE_LENGTH});
+
+    // a slice on both references, with a record past the end; then sorted slices on one
+    // reference (the slice MD5), with a deletion and a lowercase stretch
+    std::vector<BamRecord> records;
+    records.push_back(
+        MakeAlignedRecord("first", 0, 10, {{CigarOpType::M, 40}}, Uppercase(first.substr(10, 40))));
+    records.push_back(
+        MakeAlignedRecord("second", 1, 20, {{CigarOpType::M, 40}}, second.substr(20, 40)));
+    records.push_back(MakeAlignedRecord("past_end", 1, 990, {{CigarOpType::M, 20}},
+                                        second.substr(990, 10) + "ACGTACGTAC"));
+    records.push_back(MakeUnmappedRecord("unmapped", "ACGTN"));
+    for (std::int32_t i = 0; i < 12; ++i) {
+        const std::int32_t pos{140 + (i * 20)};
+        std::string seq{Uppercase(first.substr(pos, 30)) + Uppercase(first.substr(pos + 33, 20))};
+        seq[i] = OtherBase(seq[i]);
+        records.push_back(MakeAlignedRecord(
+            std::format("sorted{}", i), 0, pos,
+            {{CigarOpType::M, 30}, {CigarOpType::D, 3}, {CigarOpType::M, 20}}, std::move(seq)));
+    }
+    const std::span<const BamRecord> all{records};
+
+    const auto write = [&](const std::filesystem::path& path, const CramWriterConfig& config) {
+        CramWriter writer{path, header, config};
+        writer.WriteContainer(writer.EncodeContainer(all.first(4)));
+        for (const BamRecord& record : all.subspan(4)) {
+            writer.Write(record);
+        }
+    };
+    CramWriterConfig text;
+    text.ReferenceSequences = {first, second};
+    text.RecordsPerSlice = 5;
+    text.WriteCrai = true;
+    CramWriterConfig windows{text};
+    windows.ReferenceSequences.clear();
+    const auto reference =
+        std::make_shared<const CopyingReference>(std::vector<std::string>{first, second});
+    windows.Reference = reference;
+
+    const std::filesystem::path textPath{tmpPath.parent_path() / "text.cram"};
+    write(textPath, text);
+    write(tmpPath, windows);
+    EXPECT_EQ(reference->Outside(), 0);
+
+    const auto bytes = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, {}};
+    };
+    EXPECT_EQ(bytes(tmpPath), bytes(textPath));
+    EXPECT_EQ(bytes(tmpCraiPath), bytes(DefaultCraiPathFor(textPath)));
+
+    const std::filesystem::path fasta{tmpPath.parent_path() / "refs.fa"};
+    WriteFasta(fasta, {{"ref", first}, {"ref2", second}});
+    ExpectSameRecords(records, ReadAll(tmpPath, fasta));
+
+    CramWriterConfig both{text};
+    both.Reference = reference;
+    EXPECT_THROW((CramWriter{tmpPath.parent_path() / "both.cram", header, both}),
+                 std::runtime_error);
+}
+
+TEST(CramReferenceMd5, WindowsGiveTheMd5OfTheText)
+{
+    // 40 windows of 64 KiB, with lowercase bases
+    std::string bases{PseudoRandomBases((5 << 20) / 2)};
+    for (std::size_t i = 0; i < std::size(bases); i += 7) {
+        bases[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(bases[i])));
+    }
+    const CopyingReference reference{{bases, "", "acgtn"}};
+    EXPECT_EQ(CramReferenceMd5(reference, 0), CramReferenceMd5(bases));
+    EXPECT_EQ(CramReferenceMd5(reference, 1), CramReferenceMd5(""));
+    EXPECT_EQ(CramReferenceMd5(reference, 2), CramReferenceMd5("ACGTN"));
+    EXPECT_EQ(reference.Outside(), 0);
 }
 
 }  // namespace Samoa

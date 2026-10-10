@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -200,9 +201,11 @@ std::string Md5Hex(std::span<const std::byte> data) { return Md5DigestToHex(Comp
 
 std::string Md5Hex(std::string_view text) { return Md5Hex(std::as_bytes(std::span{text})); }
 
-std::array<std::byte, 16> ComputeUppercaseMd5(const std::string_view bases)
+namespace {
+
+// Adds the bases in upper case to an MD5.
+void UpdateUppercase(Md5Context& context, const std::string_view bases)
 {
-    Md5Context context;
     std::array<std::uint8_t, 4096> chunk{};
     for (std::size_t offset{0}; offset < std::size(bases); offset += std::size(chunk)) {
         const std::size_t n{std::min(std::size(chunk), std::size(bases) - offset)};
@@ -211,6 +214,23 @@ std::array<std::byte, 16> ComputeUppercaseMd5(const std::string_view bases)
             chunk[i] = ((c >= 'a') && (c <= 'z')) ? (c - ('a' - 'A')) : c;
         }
         context.Update(std::span<const std::uint8_t>{chunk}.first(n));
+    }
+}
+
+}  // namespace
+
+std::array<std::byte, 16> ComputeUppercaseMd5(const std::string_view bases)
+{
+    Md5Context context;
+    UpdateUppercase(context, bases);
+    return context.Final();
+}
+
+std::array<std::byte, 16> ComputeUppercaseMd5(const std::function<std::string_view()>& nextPart)
+{
+    Md5Context context;
+    for (std::string_view part{nextPart()}; !std::empty(part); part = nextPart()) {
+        UpdateUppercase(context, part);
     }
     return context.Final();
 }
