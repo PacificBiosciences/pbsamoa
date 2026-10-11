@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <filesystem>
 #include <format>
 #include <ranges>
@@ -56,12 +57,12 @@ protected:
         tmpPath = tempDir_.File("output.bam");
     }
 
-    static SamHeader MakeMinimalHeader()
+    static SamHeader MakeMinimalHeader(const std::int32_t referenceLength = 1000)
     {
         SamHeader header;
         header.SetVersion("1.6");
         header.SetSortOrder("unknown");
-        header.AddReferenceSequence(ReferenceSequence{"ref", 1000});
+        header.AddReferenceSequence(ReferenceSequence{"ref", referenceLength});
         return header;
     }
 
@@ -175,7 +176,7 @@ TEST_F(BamWriterTest, WriteMultipleRecords)
 
 TEST_F(BamWriterTest, EncodedRecordsMatchBamWriterRecords)
 {
-    const SamHeader header = MakeMinimalHeader();
+    const SamHeader header = MakeMinimalHeader(1000000);
     const std::filesystem::path expectedPath{tempDir_.File("expected.bam")};
     {
         BamWriter writer{expectedPath, header};
@@ -189,7 +190,22 @@ TEST_F(BamWriterTest, EncodedRecordsMatchBamWriterRecords)
             BgzfBlockEncoder encoder{};
             for (int i{0}; i < 5; ++i) {
                 BamRecord rec = MakeTestRecord();
-                rec.Name(std::format("read{}", (batch * 5) + i));
+                static constexpr std::array<std::uint32_t, 5> LENGTHS{0, 1, 32768, 65536, 70000};
+                const std::uint32_t length{LENGTHS[i]};
+                rec.Name(std::format("read{}", (batch * 5) + i))
+                    .Sequence(std::string(length, 'A'))
+                    .Qualities({});
+                if (batch == 0) {
+                    rec.Cigar(length == 0U ? std::vector<CigarOp>{}
+                                           : std::vector<CigarOp>{CigarOp{CigarOpType::M, length}})
+                        .Qualities(std::vector<std::uint8_t>(length, 30));
+                } else {
+                    rec.Cigar(std::vector<CigarOp>(length, CigarOp{CigarOpType::M, 1}));
+                }
+                TagMap tags;
+                tags.Set(TagKey{'z', 'z'}, std::string(1000, 'x'));
+                tags.Set(TagKey{'a', 'c'}, std::int64_t{42});
+                rec.Tags(std::move(tags));
                 writer.Write(rec);
                 EncodeBamRecord(rec, encoder);
             }

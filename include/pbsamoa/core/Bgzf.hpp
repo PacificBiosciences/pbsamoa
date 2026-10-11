@@ -324,6 +324,12 @@ public:
     /// \brief Append uncompressed bytes. Each full block is compressed at once.
     void Write(std::span<const std::byte> data);
 
+    /// \brief Fill uncompressed bytes in the block buffer when they fit.
+    /// \param[in] size Number of bytes to append.
+    /// \param[in] fill Callback that writes all bytes in the supplied span.
+    /// If the callback throws, no bytes are appended.
+    void Write(std::size_t size, const std::function<void(std::span<std::byte>)>& fill);
+
     /// \brief Compress the remaining bytes into a last, partly filled block.
     void Finish();
 

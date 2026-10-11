@@ -441,6 +441,40 @@ TEST(BgzfBlockEncoderTest, FinishWithoutDataEmitsNothing)
     }
 }
 
+TEST(BgzfBlockEncoderTest, FilledBytesMatchCopiedBytesAcrossBlockBoundaries)
+{
+    for (const int level : {0, 6}) {
+        BgzfBlockEncoder expected{level};
+        BgzfBlockEncoder actual{level};
+        for (const std::size_t size : {0U, 1U, 65279U, 65280U, 65281U, 200000U, 31U}) {
+            SCOPED_TRACE(size);
+            std::vector<std::byte> data(size);
+            for (std::size_t i{0}; i < size; ++i) {
+                data[i] = static_cast<std::byte>(i & 0xFFU);
+            }
+            EXPECT_THROW(actual.Write(size,
+                                      [](std::span<std::byte> destination) {
+                                          if (!std::empty(destination)) {
+                                              destination[0] = std::byte{42};
+                                          }
+                                          throw std::runtime_error{"fill failed"};
+                                      }),
+                         std::runtime_error);
+            expected.Write(data);
+            actual.Write(size, [&](std::span<std::byte> destination) {
+                EXPECT_EQ(std::size(destination), size);
+                std::ranges::copy(data, std::ranges::begin(destination));
+            });
+            const std::span<const std::byte> tail{data.data(), std::min(size, std::size_t{17})};
+            expected.Write(tail);
+            actual.Write(tail);
+        }
+        expected.Finish();
+        actual.Finish();
+        EXPECT_EQ(actual.TakeBlocks(), expected.TakeBlocks());
+    }
+}
+
 TEST_F(BgzfBlockWriterTest, BlocksFromSeveralEncodersReadBackInWriteOrder)
 {
     std::vector<std::byte> expected{};

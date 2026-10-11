@@ -5,6 +5,7 @@
 #include <pbsamoa/core/CigarClipping.hpp>
 #include <pbsamoa/core/Sequence.hpp>
 #include <pbsamoa/core/TagClipping.hpp>
+#include <pbsamoa/io/BamWriter.hpp>
 
 #include <algorithm>
 #include <charconv>
@@ -62,6 +63,131 @@ std::uint16_t ComputeBamBin(std::int32_t pos, CigarView cigar, bool isMapped)
 
     const std::int32_t referenceEnd{static_cast<std::int32_t>(pos + ReferenceLength(cigar))};
     return Reg2Bin(pos, NonEmptyAlignmentEnd(pos, referenceEnd));
+}
+
+template <typename RESERVE>
+void SerializeBamRecord(const BamRecord& record, const RESERVE& reserve)
+{
+    // Compute variable-length field sizes
+    if (std::size(record.Name()) > 254) {
+        throw std::invalid_argument{
+            "BamRecord::SerializeToBam: read name exceeds "
+            "BAM limit of 254 characters"};
+    }
+    // An empty QNAME is written as the placeholder "*" (htslib bam_set1, sam.c:534-538).
+    const std::string_view effectiveName{
+        std::empty(record.Name()) ? std::string_view{"*"} : std::string_view{record.Name()}};
+    const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(effectiveName) + 1)};  // +NUL
+
+    // A CIGAR with >65535 ops cannot fit n_cigar_op; BAM stores a 2-op 'kSmN' placeholder
+    // and the real ops in a CG:B,I tag (SAMv1 §4.2.2), matching htslib.
+    const std::size_t realOpCount{std::size(record.Cigar())};
+    const bool longCigar{realOpCount > std::numeric_limits<std::uint16_t>::max()};
+    const std::int64_t cigRefLen{ReferenceLength(record.Cigar())};
+    if (longCigar && (cigRefLen >= (std::int64_t{1} << 28))) {
+        // The placeholder's N op length is the reference span, which must fit the 28-bit
+        // CIGAR field; htslib falls back to SAM/CRAM when it does not.
+        throw std::invalid_argument{
+            "BamRecord::SerializeToBam: CIGAR reference span too large for the CG-tag "
+            "long-CIGAR encoding; write SAM or CRAM instead"};
+    }
+    const std::uint16_t nCigarOp{longCigar ? std::uint16_t{2}
+                                           : static_cast<std::uint16_t>(realOpCount)};
+    const std::uint32_t seqLen{static_cast<std::uint32_t>(std::size(record.Sequence()))};
+    if (!std::empty(record.Qualities()) && (std::size(record.Qualities()) != seqLen)) {
+        throw std::invalid_argument{
+            std::format("BamRecord::SerializeToBam: quality length ({}) != "
+                        "sequence length ({})",
+                        std::size(record.Qualities()), seqLen)};
+    }
+    const std::uint32_t packedSeqLen{(seqLen + 1) / 2};
+
+    // Compute bin
+    const std::uint16_t bin{ComputeBamBin(record.Pos(), record.Cigar(), record.IsMapped())};
+
+    // Compute tag size without allocating
+    const std::size_t tagSize{SerializedBamSize(record.Tags())};
+
+    // CG spillover: 'C','G','B','I' (4) + uint32 count (4) + 4 bytes per real op.
+    const std::size_t cgTagBytes{longCigar ? (8U + 4U * realOpCount) : 0U};
+
+    // Total size: 32 (fixed) + nameLen + 4*nCigarOp + packedSeqLen + seqLen + tagSize + CG tag
+    const std::size_t totalSize{32U + nameLen + 4U * nCigarOp + packedSeqLen + seqLen + tagSize +
+                                cgTagBytes};
+
+    reserve(totalSize, [&](std::byte* p) {
+        // Fixed fields (32 bytes)
+        WriteLE(p + 0, record.RefId());
+        WriteLE(p + 4, record.Pos());
+        p[8] = static_cast<std::byte>(nameLen);
+        p[9] = static_cast<std::byte>(record.MapQ());
+        WriteLE(p + 10, bin);
+        WriteLE(p + 12, nCigarOp);
+        WriteLE(p + 14, record.Flag());
+        WriteLE(p + 16, seqLen);
+        WriteLE(p + 20, record.NextRefId());
+        WriteLE(p + 24, record.NextPos());
+        WriteLE(p + 28, record.Tlen());
+
+        std::size_t offset{32};
+
+        // Read name (NUL-terminated)
+        std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(effectiveName)),
+                            std::size(effectiveName), p + offset);
+        p[offset + std::size(effectiveName)] = std::byte{0};
+        offset += nameLen;
+
+        // CIGAR (array of uint32). A long CIGAR writes the 2-op 'kSmN' placeholder here; the
+        // real ops follow in a CG tag appended after the regular tags.
+        if (longCigar) {
+            WriteLE(p + offset, (seqLen << 4U) | std::to_underlying(CigarOpType::S));
+            offset += 4;
+            WriteLE(p + offset, (static_cast<std::uint32_t>(cigRefLen) << 4U) |
+                                    std::to_underlying(CigarOpType::N));
+            offset += 4;
+        } else {
+            for (const CigarOp& op : record.Cigar()) {
+                WriteLE(p + offset, op.RawValue());
+                offset += 4;
+            }
+        }
+
+        // Packed sequence (write directly into result buffer)
+        if (seqLen > 0) {
+            PackSequenceInto(record.Sequence(), p + offset);
+        }
+        offset += packedSeqLen;
+
+        // Quality scores
+        if (!std::empty(record.Qualities())) {
+            std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(record.Qualities())),
+                                seqLen, p + offset);
+        } else if (seqLen > 0) {
+            // Missing quality: fill with 0xFF
+            std::ranges::fill_n(p + offset, seqLen, std::byte{0xFF});
+        }
+        offset += seqLen;
+
+        // Tags (write directly into result buffer)
+        if (tagSize > 0) {
+            AppendTagsToBam(record.Tags(), p + offset);
+        }
+        offset += tagSize;
+
+        // CG tag carrying the real long CIGAR as a B:I array of packed ops.
+        if (longCigar) {
+            p[offset + 0] = std::byte{'C'};
+            p[offset + 1] = std::byte{'G'};
+            p[offset + 2] = std::byte{'B'};
+            p[offset + 3] = std::byte{'I'};
+            WriteLE(p + offset + 4, static_cast<std::uint32_t>(realOpCount));
+            offset += 8;
+            for (const CigarOp& op : record.Cigar()) {
+                WriteLE(p + offset, op.RawValue());
+                offset += 4;
+            }
+        }
+    });
 }
 
 }  // namespace
@@ -273,129 +399,27 @@ BamRecord& BamRecord::Map(std::int32_t refId, std::int32_t pos, bool reverse,
 
 std::vector<std::byte> BamRecord::SerializeToBam() const
 {
-    // Compute variable-length field sizes
-    if (std::size(name_) > 254) {
-        throw std::invalid_argument{
-            "BamRecord::SerializeToBam: read name exceeds "
-            "BAM limit of 254 characters"};
-    }
-    // An empty QNAME is written as the placeholder "*" (htslib bam_set1, sam.c:534-538).
-    const std::string_view effectiveName{std::empty(name_) ? std::string_view{"*"}
-                                                           : std::string_view{name_}};
-    const std::uint8_t nameLen{static_cast<std::uint8_t>(std::size(effectiveName) + 1)};  // +NUL
-
-    // A CIGAR with >65535 ops cannot fit n_cigar_op; BAM stores a 2-op 'kSmN' placeholder
-    // and the real ops in a CG:B,I tag (SAMv1 §4.2.2), matching htslib.
-    const std::size_t realOpCount{std::size(cigar_)};
-    const bool longCigar{realOpCount > std::numeric_limits<std::uint16_t>::max()};
-    const std::int64_t cigRefLen{ReferenceLength(cigar_)};
-    if (longCigar && (cigRefLen >= (std::int64_t{1} << 28))) {
-        // The placeholder's N op length is the reference span, which must fit the 28-bit
-        // CIGAR field; htslib falls back to SAM/CRAM when it does not.
-        throw std::invalid_argument{
-            "BamRecord::SerializeToBam: CIGAR reference span too large for the CG-tag "
-            "long-CIGAR encoding; write SAM or CRAM instead"};
-    }
-    const std::uint16_t nCigarOp{longCigar ? std::uint16_t{2}
-                                           : static_cast<std::uint16_t>(realOpCount)};
-    const std::uint32_t seqLen{static_cast<std::uint32_t>(std::size(sequence_))};
-    if (!std::empty(qualities_) && (std::size(qualities_) != seqLen)) {
-        throw std::invalid_argument{
-            std::format("BamRecord::SerializeToBam: quality length ({}) != "
-                        "sequence length ({})",
-                        std::size(qualities_), seqLen)};
-    }
-    const std::uint32_t packedSeqLen{(seqLen + 1) / 2};
-
-    // Compute bin
-    const std::uint16_t bin{ComputeBamBin(pos_, cigar_, IsMapped())};
-
-    // Compute tag size without allocating
-    const std::size_t tagSize{SerializedBamSize(tags_)};
-
-    // CG spillover: 'C','G','B','I' (4) + uint32 count (4) + 4 bytes per real op.
-    const std::size_t cgTagBytes{longCigar ? (8U + 4U * realOpCount) : 0U};
-
-    // Total size: 32 (fixed) + nameLen + 4*nCigarOp + packedSeqLen + seqLen + tagSize + CG tag
-    const std::size_t totalSize{32U + nameLen + 4U * nCigarOp + packedSeqLen + seqLen + tagSize +
-                                cgTagBytes};
-
-    std::vector<std::byte> result(totalSize);
-    std::byte* p{std::data(result)};
-
-    // Fixed fields (32 bytes)
-    WriteLE(p + 0, refId_);
-    WriteLE(p + 4, pos_);
-    p[8] = static_cast<std::byte>(nameLen);
-    p[9] = static_cast<std::byte>(mapQ_);
-    WriteLE(p + 10, bin);
-    WriteLE(p + 12, nCigarOp);
-    WriteLE(p + 14, flag_);
-    WriteLE(p + 16, seqLen);
-    WriteLE(p + 20, nextRefId_);
-    WriteLE(p + 24, nextPos_);
-    WriteLE(p + 28, tlen_);
-
-    std::size_t offset{32};
-
-    // Read name (NUL-terminated)
-    std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(effectiveName)),
-                        std::size(effectiveName), p + offset);
-    p[offset + std::size(effectiveName)] = std::byte{0};
-    offset += nameLen;
-
-    // CIGAR (array of uint32). A long CIGAR writes the 2-op 'kSmN' placeholder here; the
-    // real ops follow in a CG tag appended after the regular tags.
-    if (longCigar) {
-        WriteLE(p + offset, (seqLen << 4U) | std::to_underlying(CigarOpType::S));
-        offset += 4;
-        WriteLE(p + offset,
-                (static_cast<std::uint32_t>(cigRefLen) << 4U) | std::to_underlying(CigarOpType::N));
-        offset += 4;
-    } else {
-        for (const CigarOp& op : cigar_) {
-            WriteLE(p + offset, op.RawValue());
-            offset += 4;
-        }
-    }
-
-    // Packed sequence (write directly into result buffer)
-    if (seqLen > 0) {
-        PackSequenceInto(sequence_, p + offset);
-    }
-    offset += packedSeqLen;
-
-    // Quality scores
-    if (!std::empty(qualities_)) {
-        std::ranges::copy_n(reinterpret_cast<const std::byte*>(std::data(qualities_)), seqLen,
-                            p + offset);
-    } else if (seqLen > 0) {
-        // Missing quality: fill with 0xFF
-        std::ranges::fill_n(p + offset, seqLen, std::byte{0xFF});
-    }
-    offset += seqLen;
-
-    // Tags (write directly into result buffer)
-    if (tagSize > 0) {
-        AppendTagsToBam(tags_, p + offset);
-    }
-    offset += tagSize;
-
-    // CG tag carrying the real long CIGAR as a B:I array of packed ops.
-    if (longCigar) {
-        p[offset + 0] = std::byte{'C'};
-        p[offset + 1] = std::byte{'G'};
-        p[offset + 2] = std::byte{'B'};
-        p[offset + 3] = std::byte{'I'};
-        WriteLE(p + offset + 4, static_cast<std::uint32_t>(realOpCount));
-        offset += 8;
-        for (const CigarOp& op : cigar_) {
-            WriteLE(p + offset, op.RawValue());
-            offset += 4;
-        }
-    }
-
+    std::vector<std::byte> result;
+    SerializeBamRecord(*this, [&](const std::size_t size, const auto& fill) {
+        result.resize(size);
+        fill(std::data(result));
+    });
     return result;
+}
+
+void EncodeBamRecord(const BamRecord& record, BgzfBlockEncoder& encoder)
+{
+    SerializeBamRecord(record, [&](const std::size_t size, const auto& fill) {
+        if (size > std::size_t{std::numeric_limits<std::int32_t>::max()}) {
+            throw std::invalid_argument{std::format(
+                "BamWriter::Write: raw record size ({}) exceeds BAM block_size limit", size)};
+        }
+        const std::uint32_t blockSize = size;
+        encoder.Write(size + 4U, [&](std::span<std::byte> destination) {
+            WriteLE(std::data(destination), blockSize);
+            fill(std::data(destination) + 4U);
+        });
+    });
 }
 
 // --- clipping ---

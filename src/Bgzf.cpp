@@ -1512,7 +1512,9 @@ struct BgzfBlockEncoder::Impl
     std::unique_ptr<detail::IsalEncoder> isal;
 #endif
     detail::CompressorPtr compressor;
-    std::vector<std::byte> pending;
+    std::array<std::byte, MAX_UNCOMPRESSED_SIZE> pending;
+    std::size_t numPending{0};
+    std::vector<std::byte> recordBuffer;
     std::vector<std::byte> blocks;
 
     explicit Impl(const int compressionLevel)
@@ -1524,7 +1526,6 @@ struct BgzfBlockEncoder::Impl
         if (!compressor) {
             throw std::runtime_error{"BgzfBlockEncoder: libdeflate_alloc_compressor failed"};
         }
-        pending.reserve(MAX_UNCOMPRESSED_SIZE);
 #ifdef PBSAMOA_HAVE_ISAL
         if (compressionLevel == 0) {
             isal = std::make_unique<detail::IsalEncoder>();
@@ -1534,6 +1535,7 @@ struct BgzfBlockEncoder::Impl
 
     void CompressPending()
     {
+        const std::span<std::byte> payload{std::span{pending}.first(numPending)};
         constexpr std::size_t FRAME_SIZE{BGZF_HEADER_SIZE + GZIP_TRAILER_SIZE};
         const std::size_t start{std::size(blocks)};
         blocks.resize(start + BGZF_MAX_BLOCK_SIZE);
@@ -1542,13 +1544,13 @@ struct BgzfBlockEncoder::Impl
 #ifdef PBSAMOA_HAVE_ISAL
         if (isal) {
             compressedSize = isal->Compress(
-                pending, std::span{block + BGZF_HEADER_SIZE, BGZF_MAX_BLOCK_SIZE - FRAME_SIZE});
+                payload, std::span{block + BGZF_HEADER_SIZE, BGZF_MAX_BLOCK_SIZE - FRAME_SIZE});
         }
 #endif
         // Both codecs fit a full payload; libdeflate also covers an ISA-L error.
         if (compressedSize == 0U) {
             compressedSize = libdeflate_deflate_compress(
-                compressor.get(), std::data(pending), std::size(pending), block + BGZF_HEADER_SIZE,
+                compressor.get(), std::data(payload), std::size(payload), block + BGZF_HEADER_SIZE,
                 BGZF_MAX_BLOCK_SIZE - FRAME_SIZE);
         }
         if (compressedSize == 0U) {
@@ -1560,10 +1562,10 @@ struct BgzfBlockEncoder::Impl
         std::ranges::copy(std::as_bytes(std::span{frameHeader}), block);
         std::byte* const trailer{block + BGZF_HEADER_SIZE + compressedSize};
         WriteLE<std::uint32_t>(trailer,
-                               libdeflate_crc32(0, std::data(pending), std::size(pending)));
-        WriteLE<std::uint32_t>(trailer + 4U, std::size(pending));
+                               libdeflate_crc32(0, std::data(payload), std::size(payload)));
+        WriteLE<std::uint32_t>(trailer + 4U, std::size(payload));
         blocks.resize(start + blockSize);
-        pending.clear();
+        numPending = 0;
     }
 };
 
@@ -1580,19 +1582,36 @@ void BgzfBlockEncoder::Write(std::span<const std::byte> data)
 {
     while (!std::empty(data)) {
         const std::size_t n{
-            std::ranges::min(MAX_UNCOMPRESSED_SIZE - std::size(impl_->pending), std::size(data))};
-        impl_->pending.insert(std::end(impl_->pending), std::begin(data),
-                              std::begin(data) + static_cast<std::ptrdiff_t>(n));
+            std::ranges::min(MAX_UNCOMPRESSED_SIZE - impl_->numPending, std::size(data))};
+        std::ranges::copy(data.first(n), std::data(impl_->pending) + impl_->numPending);
+        impl_->numPending += n;
         data = data.subspan(n);
-        if (std::size(impl_->pending) == MAX_UNCOMPRESSED_SIZE) {
+        if (impl_->numPending == MAX_UNCOMPRESSED_SIZE) {
             impl_->CompressPending();
         }
     }
 }
 
+void BgzfBlockEncoder::Write(const std::size_t size,
+                             const std::function<void(std::span<std::byte>)>& fill)
+{
+    if (size <= MAX_UNCOMPRESSED_SIZE - impl_->numPending) {
+        fill(std::span{impl_->pending}.subspan(impl_->numPending, size));
+        impl_->numPending += size;
+        if (impl_->numPending == MAX_UNCOMPRESSED_SIZE) {
+            impl_->CompressPending();
+        }
+    } else {
+        // A record can cross a block boundary or exceed one block.
+        impl_->recordBuffer.resize(size);
+        fill(impl_->recordBuffer);
+        Write(impl_->recordBuffer);
+    }
+}
+
 void BgzfBlockEncoder::Finish()
 {
-    if (!std::empty(impl_->pending)) {
+    if (impl_->numPending > 0U) {
         impl_->CompressPending();
     }
 }

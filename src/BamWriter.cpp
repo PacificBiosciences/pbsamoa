@@ -177,12 +177,5 @@ WriterMetrics BamWriter::GetMetrics() const
 
 VirtualOffset BamWriter::EndVirtualOffset() const { return impl_->bgzf.EndVirtualOffset(); }
 
-void EncodeBamRecord(const BamRecord& record, BgzfBlockEncoder& encoder)
-{
-    const std::vector<std::byte> serialized{record.SerializeToBam()};
-    encoder.Write(BlockSizePrefix(serialized));
-    encoder.Write(serialized);
-}
-
 }  // namespace Samoa
 }  // namespace PacBio
