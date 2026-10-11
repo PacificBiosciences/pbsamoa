@@ -3008,6 +3008,24 @@ void ExpectSameRecords(const std::vector<BamRecord>& expected,
 
 }  // namespace
 
+TEST(Md5, GivesTheDigestsOfTheRfc1321TestSuite)
+{
+    for (const auto& [text, digest] : {
+             std::pair{"", "d41d8cd98f00b204e9800998ecf8427e"},
+             std::pair{"a", "0cc175b9c0f1b6a831c399e269772661"},
+             std::pair{"abc", "900150983cd24fb0d6963f7d28e17f72"},
+             std::pair{"message digest", "f96b697d7cb7938d525a2f31aaf161d0"},
+             std::pair{"abcdefghijklmnopqrstuvwxyz", "c3fcd3d76192e4007dfb496cca67e13b"},
+             std::pair{"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                       "d174ab98d277d9f5a5611c2c9f419d9f"},
+             std::pair{"1234567890123456789012345678901234567890123456789012345678901234567890"
+                       "1234567890",
+                       "57edf4a22be3c955ac49da2e2107b67a"},
+         }) {
+        EXPECT_EQ(detail::Md5Hex(std::string_view{text}), digest) << text;
+    }
+}
+
 TEST(CramReferenceMd5, IsTheMd5OfTheUppercaseBases)
 {
     EXPECT_EQ(CramReferenceMd5("acgT"), "f1f8f4bf413b16ad135722aa4591043e");
