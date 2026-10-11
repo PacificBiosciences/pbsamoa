@@ -4,6 +4,7 @@
 #include "PathUtils.hpp"
 
 #include <pbsamoa/core/Tags.hpp>
+#include <pbsamoa/cram/CramStructs.hpp>
 
 #include "LibdeflateUtils.hpp"
 
@@ -52,6 +53,8 @@ struct EncodedTagValuePayload
 
 EncodedTagValuePayload EncodeTagValueToBamPayload(const TagValue& value);
 TagValue DecodeTagValueFromBamPayload(char type, std::span<const std::byte> payload);
+
+void CompressRansQualityBlock(CramBlock& block);
 
 struct CramGzipDecompressorContext
 {

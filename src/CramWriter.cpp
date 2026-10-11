@@ -31,6 +31,8 @@
 #include <utility>
 #include <vector>
 
+#include <cstring>
+
 namespace PacBio {
 namespace Samoa {
 
@@ -362,6 +364,11 @@ void CompressDataBlock(CramBlock& block, CramBlockMethod method, bool useThreadL
                        std::span<const std::uint32_t> qualityRecordLengths,
                        std::span<const std::uint32_t> qualityRecordFlags)
 {
+    if ((method == CramBlockMethod::RANS4X16) &&
+        ((block.ContentId == QS_BLOCK_ID) || (block.ContentId == QQ_BLOCK_ID))) {
+        CompressRansQualityBlock(block);
+        return;
+    }
     if (method == CramBlockMethod::FQZCOMP &&
         (block.ContentId == QS_BLOCK_ID || block.ContentId == QQ_BLOCK_ID)) {
         CompressFqzDataBlock(block, totalQualityBytes, qualityRecordLengths, qualityRecordFlags);
@@ -531,6 +538,28 @@ std::int64_t ReferenceSpan(const BamRecord& record)
     return span;
 }
 
+namespace {
+
+constexpr std::int32_t REFERENCE_MATCH_BYTES{8};
+
+bool ReferenceWordMatches(const std::span<const std::byte> bases, const std::string_view reference,
+                          const std::int64_t refPos)
+{
+    if ((std::ssize(bases) < REFERENCE_MATCH_BYTES) || (refPos < 0) ||
+        (refPos > (std::ssize(reference) - REFERENCE_MATCH_BYTES))) {
+        return false;
+    }
+    std::uint64_t readWord{0};
+    std::uint64_t referenceWord{0};
+    std::memcpy(&readWord, bases.data(), REFERENCE_MATCH_BYTES);
+    std::memcpy(&referenceWord, reference.data() + refPos, REFERENCE_MATCH_BYTES);
+    // Lowercase reference bases require the scalar case conversion below.
+    constexpr std::uint64_t LOWERCASE_MASK{0x2020202020202020ULL};
+    return ((referenceWord & LOWERCASE_MASK) == 0) && (readWord == referenceWord);
+}
+
+}  // namespace
+
 // Writes the read features of the bases of an M, = or X operation against the reference: nothing
 // for a base equal to the reference, a substitution (X) where both bases are in ACGTN, else a run
 // of bases (b), e.g. for a base past the end of the reference or an IUPAC code.
@@ -552,8 +581,13 @@ void WriteBasesAgainstReference(CramExternalBlockStore& extStore, std::span<cons
     };
     const auto n = static_cast<std::int32_t>(std::size(bases));
     for (std::int32_t i = 0; i < n; ++i) {
-        const auto readBase = static_cast<char>(std::to_integer<std::uint8_t>(bases[i]));
         const std::int64_t r{refPos + i};
+        if (ReferenceWordMatches(bases.subspan(i), reference, r)) {
+            flushRun(i);
+            i += REFERENCE_MATCH_BYTES - 1;
+            continue;
+        }
+        const auto readBase = static_cast<char>(std::to_integer<std::uint8_t>(bases[i]));
         const bool onReference{(r >= 0) && (r < static_cast<std::int64_t>(std::size(reference)))};
         const char refBase{onReference ? UppercaseBase(reference[static_cast<std::size_t>(r)])
                                        : '\0'};

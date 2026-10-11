@@ -246,6 +246,23 @@ void WarmLibdeflateDispatch(libdeflate_decompressor* decompressor, std::span<con
 
 }  // namespace
 
+void CompressRansQualityBlock(CramBlock& block)
+{
+    constexpr std::string_view CONTEXT{"CompressRansQualityBlock"};
+    block.RawSize =
+        CheckedSizeCast<std::int32_t>(std::size(block.Data), CONTEXT, "input size too large");
+    block.Data = CheckedCompress<unsigned int>(
+        block.Data, CONTEXT,
+        [](unsigned char* input, unsigned int inputSize, unsigned int* outSize) {
+            // Order 0 and packing reduce quality encoding work without changing any byte.
+            return rans_compress_4x16(input, inputSize, outSize,
+                                      RANS_ORDER_SIMD_AUTO | RANS_ORDER_PACK);
+        });
+    block.CompressedSize = CheckedSizeCast<std::int32_t>(std::size(block.Data), CONTEXT,
+                                                         "compressed block size too large");
+    block.Method = CramBlockMethod::RANS4X16;
+}
+
 std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
                                            std::span<const std::uint32_t> recordLengths,
                                            std::span<const std::uint32_t> recordFlags)

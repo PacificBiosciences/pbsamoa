@@ -40,6 +40,12 @@
 
 #include "pack.h"
 
+#if defined(HAVE_AVX2) && defined(__GNUC__)
+uint64_t hts_pack_avx2_count_symbols(const uint8_t *data, uint64_t len, int *present);
+uint64_t hts_pack_avx2_symbols(const uint8_t *data, uint64_t len, uint8_t *out,
+                             const uint8_t *symbols, int n, int val_per_byte);
+#endif
+
 //-----------------------------------------------------------------------------
 
 /*
@@ -59,7 +65,12 @@ uint8_t *hts_pack(uint8_t *data, int64_t len,
     uint64_t i, j;
 
     // count syms
-    for (i = 0; i < len; i++)
+    i = 0;
+#if defined(HAVE_AVX2) && defined(__GNUC__)
+    if (len >= 256 && __builtin_cpu_supports("avx2"))
+        i = hts_pack_avx2_count_symbols(data, len, p);
+#endif
+    for (; i < len; i++)
         p[data[i]]=1;
     
     for (i = n = 0; i < 256; i++) {
@@ -91,11 +102,17 @@ uint8_t *hts_pack(uint8_t *data, int64_t len,
         val_per_byte = 0; // infinite
 
     *out_meta_len = j;
-    j = 0;
+    i = j = 0;
+#if defined(HAVE_AVX2) && defined(__GNUC__)
+    if (val_per_byte && len >= 256 && __builtin_cpu_supports("avx2")) {
+        i = hts_pack_avx2_symbols(data, len, out, out_meta + 1, n, val_per_byte);
+        j = i / val_per_byte;
+    }
+#endif
 
     switch (val_per_byte) {
     case 2:
-        for (i = 0; i < (len & ~1); i+=2)
+        for (; i < (len & ~1); i+=2)
             out[j++] = (p[data[i]]<<0) | (p[data[i+1]]<<4);
         switch (len-i) {
         case 1: out[j++] = p[data[i]];
@@ -104,7 +121,7 @@ uint8_t *hts_pack(uint8_t *data, int64_t len,
         return out;
 
     case 4: {
-        for (i = 0; i < (len & ~3); i+=4)
+        for (; i < (len & ~3); i+=4)
             out[j++] = (p[data[i]]<<0) | (p[data[i+1]]<<2) | (p[data[i+2]]<<4) | (p[data[i+3]]<<6);
         out[j] = 0;
         int s = len-i, x = 0;
@@ -119,7 +136,7 @@ uint8_t *hts_pack(uint8_t *data, int64_t len,
     }
 
     case 8: {
-        for (i = 0; i < (len & ~7); i+=8)
+        for (; i < (len & ~7); i+=8)
             out[j++] = (p[data[i+0]]<<0) | (p[data[i+1]]<<1) | (p[data[i+2]]<<2) | (p[data[i+3]]<<3)
                      | (p[data[i+4]]<<4) | (p[data[i+5]]<<5) | (p[data[i+6]]<<6) | (p[data[i+7]]<<7);
         out[j] = 0;

@@ -1319,6 +1319,57 @@ TEST(CramCompression, BlockCompressDecompressRans4x16)
     EXPECT_EQ(std::size(block.Data), 8u);
 }
 
+TEST(CramCompression, RansQualityBlocksPreserveEveryByteAcrossTheSimdThreshold)
+{
+    constexpr std::array<std::uint8_t, 5> QUALITIES{0, 10, 20, 93, 255};
+    for (const std::size_t size :
+         {0UZ, 1UZ, 7UZ, 31UZ, 1000UZ, 49'999UZ, 50'000UZ, 50'001UZ, 500'000UZ}) {
+        SCOPED_TRACE(size);
+        for (const bool smallAlphabet : {false, true}) {
+            SCOPED_TRACE(smallAlphabet);
+            CramBlock block;
+            block.ContentType = CramBlockContentType::EXTERNAL_DATA;
+            block.Data.resize(size);
+            std::uint32_t state{12345};
+            for (std::byte& quality : block.Data) {
+                state = (state * 1103515245U) + 12345U;
+                const std::uint8_t value = (state >> 16) & 0xFFU;
+                quality =
+                    std::byte{smallAlphabet ? QUALITIES[value % std::size(QUALITIES)] : value};
+            }
+            const std::vector<std::byte> original{block.Data};
+            CompressRansQualityBlock(block);
+            EXPECT_EQ(block.Method, CramBlockMethod::RANS4X16);
+            DecompressCramBlock(block);
+            EXPECT_EQ(block.Data, original);
+        }
+    }
+}
+
+TEST(CramCompression, QualityPackingPreservesAllAlphabetWidthsAndVectorTails)
+{
+    for (const std::int32_t alphabetSize : {1, 2, 3, 4, 7, 16, 17, 256}) {
+        for (const std::size_t size : {0UZ, 31UZ, 32UZ, 33UZ, 255UZ, 256UZ, 257UZ, 50'001UZ}) {
+            SCOPED_TRACE(alphabetSize);
+            SCOPED_TRACE(size);
+            CramBlock block;
+            block.ContentType = CramBlockContentType::EXTERNAL_DATA;
+            block.Data.resize(size);
+            std::uint32_t state{12345};
+            for (std::byte& quality : block.Data) {
+                state = (state * 1103515245U) + 12345U;
+                const std::int32_t code = ((state >> 16) & 0xFFU) % alphabetSize;
+                const std::uint8_t value = ((code * 29) + 17) & 0xFF;
+                quality = std::byte{value};
+            }
+            const std::vector<std::byte> original{block.Data};
+            CompressRansQualityBlock(block);
+            DecompressCramBlock(block);
+            EXPECT_EQ(block.Data, original);
+        }
+    }
+}
+
 TEST(CramCompression, BlockCompressDecompressAdaptiveArith)
 {
     CramBlock block;
@@ -3031,6 +3082,42 @@ TEST_F(CramWriterReaderTest, ReferenceBasedRoundTripStoresOnlyTheDifferences)
     const std::string* m5{reader.Header().ReferenceSequences()[0].GetTag("M5")};
     ASSERT_TRUE(m5);
     EXPECT_EQ(*m5, CramReferenceMd5(reference));
+}
+
+TEST_F(CramWriterReaderTest, ReferenceMatchesPreserveDifferencesAtWordAndContigBoundaries)
+{
+    const std::string reference{MakeTestReference()};
+    const std::string upper{Uppercase(reference)};
+    const std::filesystem::path fasta{tmpPath.parent_path() / "ref.fa"};
+    WriteFasta(fasta, {{"ref", reference}});
+    std::vector<BamRecord> records;
+    for (const std::int32_t pos : {100, 140, 295, 310, 335, 990, 995, 999}) {
+        for (const std::uint32_t length : {1U, 7U, 8U, 9U, 15U, 16U, 17U, 63U, 64U, 65U}) {
+            std::string seq{upper.substr(pos, length)};
+            seq.resize(length, 'R');
+            records.push_back(MakeAlignedRecord(std::format("match_{}_{}", pos, length), 0, pos,
+                                                {{CigarOpType::M, length}}, seq));
+            // A literal before a matching word must end at the first matching base.
+            seq[0] = 'n';
+            if (length > 8) {
+                seq[7] = OtherBase(seq[7]);
+                seq[8] = 'Y';
+            }
+            records.push_back(MakeAlignedRecord(std::format("diff_{}_{}", pos, length), 0, pos,
+                                                {{CigarOpType::EQ, length}}, seq));
+        }
+    }
+    records.push_back(MakeAlignedRecord("lowercase_read", 0, 310, {{CigarOpType::M, 20}},
+                                        reference.substr(310, 20)));
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    {
+        CramWriter writer{tmpPath, MakeMinimalHeader(), config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    ExpectSameRecords(records, ReadAll(tmpPath, fasta));
 }
 
 TEST_F(CramWriterReaderTest, ReferenceBasedCramIsSmallerThanReferenceFree)
