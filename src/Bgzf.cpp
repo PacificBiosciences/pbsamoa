@@ -10,6 +10,9 @@
 #include <rigtorp/SPSCQueue.hpp>
 
 #include <libdeflate.h>
+#ifdef PBSAMOA_HAVE_ISAL
+#include <igzip_lib.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1464,22 +1467,69 @@ BgzfWriteMetrics BgzfWriter::GetMetrics() const
 // BgzfBlockEncoder
 // =============================================================================
 
+#ifdef PBSAMOA_HAVE_ISAL
+// In detail, not an unnamed namespace: Impl has external linkage, and a unity build
+// rejects an Impl member whose type has internal linkage (-Wsubobject-linkage).
+namespace detail {
+struct IsalEncoder
+{
+    // The token buffer sets the size of each Huffman block. 2K tokens instead of the default 64K
+    // give BAM seq and qual regions their own tables: 30x BAM -4.7% bytes, +0.65 s wall.
+    static constexpr std::size_t HUFFMAN_BLOCK_TOKENS{2 * IGZIP_K};
+
+    isal_zstream Stream{};
+    std::array<std::uint8_t, ISAL_DEF_LVL1_REQ + (ISAL_DEF_LVL1_TOKEN_SIZE * HUFFMAN_BLOCK_TOKENS)>
+        Buffer{};
+
+    std::size_t Compress(const std::span<std::byte> input, const std::span<std::byte> output)
+    {
+        if ((std::size(input) > MAX_UNCOMPRESSED_SIZE) ||
+            (std::size(output) > BGZF_MAX_BLOCK_SIZE)) {
+            return 0;
+        }
+        isal_deflate_stateless_init(&Stream);
+        Stream.level = 1;
+        Stream.level_buf = std::data(Buffer);
+        Stream.level_buf_size = std::size(Buffer);
+        Stream.next_in = reinterpret_cast<std::uint8_t*>(std::data(input));
+        Stream.avail_in = std::size(input);
+        Stream.next_out = reinterpret_cast<std::uint8_t*>(std::data(output));
+        Stream.avail_out = std::size(output);
+        Stream.end_of_stream = 1;
+        if ((isal_deflate_stateless(&Stream) != COMP_OK) || (Stream.avail_in != 0) ||
+            (Stream.total_out > std::size(output))) {
+            return 0;
+        }
+        return Stream.total_out;
+    }
+};
+}  // namespace detail
+#endif
+
 struct BgzfBlockEncoder::Impl
 {
+#ifdef PBSAMOA_HAVE_ISAL
+    std::unique_ptr<detail::IsalEncoder> isal;
+#endif
     detail::CompressorPtr compressor;
     std::vector<std::byte> pending;
     std::vector<std::byte> blocks;
 
     explicit Impl(const int compressionLevel)
     {
-        if ((compressionLevel < 1) || (compressionLevel > 12)) {
-            throw std::invalid_argument{"BgzfBlockEncoder: compression level must be in [1, 12]"};
+        if ((compressionLevel < 0) || (compressionLevel > 12)) {
+            throw std::invalid_argument{"BgzfBlockEncoder: compression level must be in [0, 12]"};
         }
-        compressor.reset(libdeflate_alloc_compressor(compressionLevel));
+        compressor.reset(libdeflate_alloc_compressor(std::max(1, compressionLevel)));
         if (!compressor) {
             throw std::runtime_error{"BgzfBlockEncoder: libdeflate_alloc_compressor failed"};
         }
         pending.reserve(MAX_UNCOMPRESSED_SIZE);
+#ifdef PBSAMOA_HAVE_ISAL
+        if (compressionLevel == 0) {
+            isal = std::make_unique<detail::IsalEncoder>();
+        }
+#endif
     }
 
     void CompressPending()
@@ -1488,11 +1538,19 @@ struct BgzfBlockEncoder::Impl
         const std::size_t start{std::size(blocks)};
         blocks.resize(start + BGZF_MAX_BLOCK_SIZE);
         std::byte* const block{std::data(blocks) + start};
-        // A full payload at level >= 1 always fits: the libdeflate bound for
-        // MAX_UNCOMPRESSED_SIZE bytes is below BGZF_MAX_BLOCK_SIZE - FRAME_SIZE.
-        const std::size_t compressedSize{libdeflate_deflate_compress(
-            compressor.get(), std::data(pending), std::size(pending), block + BGZF_HEADER_SIZE,
-            BGZF_MAX_BLOCK_SIZE - FRAME_SIZE)};
+        std::size_t compressedSize{0};
+#ifdef PBSAMOA_HAVE_ISAL
+        if (isal) {
+            compressedSize = isal->Compress(
+                pending, std::span{block + BGZF_HEADER_SIZE, BGZF_MAX_BLOCK_SIZE - FRAME_SIZE});
+        }
+#endif
+        // Both codecs fit a full payload; libdeflate also covers an ISA-L error.
+        if (compressedSize == 0U) {
+            compressedSize = libdeflate_deflate_compress(
+                compressor.get(), std::data(pending), std::size(pending), block + BGZF_HEADER_SIZE,
+                BGZF_MAX_BLOCK_SIZE - FRAME_SIZE);
+        }
         if (compressedSize == 0U) {
             throw std::runtime_error{"BgzfBlockEncoder: libdeflate_deflate_compress failed"};
         }

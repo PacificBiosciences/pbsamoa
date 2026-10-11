@@ -309,7 +309,10 @@ private:
 class BgzfBlockEncoder
 {
 public:
-    /// \throws std::invalid_argument if \p compressionLevel is not in [1, 12]
+    /// \param[in] compressionLevel 0 selects fast lossless compression (ISA-L level 1
+    ///        when built with NASM on x86-64, otherwise libdeflate level 1).
+    ///        Levels 1–12 select libdeflate.
+    /// \throws std::invalid_argument if \p compressionLevel is not in [0, 12]
     explicit BgzfBlockEncoder(int compressionLevel = 6);
     ~BgzfBlockEncoder();
 

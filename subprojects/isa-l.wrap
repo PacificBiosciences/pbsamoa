@@ -1,0 +1,9 @@
+[wrap-file]
+directory = isa-l-2.31.1
+source_url = https://github.com/intel/isa-l/archive/refs/tags/v2.31.1.tar.gz
+source_filename = isa-l-v2.31.1.tar.gz
+source_hash = e1d5573a4019738243b568ab1e1422e6ab7557c5cae33cc8686944d327ad6bb4
+patch_directory = isa-l
+
+[provide]
+pbsamoa-igzip = isal_dep

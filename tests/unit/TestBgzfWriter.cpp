@@ -428,15 +428,17 @@ protected:
 
 TEST(BgzfBlockEncoderTest, RejectsInvalidCompressionLevel)
 {
-    EXPECT_THROW(BgzfBlockEncoder{0}, std::invalid_argument);
+    EXPECT_THROW(BgzfBlockEncoder{-1}, std::invalid_argument);
     EXPECT_THROW(BgzfBlockEncoder{13}, std::invalid_argument);
 }
 
 TEST(BgzfBlockEncoderTest, FinishWithoutDataEmitsNothing)
 {
-    BgzfBlockEncoder encoder{};
-    encoder.Finish();
-    EXPECT_TRUE(std::empty(encoder.TakeBlocks()));
+    for (const int level : {0, 6}) {
+        BgzfBlockEncoder encoder{level};
+        encoder.Finish();
+        EXPECT_TRUE(std::empty(encoder.TakeBlocks()));
+    }
 }
 
 TEST_F(BgzfBlockWriterTest, BlocksFromSeveralEncodersReadBackInWriteOrder)
@@ -475,15 +477,43 @@ TEST_F(BgzfBlockWriterTest, IncompressibleDataFitsInBlocks)
         state ^= state << 17U;
         b = static_cast<std::byte>(state & 0xFFU);
     }
+    for (const int level : {0, 12}) {
+        {
+            BgzfBlockWriter writer{tmpPath_};
+            BgzfBlockEncoder encoder{level};
+            encoder.Write(data);
+            encoder.Finish();
+            writer.Write(encoder.TakeBlocks());
+        }
+        EXPECT_TRUE(std::ranges::equal(ReadAll(), data));
+    }
+}
+
+TEST_F(BgzfBlockWriterTest, FastEncoderCanBeReusedAcrossBlockBoundaries)
+{
+    std::vector<std::byte> expected;
     {
         BgzfBlockWriter writer{tmpPath_};
-        BgzfBlockEncoder encoder{12};
-        encoder.Write(data);
-        encoder.Finish();
-        writer.Write(encoder.TakeBlocks());
+        BgzfBlockEncoder encoder{0};
+        for (const std::size_t size : {0U, 1U, 65279U, 65280U, 65281U, 200000U, 31U}) {
+            SCOPED_TRACE(size);
+            std::vector<std::byte> data(size);
+            for (std::size_t i{0}; i < size; ++i) {
+                data[i] = static_cast<std::byte>(i & 0xFFU);
+            }
+            const std::span<const std::byte> bytes{data};
+            encoder.Write(bytes.first(size / 2U));
+            encoder.Write(bytes.subspan(size / 2U));
+            encoder.Finish();
+            writer.Write(encoder.TakeBlocks());
+            encoder.Finish();
+            EXPECT_TRUE(std::empty(encoder.TakeBlocks()));
+            expected.insert(std::ranges::end(expected), std::ranges::begin(data),
+                            std::ranges::end(data));
+        }
     }
-
-    EXPECT_TRUE(std::ranges::equal(ReadAll(), data));
+    EXPECT_TRUE(BgzfReader{tmpPath_}.HasEofMarker());
+    EXPECT_TRUE(std::ranges::equal(ReadAll(), expected));
 }
 
 TEST_F(BgzfBlockWriterTest, EmptyFileHasEofMarker)

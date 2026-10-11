@@ -12,3 +12,4 @@ __pycache__
 # Meson WrapDB stuff
 /subprojects/*
 !/subprojects/*.wrap
+!/subprojects/packagefiles/

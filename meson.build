@@ -59,6 +59,16 @@ pbcopper_dep = dependency(
 
 deps = [pbcopper_dep, libdeflate_dep, dependency('threads')]
 
+# Build our own AVX2-only ISA-L dispatch; a system libisal can select AVX-512.
+if host_machine.cpu_family() == 'x86_64' and find_program(
+    'nasm',
+    required: false,
+).found()
+    isal_dep = subproject('isa-l').get_variable('isal_dep')
+    deps += isal_dep
+    add_project_arguments('-DPBSAMOA_HAVE_ISAL=1', language: ['cpp'])
+endif
+
 # Native CRAM implementation intentionally does not depend on htslib.
 bzip2_dep = dependency('bzip2', required: false, include_type: 'system')
 if bzip2_dep.found()
