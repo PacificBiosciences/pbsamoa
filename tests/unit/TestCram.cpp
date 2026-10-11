@@ -3272,6 +3272,56 @@ TEST_F(CramWriterReaderTest, ContainersEncodedOnThreadsKeepTheirOrder)
     }
 }
 
+TEST_F(CramWriterReaderTest, ContainersSerializedOnThreadsGiveTheSameFile)
+{
+    const std::string reference{MakeTestReference()};
+    const std::string upper{Uppercase(reference)};
+    std::vector<BamRecord> records;
+    for (std::int32_t i = 0; i < 30; ++i) {
+        const std::int32_t pos{(i * 31) % 900};
+        records.push_back(MakeAlignedRecord(std::format("read{}", i), 0, pos,
+                                            {{CigarOpType::M, 60}}, upper.substr(pos, 60)));
+    }
+    CramWriterConfig config;
+    config.ReferenceSequences = {reference};
+    config.RecordsPerSlice = 4;
+    config.WriteCrai = true;
+    const std::span<const BamRecord> all{records};
+
+    // two records one by one, then the containers [2, 12) and [12, 30)
+    const auto write = [&](const std::filesystem::path& path, const bool serialized) {
+        CramWriter writer{path, MakeMinimalHeader(), config};
+        writer.Write(records[0]);
+        writer.Write(records[1]);
+        CramEncodedContainer first{writer.EncodeContainer(all.subspan(2, 10))};
+        CramEncodedContainer second{writer.EncodeContainer(all.subspan(12))};
+        if (!serialized) {
+            writer.WriteContainer(std::move(first));
+            writer.WriteContainer(std::move(second));
+            return;
+        }
+        std::vector<CramSerializedContainer> bytes(2);
+        std::thread b{[&]() { bytes[1] = writer.Serialize(std::move(second), 12); }};
+        std::thread a{[&]() { bytes[0] = writer.Serialize(std::move(first), 2); }};
+        a.join();
+        b.join();
+        writer.WriteSerialized(writer.Serialize(writer.EncodeContainer({}), 2));  // no records
+        EXPECT_THROW(writer.WriteSerialized(bytes[1]), std::runtime_error);       // out of order
+        writer.WriteSerialized(std::move(bytes[0]));
+        writer.WriteSerialized(std::move(bytes[1]));
+    };
+    const std::filesystem::path direct{tmpPath.parent_path() / "direct.cram"};
+    write(direct, false);
+    write(tmpPath, true);
+
+    const auto bytes = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, {}};
+    };
+    EXPECT_EQ(bytes(tmpPath), bytes(direct));
+    EXPECT_EQ(bytes(tmpCraiPath), bytes(DefaultCraiPathFor(direct)));
+}
+
 TEST_F(CramWriterReaderTest, ReferenceSequencesMustFitTheHeader)
 {
     const std::string reference{MakeTestReference()};

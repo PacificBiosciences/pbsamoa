@@ -122,6 +122,21 @@ struct CramEncodedContainer
     std::vector<std::vector<CraiEntry>> SliceIndex;
 };
 
+/// \brief A container that CramWriter::Serialize made, for CramWriter::WriteSerialized.
+struct CramSerializedContainer
+{
+    /// \brief The container as it goes into the file (empty: no records).
+    std::vector<std::byte> Bytes;
+
+    /// \brief The records written before this container.
+    std::int64_t RecordCounter{0};
+
+    std::int64_t NumRecords{0};
+
+    /// \brief The CRAI entries of the slices, ContainerOffset 0 (empty without WriteCrai).
+    std::vector<CraiEntry> Index;
+};
+
 /// \brief Writes CRAM files from BamRecord, RawRecordView, and RawRecord inputs.
 ///
 /// Follows the BamWriter pattern: pimpl, Write(...), Close().
@@ -162,6 +177,17 @@ public:
 
     /// \brief Write a container of EncodeContainer after all records written before.
     void WriteContainer(CramEncodedContainer container);
+
+    /// \brief Serialize a container of EncodeContainer that follows recordCounter records.
+    ///
+    /// Like EncodeContainer, several threads can serialize at the same time. WriteContainer
+    /// does this on the writing thread.
+    [[nodiscard]] CramSerializedContainer Serialize(CramEncodedContainer container,
+                                                    std::int64_t recordCounter) const;
+
+    /// \brief Write a container of Serialize after all records written before.
+    /// \throws std::runtime_error if its RecordCounter is not the number of records written
+    void WriteSerialized(CramSerializedContainer container);
 
     /// \brief Flush and close. Called automatically by destructor.
     void Close();

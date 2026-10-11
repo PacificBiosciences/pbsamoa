@@ -1423,18 +1423,20 @@ struct CramWriter::Impl
 
     // Writes an encoded container after the containers written before: the record counters
     // continue, and the CRAI entries get their file offsets.
-    void WriteEncoded(CramEncodedContainer encoded)
+    // The bytes and CRAI entries of an encoded container after recordCounter records; any
+    // thread may call it
+    CramSerializedContainer SerializeEncoded(CramEncodedContainer encoded,
+                                             const std::int64_t recordCounter) const
     {
         CramContainer& container{encoded.Container};
         if (std::size(encoded.SliceIndex) != std::size(container.Slices)) {
             throw std::runtime_error("CramWriter: encoded container without its slice index");
         }
-        container.Header.RecordCounter = globalRecordCounter;
+        container.Header.RecordCounter = recordCounter;
         for (CramSlice& slice : container.Slices) {
-            slice.Header.RecordCounter += globalRecordCounter;
+            slice.Header.RecordCounter += recordCounter;
         }
 
-        const std::int64_t containerOffset = nextContainerOffset;
         std::vector<std::byte> serialized = SerializeContainer(container);
 
         std::size_t containerHeaderBytesRead = 0;
@@ -1443,6 +1445,7 @@ struct CramWriter::Impl
             throw std::runtime_error("CramWriter: serialized landmark count mismatch");
         }
 
+        std::vector<CraiEntry> index;
         for (std::size_t i = 0; i < std::size(container.Slices); ++i) {
             const auto sliceOffset = static_cast<std::int64_t>(serializedHeader.Landmarks[i]);
             std::int64_t sliceEnd = static_cast<std::int64_t>(serializedHeader.Length);
@@ -1454,13 +1457,41 @@ struct CramWriter::Impl
                 throw std::runtime_error("CramWriter: non-positive serialized slice size");
             }
             for (const CraiEntry& entry : encoded.SliceIndex[i]) {
-                AddCraiEntry(entry.SequenceId, entry.AlignmentStart, entry.AlignmentSpan,
-                             containerOffset, sliceOffset, sliceSize);
+                index.push_back(CraiEntry{
+                    .SequenceId = entry.SequenceId,
+                    .AlignmentStart = entry.AlignmentStart,
+                    .AlignmentSpan = entry.AlignmentSpan,
+                    .ContainerOffset = 0,
+                    .SliceOffset = sliceOffset,
+                    .SliceSize = sliceSize,
+                });
             }
         }
+        return {.Bytes = std::move(serialized),
+                .RecordCounter = recordCounter,
+                .NumRecords = container.Header.NumRecords,
+                .Index = std::move(index)};
+    }
 
-        QueueContainerWrite(std::move(serialized));
-        globalRecordCounter += container.Header.NumRecords;
+    void WriteSerialized(CramSerializedContainer serialized)
+    {
+        if (serialized.RecordCounter != globalRecordCounter) {
+            throw std::runtime_error(
+                std::format("CramWriter: a container after {} records, but {} are written",
+                            serialized.RecordCounter, globalRecordCounter));
+        }
+        const std::int64_t containerOffset = nextContainerOffset;
+        for (const CraiEntry& entry : serialized.Index) {
+            AddCraiEntry(entry.SequenceId, entry.AlignmentStart, entry.AlignmentSpan,
+                         containerOffset, entry.SliceOffset, entry.SliceSize);
+        }
+        QueueContainerWrite(std::move(serialized.Bytes));
+        globalRecordCounter += serialized.NumRecords;
+    }
+
+    void WriteEncoded(CramEncodedContainer encoded)
+    {
+        WriteSerialized(SerializeEncoded(std::move(encoded), globalRecordCounter));
     }
 
     void FlushContainer()
@@ -1766,6 +1797,24 @@ void CramWriter::WriteContainer(CramEncodedContainer container)
     }
     impl_->FlushPendingRecords();
     impl_->WriteEncoded(std::move(container));
+}
+
+CramSerializedContainer CramWriter::Serialize(CramEncodedContainer container,
+                                              const std::int64_t recordCounter) const
+{
+    if (std::empty(container.Container.Slices)) {
+        return {.RecordCounter = recordCounter};
+    }
+    return impl_->SerializeEncoded(std::move(container), recordCounter);
+}
+
+void CramWriter::WriteSerialized(CramSerializedContainer container)
+{
+    if (std::empty(container.Bytes)) {
+        return;
+    }
+    impl_->FlushPendingRecords();
+    impl_->WriteSerialized(std::move(container));
 }
 
 std::string CramReferenceMd5(const std::string_view sequence)
