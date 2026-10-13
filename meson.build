@@ -59,12 +59,20 @@ pbcopper_dep = dependency(
 
 deps = [pbcopper_dep, libdeflate_dep, dependency('threads')]
 
-# Build our own AVX2-only ISA-L dispatch; a system libisal can select AVX-512.
-if host_machine.cpu_family() == 'x86_64' and find_program(
-    'nasm',
-    required: false,
-).found()
-    isal_dep = subproject('isa-l').get_variable('isal_dep')
+# Build igzip of ISA-L from its source archive (subprojects/packagefiles/isa-l). -Disal=enabled
+# (production builds) stops the build when ISA-L cannot be built, instead of a slower fallback;
+# auto skips ISA-L without NASM or without the source archive (an offline build).
+isal_opt = get_option('isal').require(
+    host_machine.cpu_family() == 'x86_64',
+    error_message: 'ISA-L is x86-64 only',
+)
+have_isal = false
+if find_program('nasm', required: isal_opt).found()
+    isal_proj = subproject('isa-l', required: isal_opt)
+    have_isal = isal_proj.found()
+endif
+if have_isal
+    isal_dep = isal_proj.get_variable('isal_dep')
     deps += isal_dep
     add_project_arguments('-DPBSAMOA_HAVE_ISAL=1', language: ['cpp'])
 endif
@@ -137,6 +145,8 @@ pbsamoa_dep = declare_dependency(
     dependencies: deps,
     include_directories: [inc_dir, thirdparty_dir],
     link_with: lib,
+    # isal: whether the ISA-L headers and library come with this dependency
+    variables: {'isal': have_isal.to_string()},
     version: meson.project_version(),
 )
 

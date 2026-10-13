@@ -2,3 +2,8 @@ option('tests',
     type : 'boolean',
     value : true,
     description : 'Enable dependencies required for testing')
+
+option('isal',
+    type : 'feature',
+    value : 'auto',
+    description : 'ISA-L for BGZF and gzip (x86-64, needs NASM); auto: when NASM is found')
