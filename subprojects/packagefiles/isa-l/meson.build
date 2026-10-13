@@ -10,7 +10,8 @@ isal_c_args = c.get_supported_arguments(
     '-Wno-pedantic',
 )
 
-# Match upstream's igzip build, with portable CRCs and dispatch capped at AVX2.
+# Match upstream's igzip build, with portable CRCs (except the PCLMUL gzip CRC of inflate) and
+# dispatch capped at AVX2.
 isal_lib = static_library(
     'pbsamoa_igzip',
     files(
@@ -26,7 +27,8 @@ isal_lib = static_library(
         'igzip/igzip_inflate.c',
         'crc/crc_base.c',
         'crc/crc64_base.c',
-        'crc/crc_base_aliases.c',
+        'pbsamoa_crc_aliases.c',
+        'crc/crc32_gzip_refl_by8.asm',
         'igzip/igzip_body.asm',
         'igzip/igzip_finish.asm',
         'igzip/igzip_icf_body_h1_gr_bt.asm',
