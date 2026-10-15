@@ -16,6 +16,7 @@ if cram_script.found()
         'depth',
         'dump_header_flags',
         'cram_query_pbsamoa',
+        'cram_query_mates',
         'cram_query_samtools',
         'cram_read_crai_query',
         'cram_read_methods',

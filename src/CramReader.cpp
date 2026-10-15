@@ -645,11 +645,13 @@ void ResolveDownstreamMates(std::vector<BamRecord>& records,
     }
 
     for (std::size_t i = 0; i < n; ++i) {
+        // -1: no mate further down. NF counts the records between the two (CRAMv3 8.4): the
+        // mate is NF + 1 records on, so NF = 0 is the next record.
         const auto dist = downstreamMateDistance[i];
-        if (dist <= 0) {
+        if (dist < 0) {
             continue;
         }
-        const auto mateIndex = i + static_cast<std::size_t>(dist);
+        const auto mateIndex = i + static_cast<std::size_t>(dist) + 1;
         if (mateIndex >= n) {
             continue;
         }
