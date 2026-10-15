@@ -3664,6 +3664,16 @@ TEST_F(CramWriterReaderTest, ReadSliceGivesTheRecordsOfEachCraiRow)
         }
     }
     EXPECT_EQ(fromSlices, RecordNames(reader.Query(index, 0, 0, TEST_REFERENCE_LENGTH)));
+    // the raw decode gives the bytes of the BamRecord decode
+    for (const CraiEntry& row : rows) {
+        const std::vector<RawRecord> raw{reader.ReadSliceRaw(row)};
+        const std::vector<BamRecord> decoded{reader.ReadSlice(row)};
+        ASSERT_EQ(std::size(raw), std::size(decoded));
+        for (std::size_t i = 0; i < std::size(raw); ++i) {
+            EXPECT_TRUE(std::ranges::equal(raw[i].RawData(),
+                                           RawRecord::FromBamRecord(decoded[i]).RawData()));
+        }
+    }
     EXPECT_EQ(reader.ReadRecord()->Name(), records[1].Name());
     EXPECT_EQ(firstName, records[0].Name());
 }

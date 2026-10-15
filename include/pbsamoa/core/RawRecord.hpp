@@ -8,6 +8,7 @@
 #include <pbsamoa/core/Tags.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <memory>
 #include <ranges>
 #include <span>
@@ -118,6 +119,12 @@ public:
     ///        and no second copy, as RawRecord{record.SerializeToBam()} has.
     [[nodiscard]] static RawRecord FromBamRecord(const BamRecord& record);
 
+    /// \brief Sets RNEXT and PNEXT in place (the CRAM reader resolves attached mates).
+    void SetNext(std::int32_t nextRefId, std::int32_t nextPos) noexcept;
+
+    /// \brief Sets TLEN in place.
+    void SetTlen(std::int32_t tlen) noexcept;
+
     RawRecord(const RawRecord& other);
     RawRecord& operator=(const RawRecord& other);
     RawRecord(RawRecord&& other) noexcept;
@@ -169,6 +176,9 @@ private:
 
     // Takes data, the size bytes of a record (FromBamRecord).
     RawRecord(ByteArray data, std::size_t size);
+
+    // Writes value at offset of the fixed fields, in little-endian byte order.
+    void WriteFixedI32(std::size_t offset, std::int32_t value) noexcept;
 
     ByteArray ownedData_;
 };
@@ -248,6 +258,23 @@ inline RawRecord::RawRecord(ByteArray data, const std::size_t size)
     : RawRecordView{std::span<const std::byte>{data.get(), size}}, ownedData_{std::move(data)}
 {
 }
+
+inline void RawRecord::WriteFixedI32(const std::size_t offset, const std::int32_t value) noexcept
+{
+    std::uint32_t bits{std::bit_cast<std::uint32_t>(value)};
+    for (std::size_t i = 0; i < 4; ++i) {
+        ownedData_[offset + i] = std::byte{static_cast<std::uint8_t>(bits & 0xFFU)};
+        bits >>= 8U;
+    }
+}
+
+inline void RawRecord::SetNext(const std::int32_t nextRefId, const std::int32_t nextPos) noexcept
+{
+    WriteFixedI32(20, nextRefId);
+    WriteFixedI32(24, nextPos);
+}
+
+inline void RawRecord::SetTlen(const std::int32_t tlen) noexcept { WriteFixedI32(28, tlen); }
 
 inline RawRecord::RawRecord(const RawRecord& other)
     : RawRecordView{other}, ownedData_{Allocate(std::size(other.RawData()))}

@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -634,7 +635,31 @@ void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenc
     }
 }
 
-void ResolveDownstreamMates(std::vector<BamRecord>& records,
+void SetNext(BamRecord& record, const std::int32_t refId, const std::int32_t pos)
+{
+    record.NextRefId(refId).NextPos(pos);
+}
+
+void SetNext(RawRecord& record, const std::int32_t refId, const std::int32_t pos)
+{
+    record.SetNext(refId, pos);
+}
+
+void SetTlen(BamRecord& record, const std::int32_t tlen) { record.Tlen(tlen); }
+
+void SetTlen(RawRecord& record, const std::int32_t tlen) { record.SetTlen(tlen); }
+
+std::int32_t ReferenceEndOf(const BamRecord& record) { return record.ReferenceEnd(); }
+
+std::int32_t ReferenceEndOf(const RawRecord& record)
+{
+    // BamRecord::ReferenceEnd: the position plus the reference length of the CIGAR.
+    return record.Pos() + record.ReferenceLength();
+}
+
+// RECORD: BamRecord or RawRecord.
+template <typename RECORD>
+void ResolveDownstreamMates(std::vector<RECORD>& records,
                             std::span<const std::int32_t> downstreamMateDistance)
 {
     const auto n = std::size(records);
@@ -657,28 +682,28 @@ void ResolveDownstreamMates(std::vector<BamRecord>& records,
         auto& rec = records[i];
         auto& mate = records[mateIndex];
 
-        rec.NextRefId(mate.RefId()).NextPos(mate.Pos());
-        mate.NextRefId(rec.RefId()).NextPos(rec.Pos());
+        SetNext(rec, mate.RefId(), mate.Pos());
+        SetNext(mate, rec.RefId(), rec.Pos());
 
         if (rec.RefId() < 0 || mate.RefId() < 0 || rec.RefId() != mate.RefId()) {
-            rec.Tlen(0);
-            mate.Tlen(0);
+            SetTlen(rec, 0);
+            SetTlen(mate, 0);
             continue;
         }
 
-        const auto leftPos = std::ranges::min(rec.Pos(), mate.Pos());
-        const auto rightEnd = std::ranges::max(rec.ReferenceEnd(), mate.ReferenceEnd());
-        const auto templateLen = rightEnd - leftPos;
+        const std::int32_t leftPos = std::ranges::min(rec.Pos(), mate.Pos());
+        const std::int32_t rightEnd = std::ranges::max(ReferenceEndOf(rec), ReferenceEndOf(mate));
+        const std::int32_t templateLen = rightEnd - leftPos;
         if (templateLen <= 0) {
             continue;
         }
 
         if (rec.Pos() <= mate.Pos()) {
-            rec.Tlen(templateLen);
-            mate.Tlen(-templateLen);
+            SetTlen(rec, templateLen);
+            SetTlen(mate, -templateLen);
         } else {
-            rec.Tlen(-templateLen);
-            mate.Tlen(templateLen);
+            SetTlen(rec, -templateLen);
+            SetTlen(mate, templateLen);
         }
     }
 }
@@ -1156,12 +1181,16 @@ struct CramReader::Impl
         header = std::move(*result);
     }
 
-    std::vector<BamRecord> DecodeContainerRecords(
+    // RECORD: BamRecord, or RawRecord. A RawRecord is made right after the decode of each
+    // record, so the slice is not held as BamRecords too: a slice of HiFi reads holds about
+    // 50 MB as BamRecords.
+    template <typename RECORD = BamRecord>
+    std::vector<RECORD> DecodeContainerRecords(
         const CramContainerHeader& containerHeader, std::span<const std::byte> blockData,
         const std::optional<SliceQueryCandidate>& targetSlice = std::nullopt,
         const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
     {
-        std::vector<BamRecord> decodedRecords;
+        std::vector<RECORD> decodedRecords;
         if (containerHeader.NumBlocks == 0) {
             return decodedRecords;
         }
@@ -1297,7 +1326,7 @@ struct CramReader::Impl
 
             CramBitReader coreReader{coreBlock.Data};
             std::int64_t previousApos{sliceHeader.AlignmentStart};
-            std::vector<BamRecord> sliceRecords;
+            std::vector<RECORD> sliceRecords;
             std::vector<std::int32_t> downstreamMateDistances;
             sliceRecords.reserve(sliceHeader.NumRecords);
             downstreamMateDistances.reserve(sliceHeader.NumRecords);
@@ -1330,7 +1359,11 @@ struct CramReader::Impl
                 downstreamMateDistance = -1;
                 DecodeRecord(record, decodeCtx);
                 const std::int64_t pos{record.Pos()};
-                sliceRecords.push_back(std::move(record));
+                if constexpr (std::is_same_v<RECORD, RawRecord>) {
+                    sliceRecords.push_back(ToRawRecord(record));
+                } else {
+                    sliceRecords.push_back(std::move(record));
+                }
                 downstreamMateDistances.push_back(downstreamMateDistance);
                 if (downstreamMateDistance >= 0) {
                     matesUntil =
@@ -1408,7 +1441,8 @@ struct CramReader::Impl
         restore();
     }
 
-    std::vector<BamRecord> LoadIndexedSliceRecords(
+    template <typename RECORD = BamRecord>
+    std::vector<RECORD> LoadIndexedSliceRecords(
         const SliceQueryCandidate& candidate,
         const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
     {
@@ -1432,7 +1466,7 @@ struct CramReader::Impl
 
         const auto blockData =
             ReadExactBytes(static_cast<std::size_t>(containerHeader.Length), "container payload");
-        return DecodeContainerRecords(containerHeader, blockData, candidate, stopPos);
+        return DecodeContainerRecords<RECORD>(containerHeader, blockData, candidate, stopPos);
     }
 
     bool LoadNextContainer()
@@ -1967,13 +2001,10 @@ std::vector<BamRecord> CramReader::ReadSlice(const CraiEntry& entry)
 
 std::vector<RawRecord> CramReader::ReadSliceRaw(const CraiEntry& entry)
 {
-    const std::vector<BamRecord> records{ReadSlice(entry)};
-    std::vector<RawRecord> rawRecords;
-    rawRecords.reserve(std::size(records));
-    for (const BamRecord& record : records) {
-        rawRecords.push_back(ToRawRecord(record));
-    }
-    return rawRecords;
+    std::vector<RawRecord> records;
+    impl_->OnIndexedStream(
+        [&]() { records = impl_->LoadIndexedSliceRecords<RawRecord>(SliceCandidate(entry)); });
+    return records;
 }
 
 std::vector<RawRecord> CramReader::QueryRaw(const CraiIndex& index, std::int32_t refId,
