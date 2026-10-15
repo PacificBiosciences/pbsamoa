@@ -181,11 +181,7 @@ void AppendCigarOp(std::vector<CigarOp>& cigar, CigarOpType type, std::int32_t l
     cigar.push_back(CigarOp{type, ulen});
 }
 
-RawRecord ToRawRecord(const BamRecord& record)
-{
-    const std::vector<std::byte> bytes = record.SerializeToBam();
-    return RawRecord{std::span<const std::byte>{bytes}};
-}
+RawRecord ToRawRecord(const BamRecord& record) { return RawRecord::FromBamRecord(record); }
 
 template <typename T>
 void AppendLittleEndian(std::vector<std::byte>& payload, T value)

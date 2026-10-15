@@ -49,6 +49,27 @@ constexpr std::array<char, 256> MakeComplementTable()
 
 constexpr std::array<char, 256> COMPLEMENT_TABLE = MakeComplementTable();
 
+// The packed byte of two bases, by (first base << 8) | second base: one lookup for each byte,
+// not two. PackSequenceInto takes a large part of the CRAM decode of HiFi reads.
+std::array<std::uint8_t, 65536> MakePairToPackedTable()
+{
+    std::array<std::uint8_t, 65536> table{};
+    for (std::size_t first = 0; first < 256; ++first) {
+        for (std::size_t second = 0; second < 256; ++second) {
+            table[(first << 8) | second] = (BASE_TO_CODE[first] << 4) | BASE_TO_CODE[second];
+        }
+    }
+    return table;
+}
+
+// Built at run time, once: as a constexpr table, its 65536 checked subscripts go over the
+// constexpr step limit of Clang when _GLIBCXX_ASSERTIONS is on.
+const std::array<std::uint8_t, 65536>& PairToPacked()
+{
+    static const std::array<std::uint8_t, 65536> table{MakePairToPackedTable()};
+    return table;
+}
+
 void DecodePackedInto(std::span<const std::byte> packed, std::uint32_t seqLength, char* dest)
 {
     const std::uint32_t fullBytes{seqLength / 2};
@@ -70,10 +91,11 @@ void PackSequenceInto(std::string_view seq, std::byte* dest)
     const std::size_t len{std::size(seq)};
     std::size_t packedIndex{0};
     std::size_t i{0};
+    const std::array<std::uint8_t, 65536>& pairToPacked{PairToPacked()};
     for (; (i + 1) < len; i += 2, ++packedIndex) {
-        const std::uint8_t hi{BASE_TO_CODE[static_cast<unsigned char>(seq[i])]};
-        const std::uint8_t lo{BASE_TO_CODE[static_cast<unsigned char>(seq[i + 1])]};
-        dest[packedIndex] = static_cast<std::byte>((hi << 4) | lo);
+        const std::size_t pair{(std::size_t{static_cast<unsigned char>(seq[i])} << 8) |
+                               static_cast<unsigned char>(seq[i + 1])};
+        dest[packedIndex] = std::byte{pairToPacked[pair]};
     }
     if (i < len) {
         dest[packedIndex] =

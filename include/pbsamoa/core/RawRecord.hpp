@@ -114,6 +114,10 @@ class RawRecord : private RawRecordView
 public:
     explicit RawRecord(std::span<const std::byte> data);
 
+    /// \brief The BAM bytes of record, serialized in the buffer of the result: no zero fill
+    ///        and no second copy, as RawRecord{record.SerializeToBam()} has.
+    [[nodiscard]] static RawRecord FromBamRecord(const BamRecord& record);
+
     RawRecord(const RawRecord& other);
     RawRecord& operator=(const RawRecord& other);
     RawRecord(RawRecord&& other) noexcept;
@@ -162,6 +166,9 @@ private:
         std::byte[]>;  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 
     static ByteArray Allocate(std::size_t size);
+
+    // Takes data, the size bytes of a record (FromBamRecord).
+    RawRecord(ByteArray data, std::size_t size);
 
     ByteArray ownedData_;
 };
@@ -235,6 +242,11 @@ inline RawRecord::RawRecord(std::span<const std::byte> data)
 {
     std::copy_n(std::data(data), std::size(data), ownedData_.get());
     Rebind({ownedData_.get(), std::size(data)});
+}
+
+inline RawRecord::RawRecord(ByteArray data, const std::size_t size)
+    : RawRecordView{std::span<const std::byte>{data.get(), size}}, ownedData_{std::move(data)}
+{
 }
 
 inline RawRecord::RawRecord(const RawRecord& other)

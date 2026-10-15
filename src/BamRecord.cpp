@@ -3,6 +3,7 @@
 #include "BinaryUtils.hpp"
 
 #include <pbsamoa/core/CigarClipping.hpp>
+#include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/Sequence.hpp>
 #include <pbsamoa/core/TagClipping.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
@@ -405,6 +406,18 @@ std::vector<std::byte> BamRecord::SerializeToBam() const
         fill(std::data(result));
     });
     return result;
+}
+
+RawRecord RawRecord::FromBamRecord(const BamRecord& record)
+{
+    ByteArray data;
+    std::size_t size{0};
+    SerializeBamRecord(record, [&](const std::size_t n, const auto& fill) {
+        data = Allocate(n);
+        fill(data.get());
+        size = n;
+    });
+    return RawRecord{std::move(data), size};
 }
 
 void EncodeBamRecord(const BamRecord& record, BgzfBlockEncoder& encoder)
