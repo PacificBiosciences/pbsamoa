@@ -164,7 +164,12 @@ public:
     /// \brief Check if file ends with the standard 28-byte EOF marker.
     bool HasEofMarker() const;
 
-    /// \brief Current virtual file offset (start of next unread block).
+    /// \brief Current virtual file offset.
+    ///
+    /// Block-only mode: the start of the block that the last ReadBlock() returned, with a
+    /// within-block offset of 0 (BaiIndex labels each decoded block with it). Before the
+    /// first ReadBlock() or after Seek(), the block offset of the position.
+    /// BAM modes: the virtual offset of the next unread record byte.
     VirtualOffset Tell() const;
 
     /// \brief Access the parsed BAM header.
