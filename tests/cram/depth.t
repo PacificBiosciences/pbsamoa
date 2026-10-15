@@ -60,6 +60,20 @@ The status stream has one phase, depth, in reads:
   {"metrics":{"bin_size":4,"bins":13,"counted_records":4,"depth_bases":36,"records":8},"name":"depth","state":"end","t":N,"type":"phase","wall_ms":N}
   {"metrics":{"bin_size":4,"bins":13,"counted_records":4,"depth_bases":36,"records":8},"outputs":[{"kind":"tsv","path":S}],"phase":"FINISHED","resources":{"cpu_s":N,"num_threads":*,"peak_rss_bytes":N,"wall_s":N},"t":N,"type":"final","wall_ms":N} (glob)
 
+With a BAI, the progress has the total of the records from the index: the mapped and
+unmapped counts of all references and the unplaced reads. The metrics give it as
+index_records. Without a BAI, as above, or with a BAI older than the BAM, there is no total:
+
+  $ samtools index cases.bam
+  $ "${PBSAMOA}" depth --bin-size 4 --status-json bai.jsonl cases.bam s.tsv 2>/dev/null
+  $ tail -1 bai.jsonl | grep -o '"index_records":[0-9]*,"records":[0-9]*'
+  "index_records":8,"records":8
+  $ touch -t 200001010000 cases.bam.bai
+  $ "${PBSAMOA}" depth --bin-size 4 --status-json stale.jsonl cases.bam s.tsv 2>/dev/null
+  $ grep -c index_records stale.jsonl
+  0
+  [1]
+
 A bin size below 1 is an error:
 
   $ "${PBSAMOA}" depth --bin-size 0 cases.bam bad.tsv 2>&1 | grep -o 'bin-size must be at least 1: 0'

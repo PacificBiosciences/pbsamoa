@@ -1,6 +1,7 @@
 #include "Depth.hpp"
 
 #include "../../ParallelUtils.hpp"
+#include "../../PathUtils.hpp"
 #include "../ParseUtils.hpp"
 #include "../StatusStream.hpp"
 
@@ -8,6 +9,7 @@
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
+#include <pbsamoa/index/BaiIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 
 #include <pbcopper/cli2/Interface.h>
@@ -267,6 +269,27 @@ JSON::Json CountsJson(const DepthCounts& counts, const BinLayout& layout)
             {"bin_size", layout.BinSize}};
 }
 
+/// The records of the input from its BAI (the mapped and unmapped counts of all references and
+/// the unplaced reads), as the total of the progress. None without a BAI, with a BAI older than
+/// the BAM, or with a BAI without counts. The total only feeds the status stream.
+std::optional<std::int64_t> RecordTotal(const std::filesystem::path& input)
+{
+    const std::filesystem::path bai{SidecarPath(input, ".bai")};
+    std::error_code ec;
+    if (!std::filesystem::exists(bai, ec) ||
+        (std::filesystem::last_write_time(bai, ec) < std::filesystem::last_write_time(input, ec)) ||
+        ec) {
+        return std::nullopt;
+    }
+    try {
+        const BaiIndex index{BaiIndex::FromFile(bai)};
+        const std::int64_t total = index.MappedCount() + index.UnmappedCount();
+        return total > 0 ? std::optional{total} : std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 struct Settings
 {
     std::filesystem::path Input;
@@ -325,7 +348,8 @@ int Runner(const CLI_v2::Results& results)
         BamRawReader reader{settings.Input, BamRawReaderConfig{.BgzfWorkers = settings.NumThreads}};
         const BinLayout layout{MakeLayout(reader.Header(), settings.BinSize)};
         std::atomic<std::int64_t> done{0};
-        Tools::StatusStream::Phase phase{&status, "depth", &done, "reads"};
+        const std::optional<std::int64_t> indexRecords{RecordTotal(settings.Input)};
+        Tools::StatusStream::Phase phase{&status, "depth", &done, "reads", indexRecords};
         const WorkerSums total{SumDepth(reader, layout, settings.NumThreads, done)};
         try {
             WriteBins(settings.Output, layout, total.Sums);
@@ -334,13 +358,18 @@ int Runner(const CLI_v2::Results& results)
             std::filesystem::remove(settings.Output, ignored);
             throw;
         }
-        phase.End(CountsJson(total.Counts, layout));
+        // `=`, not braces: a braced JSON::Json makes a one-element array
+        JSON::Json metrics = CountsJson(total.Counts, layout);
+        if (indexRecords) {
+            metrics["index_records"] = *indexRecords;
+        }
+        phase.End(metrics);
         std::println(stderr,
                      "pbsamoa depth: {} of {} records counted, {} depth bases in {} bins of {} bp",
                      total.Counts.CountedRecords, total.Counts.Records, total.Counts.DepthBases,
                      layout.NumBins(), layout.BinSize);
         status.Final(
-            "FINISHED", {}, CountsJson(total.Counts, layout),
+            "FINISHED", {}, std::move(metrics),
             JSON::Json::array({{{"path", std::filesystem::absolute(settings.Output).string()},
                                 {"kind", "tsv"}}}));
     } catch (const std::exception& e) {

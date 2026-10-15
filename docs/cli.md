@@ -194,9 +194,12 @@ the depth in the bin.
 
 The tool reads the BAM once and does not need an index or a sorted input. Each
 thread keeps one 8-byte sum for each bin: for GRCh38 at 1 kb, that is 25 MB for
-each thread. The status stream has one phase, `depth`, in reads. Its metrics
-are `records`, `counted_records`, `depth_bases` (the sum of the depth over all
-positions), `bins` and `bin_size`.
+each thread. The status stream has one phase, `depth`, in reads. With
+`BAM.bai`, the progress has a total: the record count of the index (the mapped
+and unmapped counts of all references and the unplaced reads). A `.bai` older
+than the BAM gives no total. The metrics are `records`, `counted_records`,
+`depth_bases` (the sum of the depth over all positions), `bins`, `bin_size`,
+and `index_records` when the `.bai` gives the total.
 
 ### sort — sort a BAM file
 
