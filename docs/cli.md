@@ -111,9 +111,27 @@ Options:
 | `--seed S` | Unsigned integer, or `auto` (default): the FNV-1a hash of the input header text, as in samtools >= 1.24 |
 | `--threads N` | BGZF threads for reading and for writing; -1 = auto (default) |
 | `--compression N` | Output BGZF compression level in [1, 12] (default 6) |
+| `--status-json PATH` | Write a live status stream to PATH (see below) |
 
 Both modes write a `@PG` record. The tool prints the kept records and bases on
 stderr.
+
+**`--status-json PATH`** writes one JSON object per line, as in the tool status
+stream of pbhuman (`doc/tool-status-stream.md` there): `run_info` first, a
+`start` and an `end` line for each phase, a `progress` line each second while
+the count changes, and `final` last (`FINISHED`, or `FAILED` with the cause).
+The phases:
+
+| Mode | Phases | Unit and total of `progress` |
+|------|--------|------------------------------|
+| `--yield` with a `.pbi` | `select`, `write` | `select`: none; `write`: reads, total from the `.pbi` |
+| `--yield` without a `.pbi` | `count`, `write` | `count`: reads, total not known; `write`: reads, total from `count` |
+| `--fraction` | `write` | reads, total from the `.pbi` if there is one |
+
+The `end` lines and `final` have the counts as `metrics` (`records`, `bases`,
+`kept_records`, `kept_bases`, and `target_bases` or `fraction`, and `seed`).
+`final` lists the output BAM in `outputs`. A write error disables the stream
+with one warning; it never fails the run.
 
 **`--fraction`** replaces `samtools view --subsample FRAC --subsample-seed SEED`
 and keeps the same records. The tool hashes the read name, so all records of a

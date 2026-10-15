@@ -1,4 +1,4 @@
-pbsamoa_tool_sources = files('pbsamoa.cpp')
+pbsamoa_tool_sources = files('pbsamoa.cpp', 'StatusStream.cpp')
 
 subdir('bai-build')
 subdir('bai-query')

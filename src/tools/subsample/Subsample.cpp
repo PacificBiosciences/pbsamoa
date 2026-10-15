@@ -4,6 +4,7 @@
 #include "../../ZmwUtils.hpp"
 #include "../CliUtils.hpp"
 #include "../ParseUtils.hpp"
+#include "../StatusStream.hpp"
 
 #include <pbsamoa/PbSamoaLibraryInfo.hpp>
 #include <pbsamoa/core/Bgzf.hpp>
@@ -20,6 +21,7 @@
 #include <pbcopper/cli2/Results.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <filesystem>
 #include <format>
@@ -37,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 
 namespace PacBio {
 namespace Samoa {
@@ -87,6 +90,14 @@ const CLI_v2::Option Compression{
     "description" : "Output BGZF compression level in [1, 12].",
     "type" : "integer",
     "default" : 6
+})"};
+
+const CLI_v2::Option StatusJson{
+    R"({
+    "names" : ["status-json"],
+    "description" : "Write a live status stream to this file: one JSON object per line (run info, phases, progress each second, final).",
+    "type" : "string",
+    "default" : ""
 })"};
 
 const CLI_v2::PositionalArgument Input{
@@ -268,16 +279,18 @@ std::int64_t ParseYield(const std::string_view text)
     return std::llround(bases);
 }
 
-/// Bases per ZMW bucket, and the total.
+/// Bases per ZMW bucket, and the totals.
 struct YieldHistogram
 {
     std::vector<std::int64_t> BasesPerBucket = std::vector<std::int64_t>(NUM_BUCKETS);
     std::int64_t InputBases{0};
+    std::int64_t InputRecords{0};
 
     void Add(const std::uint32_t bucket, const std::int64_t bases)
     {
         BasesPerBucket[bucket] += bases;
         InputBases += bases;
+        ++InputRecords;
     }
 };
 
@@ -292,9 +305,10 @@ YieldHistogram HistogramFromPbi(const ZmwIndex& index, const std::uint32_t seed)
     return histogram;
 }
 
-/// The extra pass over the BAM when there is no .pbi.
+/// The extra pass over the BAM when there is no .pbi. Adds the records of each batch to
+/// \p done for the status stream.
 YieldHistogram HistogramFromBam(const std::filesystem::path& input, const std::uint32_t seed,
-                                const std::size_t numThreads)
+                                const std::size_t numThreads, std::atomic<std::int64_t>& done)
 {
     YieldHistogram histogram;
     BamRawReader reader{input, BamRawReaderConfig{.BgzfWorkers = numThreads}};
@@ -303,6 +317,7 @@ YieldHistogram HistogramFromBam(const std::filesystem::path& input, const std::u
             const RawRecordView view{batch->View(i)};
             histogram.Add(ZmwBucket(YieldIdentity(view), seed), view.SeqLength());
         }
+        done.fetch_add(batch->RecordCount(), std::memory_order::relaxed);
     }
     return histogram;
 }
@@ -341,10 +356,20 @@ struct Counts
     std::int64_t KeptBases{0};
 };
 
-/// Copy each record whose bucket is below \p cutoff.
+/// The counts as the metrics of the status stream.
+JSON::Json CountsJson(const Counts& counts)
+{
+    return {{"records", counts.Records},
+            {"bases", counts.Bases},
+            {"kept_records", counts.KeptRecords},
+            {"kept_bases", counts.KeptBases}};
+}
+
+/// Copy each record whose bucket is below \p cutoff. Adds the records of each batch to
+/// \p done for the status stream.
 template <typename BUCKET_OF>
 Counts WriteSubsample(BamRawReader& reader, BamWriter& writer, const std::uint32_t cutoff,
-                      const BUCKET_OF& bucketOf)
+                      const BUCKET_OF& bucketOf, std::atomic<std::int64_t>& done)
 {
     Counts counts;
     while (const std::optional<RawRecordBatch> batch{reader.ReadBatch()}) {
@@ -359,6 +384,7 @@ Counts WriteSubsample(BamRawReader& reader, BamWriter& writer, const std::uint32
                 counts.KeptBases += bases;
             }
         }
+        done.fetch_add(batch->RecordCount(), std::memory_order::relaxed);
     }
     return counts;
 }
@@ -372,6 +398,7 @@ struct Settings
     std::uint32_t Seed{0};
     std::size_t NumThreads{0};
     std::int32_t Compression{6};
+    std::filesystem::path StatusJson;
 };
 
 Settings ParseSettings(const CLI_v2::Results& results)
@@ -403,6 +430,8 @@ Settings ParseSettings(const CLI_v2::Results& results)
     settings.NumThreads = Tools::ResolveNumWorkers(requestedThreads, MAX_THREADS);
     const std::int32_t compression{results[Compression]};
     settings.Compression = Tools::CheckCompressionLevel(compression);
+    const std::string statusJson = results[StatusJson];
+    settings.StatusJson = statusJson;
     return settings;
 }
 
@@ -410,21 +439,37 @@ struct YieldPlan
 {
     std::optional<ZmwIndex> Pbi;
     std::uint32_t Cutoff{0};
+    // the records of the input: the total of the write phase
+    std::int64_t InputRecords{0};
 };
 
+/// The .pbi of the input, if it exists.
+std::filesystem::path PbiPath(const Settings& settings)
+{
+    return SidecarPath(settings.Input, ".pbi");
+}
+
 /// The yield mode reads the lengths from the .pbi when there is one, so that it reads
-/// the BAM only once. Without a .pbi, an extra pass over the BAM gets them.
-YieldPlan PlanYield(const Settings& settings)
+/// the BAM only once (phase `select`). Without a .pbi, an extra pass over the BAM gets
+/// them (phase `count`).
+YieldPlan PlanYield(const Settings& settings, Tools::StatusStream& status)
 {
     YieldPlan plan;
-    if (const std::filesystem::path pbiPath{SidecarPath(settings.Input, ".pbi")};
-        std::filesystem::exists(pbiPath)) {
-        plan.Pbi = ZmwIndex::FromPbi(pbiPath);
+    const bool hasPbi{std::filesystem::exists(PbiPath(settings))};
+    std::atomic<std::int64_t> counted{0};
+    Tools::StatusStream::Phase phase{&status, hasPbi ? "select" : "count",
+                                     hasPbi ? nullptr : &counted, "reads"};
+    if (hasPbi) {
+        plan.Pbi = ZmwIndex::FromPbi(PbiPath(settings));
     }
     const YieldHistogram histogram{
         plan.Pbi ? HistogramFromPbi(*plan.Pbi, settings.Seed)
-                 : HistogramFromBam(settings.Input, settings.Seed, settings.NumThreads)};
+                 : HistogramFromBam(settings.Input, settings.Seed, settings.NumThreads, counted)};
     plan.Cutoff = CutoffForYield(histogram, *settings.TargetBases);
+    plan.InputRecords = histogram.InputRecords;
+    phase.End({{"records", histogram.InputRecords},
+               {"bases", histogram.InputBases},
+               {"target_bases", *settings.TargetBases}});
     if (histogram.InputBases < *settings.TargetBases) {
         std::println(stderr,
                      "pbsamoa subsample: WARNING: the input has {} bases, less than the target "
@@ -435,17 +480,20 @@ YieldPlan PlanYield(const Settings& settings)
 }
 
 Counts WriteYieldSubsample(BamRawReader& reader, BamWriter& writer, const YieldPlan& plan,
-                           const std::uint32_t seed)
+                           const std::uint32_t seed, std::atomic<std::int64_t>& done)
 {
     std::size_t row{0};
-    const Counts counts{WriteSubsample(reader, writer, plan.Cutoff, [&](const RawRecordView& view) {
-        const ZmwIdentity id{YieldIdentity(view)};
-        if (plan.Pbi) {
-            CheckPbiRow(*plan.Pbi, row, id, view.SeqLength());
-            ++row;
-        }
-        return ZmwBucket(id, seed);
-    })};
+    const Counts counts{WriteSubsample(
+        reader, writer, plan.Cutoff,
+        [&](const RawRecordView& view) {
+            const ZmwIdentity id{YieldIdentity(view)};
+            if (plan.Pbi) {
+                CheckPbiRow(*plan.Pbi, row, id, view.SeqLength());
+                ++row;
+            }
+            return ZmwBucket(id, seed);
+        },
+        done)};
     if (plan.Pbi && (row != plan.Pbi->NumRecords())) {
         throw std::runtime_error{
             std::format("[pbsamoa] the .pbi has {} records, the BAM {}; rebuild it with pbindex",
@@ -455,19 +503,21 @@ Counts WriteYieldSubsample(BamRawReader& reader, BamWriter& writer, const YieldP
 }
 
 Counts WriteFractionSubsample(BamRawReader& reader, BamWriter& writer, const double fraction,
-                              const std::uint32_t seed)
+                              const std::uint32_t seed, std::atomic<std::int64_t>& done)
 {
     const std::uint32_t scrambledSeed{ScrambleSeed(seed)};
     return WriteSubsample(
         reader, writer, CutoffForFraction(fraction),
-        [&](const RawRecordView& view) { return NameBucket(view.Name(), scrambledSeed); });
+        [&](const RawRecordView& view) { return NameBucket(view.Name(), scrambledSeed); }, done);
 }
 
-/// Open the output with \p comment and a @PG record, and fill it with \p write.
-/// On any error, remove the output, so that no partial or wrong BAM stays behind.
+/// Open the output with \p comment and a @PG record, and fill it with \p write (phase
+/// `write`, in reads up to \p total). On any error, remove the output, so that no partial
+/// or wrong BAM stays behind.
 template <typename WRITE>
 Counts WriteOutput(const Settings& settings, const std::string& commandLine,
-                   const std::string& comment, const WRITE& write)
+                   const std::string& comment, Tools::StatusStream& status,
+                   const std::optional<std::int64_t> total, const WRITE& write)
 {
     BamRawReader reader{settings.Input, BamRawReaderConfig{.BgzfWorkers = settings.NumThreads}};
     SamHeader header{reader.Header()};
@@ -483,8 +533,11 @@ Counts WriteOutput(const Settings& settings, const std::string& commandLine,
                         .BgzfWorkers = std::ranges::max(settings.NumThreads, std::size_t{1}),
                     },
             }};
-        const Counts counts{write(reader, writer)};
+        std::atomic<std::int64_t> done{0};
+        Tools::StatusStream::Phase phase{&status, "write", &done, "reads", total};
+        const Counts counts{write(reader, writer, done)};
         writer.Close();
+        phase.End(CountsJson(counts));
         return counts;
     } catch (...) {
         std::error_code ignored;
@@ -511,7 +564,7 @@ CLI_v2::Interface CreateInterface()
     // `subsample` keeps its own --threads (-1 = auto, capped at min(hw, 8)); the built-in
     // --num-threads resolves 0 to the raw hardware count, which would drop that cap.
     interface.DisableNumThreadsOption();
-    interface.AddOptions({Fraction, Yield, Seed, Threads, Compression});
+    interface.AddOptions({Fraction, Yield, Seed, Threads, Compression, StatusJson});
     interface.AddPositionalArguments({Input, Output});
     return interface;
 }
@@ -520,26 +573,61 @@ int Runner(const CLI_v2::Results& results)
 {
     const Settings settings{ParseSettings(results)};
     const std::string commandLine{"pbsamoa " + results.InputCommandLine()};
+    // outside the try: the catch writes the final line of a failure
+    Tools::StatusStream status;
+    std::vector<std::string> phases{"write"};
     if (settings.TargetBases) {
-        const YieldPlan plan{PlanYield(settings)};
-        const Counts counts{WriteOutput(
-            settings, commandLine,
-            std::format("Sub-sampled yield={} seed={}", *settings.TargetBases, settings.Seed),
-            [&](BamRawReader& reader, BamWriter& writer) {
-                return WriteYieldSubsample(reader, writer, plan, settings.Seed);
-            })};
-        PrintCounts(counts,
-                    std::format("target {}, seed {}, {}", *settings.TargetBases, settings.Seed,
-                                plan.Pbi ? "1 BAM pass with .pbi" : "2 BAM passes, no .pbi"));
-    } else {
-        const Counts counts{WriteOutput(
-            settings, commandLine,
-            std::format("Sub-sampled fraction={:g} seed={}", settings.Fraction, settings.Seed),
-            [&](BamRawReader& reader, BamWriter& writer) {
-                return WriteFractionSubsample(reader, writer, settings.Fraction, settings.Seed);
-            })};
-        PrintCounts(counts,
-                    std::format("fraction {:g}, seed {}", settings.Fraction, settings.Seed));
+        phases.insert(std::begin(phases),
+                      std::filesystem::exists(PbiPath(settings)) ? "select" : "count");
+    }
+    status.Open(settings.StatusJson,
+                Tools::MakeRunInfo("pbsamoa", "subsample", LibraryFormattedVersion(), commandLine,
+                                   settings.NumThreads, phases));
+    try {
+        Counts counts;
+        JSON::Json metrics;
+        if (settings.TargetBases) {
+            const YieldPlan plan{PlanYield(settings, status)};
+            counts = WriteOutput(
+                settings, commandLine,
+                std::format("Sub-sampled yield={} seed={}", *settings.TargetBases, settings.Seed),
+                status, plan.InputRecords,
+                [&](BamRawReader& reader, BamWriter& writer, std::atomic<std::int64_t>& done) {
+                    return WriteYieldSubsample(reader, writer, plan, settings.Seed, done);
+                });
+            PrintCounts(counts,
+                        std::format("target {}, seed {}, {}", *settings.TargetBases, settings.Seed,
+                                    plan.Pbi ? "1 BAM pass with .pbi" : "2 BAM passes, no .pbi"));
+            metrics = CountsJson(counts);
+            metrics["target_bases"] = *settings.TargetBases;
+        } else {
+            // the .pbi gives the total of the write phase cheaply, if there is one
+            std::optional<std::int64_t> total;
+            if (std::filesystem::exists(PbiPath(settings))) {
+                const std::int64_t numRecords = ZmwIndex::FromPbi(PbiPath(settings)).NumRecords();
+                total = numRecords;
+            }
+            counts = WriteOutput(
+                settings, commandLine,
+                std::format("Sub-sampled fraction={:g} seed={}", settings.Fraction, settings.Seed),
+                status, total,
+                [&](BamRawReader& reader, BamWriter& writer, std::atomic<std::int64_t>& done) {
+                    return WriteFractionSubsample(reader, writer, settings.Fraction, settings.Seed,
+                                                  done);
+                });
+            PrintCounts(counts,
+                        std::format("fraction {:g}, seed {}", settings.Fraction, settings.Seed));
+            metrics = CountsJson(counts);
+            metrics["fraction"] = settings.Fraction;
+        }
+        metrics["seed"] = settings.Seed;
+        status.Final(
+            "FINISHED", {}, std::move(metrics),
+            JSON::Json::array({{{"path", std::filesystem::absolute(settings.Output).string()},
+                                {"kind", "bam"}}}));
+    } catch (const std::exception& e) {
+        status.Final("FAILED", e.what());
+        throw;
     }
     return EXIT_SUCCESS;
 }
