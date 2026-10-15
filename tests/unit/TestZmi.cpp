@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <filesystem>
@@ -84,6 +85,11 @@ TEST_F(ZmiWriterTest, WriteEntries)
         writer.AddRecord(100, 99, 3000);
     }
     EXPECT_TRUE(std::filesystem::exists(tmpPath_));
+
+    // A .zmi has identities but no query lengths.
+    const ZmwIndex index{ZmwIndex::FromZmi(tmpPath_)};
+    EXPECT_EQ(index.Identity(2), (ZmwIdentity{100, 99}));
+    EXPECT_TRUE(std::empty(index.QueryLengths()));
 }
 
 TEST_F(ZmiWriterTest, UseTempFileAtomicWrite)
@@ -511,12 +517,12 @@ TEST_F(ZmiWriterTest, FromPbiRoundTripWithBasicDataOnly)
         raw.insert(std::end(raw), reinterpret_cast<const std::byte*>(std::data(rgIds)),
                    reinterpret_cast<const std::byte*>(std::data(rgIds)) + intColSize);
 
-        // qStart: [0, 0, 0] (skip)
-        const std::array<std::int32_t, 3> qStart{0, 0, 0};
+        // qStart: [0, 10, 0]
+        const std::array<std::int32_t, 3> qStart{0, 10, 0};
         raw.insert(std::end(raw), reinterpret_cast<const std::byte*>(std::data(qStart)),
                    reinterpret_cast<const std::byte*>(std::data(qStart)) + intColSize);
 
-        // qEnd: [100, 200, 300] (skip)
+        // qEnd: [100, 200, 300]
         const std::array<std::int32_t, 3> qEnd{100, 200, 300};
         raw.insert(std::end(raw), reinterpret_cast<const std::byte*>(std::data(qEnd)),
                    reinterpret_cast<const std::byte*>(std::data(qEnd)) + intColSize);
@@ -563,6 +569,11 @@ TEST_F(ZmiWriterTest, FromPbiRoundTripWithBasicDataOnly)
     const auto exact{index.Find(ZmwIdentity{100, 99})};
     ASSERT_EQ(std::size(exact), 1u);
     EXPECT_EQ(exact[0], 2000);
+
+    // Per-row identity and query length qEnd - qStart
+    EXPECT_EQ(index.Identity(2), (ZmwIdentity{200, 42}));
+    EXPECT_TRUE(std::ranges::equal(index.QueryLengths(), std::array{100, 190, 300}));
+    EXPECT_THROW(index.Identity(3), std::out_of_range);
 }
 
 TEST_F(ZmiWriterTest, FromPbiReadsColumnsAcrossBgzfBlocks)

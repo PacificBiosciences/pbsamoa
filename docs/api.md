@@ -1083,6 +1083,8 @@ std::vector<std::int64_t> offsets = index.Find(12345);  // raw virtual offsets b
 | `ContiguousChunk(i, n)`         | `ZmwChunk`            | Seek offset and sizes for chunk `i` of `n` |
 | `NumRecords()`                  | `uint64_t`            | Total records in the index                 |
 | `NumZmws()`                     | `uint64_t`            | Unique ZMW count                           |
+| `Identity(row)`                 | `ZmwIdentity`         | (rgId, zmw) of record `row` in file order  |
+| `QueryLengths()`                | `span<const int32_t>` | `qEnd - qStart` per record; `.pbi` only    |
 
 ### Barcode lookup
 

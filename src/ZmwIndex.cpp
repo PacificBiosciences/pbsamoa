@@ -31,6 +31,7 @@ ZmwIndex::ZmwIndex(ZmwIndex&& other) noexcept
     : rgIds_{std::move(other.rgIds_)}
     , zmws_{std::move(other.zmws_)}
     , offsets_{std::move(other.offsets_)}
+    , queryLengths_{std::move(other.queryLengths_)}
     , hasBarcodeData_{other.hasBarcodeData_}
     , barcodeOffsets_{std::move(other.barcodeOffsets_)}
     , zmwIndex_{std::move(other.zmwIndex_)}
@@ -48,6 +49,7 @@ ZmwIndex& ZmwIndex::operator=(ZmwIndex&& other) noexcept
         rgIds_ = std::move(other.rgIds_);
         zmws_ = std::move(other.zmws_);
         offsets_ = std::move(other.offsets_);
+        queryLengths_ = std::move(other.queryLengths_);
         hasBarcodeData_ = other.hasBarcodeData_;
         barcodeOffsets_ = std::move(other.barcodeOffsets_);
         zmwIndex_ = std::move(other.zmwIndex_);
@@ -311,16 +313,14 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     // BasicData columns start at offset 32 (end of header).
     // Columns are stored sequentially (not interleaved):
     //   rgId:       numReads × int32
-    //   qStart:     numReads × int32  (skip)
-    //   qEnd:       numReads × int32  (skip)
+    //   qStart:     numReads × int32
+    //   qEnd:       numReads × int32
     //   holeNumber: numReads × int32
     //   readQual:   numReads × float32 (skip)
     //   ctxtFlag:   numReads × uint8   (skip)
     //   fileOffset: numReads × int64
 
     const std::size_t readsAsSize{numReads};
-    const std::size_t int32ColBytes{
-        CheckedMul(readsAsSize, sizeof(std::int32_t), "PBI int32 column")};
     const std::size_t float32ColBytes{CheckedMul(readsAsSize, sizeof(float), "PBI float32 column")};
     const std::size_t uint8ColBytes{
         CheckedMul(readsAsSize, sizeof(std::uint8_t), "PBI uint8 column")};
@@ -331,11 +331,13 @@ ZmwIndex ZmwIndex::FromPbi(const std::filesystem::path& path)
     // Column 1: rgId (numReads × int32)
     ReadLittleEndianColumn(index.rgIds_, reader, numReads, INCOMPLETE_BASIC_DATA);
 
-    // Column 2: qStart (skip)
-    reader.SkipExactly(int32ColBytes, INCOMPLETE_BASIC_DATA);
-
-    // Column 3: qEnd (skip)
-    reader.SkipExactly(int32ColBytes, INCOMPLETE_BASIC_DATA);
+    // Columns 2 and 3: qStart and qEnd, kept as the query length qEnd - qStart
+    std::vector<std::int32_t> queryStarts;
+    ReadLittleEndianColumn(queryStarts, reader, numReads, INCOMPLETE_BASIC_DATA);
+    ReadLittleEndianColumn(index.queryLengths_, reader, numReads, INCOMPLETE_BASIC_DATA);
+    for (const auto [length, start] : std::views::zip(index.queryLengths_, queryStarts)) {
+        length -= start;
+    }
 
     // Column 4: holeNumber (numReads × int32)
     ReadLittleEndianColumn(index.zmws_, reader, numReads, INCOMPLETE_BASIC_DATA);
@@ -569,6 +571,13 @@ std::int64_t ZmwIndex::FirstOffset(ZmwIdentity id) const
 }
 
 std::uint64_t ZmwIndex::NumRecords() const { return std::size(offsets_); }
+
+ZmwIdentity ZmwIndex::Identity(const std::size_t row) const
+{
+    return ZmwIdentity{rgIds_.at(row), zmws_.at(row)};
+}
+
+std::span<const std::int32_t> ZmwIndex::QueryLengths() const { return queryLengths_; }
 
 std::uint64_t ZmwIndex::NumZmws() const
 {

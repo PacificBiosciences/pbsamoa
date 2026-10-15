@@ -58,7 +58,7 @@ public:
     /// \brief Load from a .zmi file.
     static ZmwIndex FromZmi(const std::filesystem::path& path);
 
-    /// \brief Load from a legacy .pbi file (extracts rgId, holeNumber, fileOffset).
+    /// \brief Load from a legacy .pbi file (extracts rgId, qStart, qEnd, holeNumber, fileOffset).
     static ZmwIndex FromPbi(const std::filesystem::path& path);
 
     /// \brief Auto-detect: tries .zmi first, falls back to .pbi.
@@ -113,6 +113,15 @@ public:
     /// \brief Number of unique (rgId, zmw) identities.
     std::uint64_t NumZmws() const;
 
+    /// \brief The (rgId, zmw) identity of record \p row, in file order.
+    ZmwIdentity Identity(std::size_t row) const;
+
+    /// \brief Per-record query length (qEnd - qStart) in file order.
+    ///
+    /// Only a .pbi stores query lengths; the span is empty for a .zmi. For an
+    /// unaligned HiFi record, the query length is the read length.
+    std::span<const std::int32_t> QueryLengths() const;
+
 private:
     /// \brief Lazily build hash indexes on first lookup.
     void BuildIndex() const;
@@ -125,6 +134,7 @@ private:
     std::vector<std::int32_t> rgIds_;
     std::vector<std::int32_t> zmws_;
     std::vector<std::int64_t> offsets_;
+    std::vector<std::int32_t> queryLengths_;
     bool hasBarcodeData_{false};
     std::map<BarcodePair, std::vector<std::int64_t>> barcodeOffsets_;
 
