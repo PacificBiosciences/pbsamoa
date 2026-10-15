@@ -18,6 +18,7 @@
 #include <format>
 #include <fstream>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -825,6 +826,8 @@ struct CramReader::Impl
     std::vector<BamRecord> pendingRecords;
     std::size_t pendingIdx{0};
     ReferenceWindow externalReference;
+    // The (container offset, slice offset) of the indexed slices whose reference MD5 is checked.
+    std::set<std::pair<std::int64_t, std::int64_t>> validatedSlices;
     CramGzipDecompressorContext gzipContext;
     std::shared_ptr<Parallel::ThreadPool<>> decompressionPool;
 
@@ -916,6 +919,20 @@ struct CramReader::Impl
                                      std::int32_t refPos1Based, std::int32_t length)
     {
         const ReferenceSources sources = ResolveReferenceSources(ctx, refId, refPos1Based, length);
+        // A run in the external window, with no embedded window: one copy, not a check for
+        // each base. Most bases of a HiFi read are reference matches.
+        const std::size_t readStart = readPos1Based - 1;
+        if ((length > 0) && std::empty(sources.Embedded) && (readStart < std::size(sequence)) &&
+            (refPos1Based > sources.ExternalStart)) {
+            const std::size_t refStart = refPos1Based - 1 - sources.ExternalStart;
+            const std::size_t count =
+                std::min<std::size_t>(length, std::size(sequence) - readStart);
+            if ((refStart + count) <= std::size(sources.External)) {
+                std::copy_n(std::data(sources.External) + refStart, count,
+                            std::begin(sequence) + readStart);
+                return;
+            }
+        }
         for (std::int32_t i = 0; i < length; ++i) {
             const std::size_t readIndex = readPos1Based - 1 + i;
             if (readIndex >= std::size(sequence)) {
@@ -1164,7 +1181,8 @@ struct CramReader::Impl
 
     std::vector<BamRecord> DecodeContainerRecords(
         const CramContainerHeader& containerHeader, std::span<const std::byte> blockData,
-        const std::optional<SliceQueryCandidate>& targetSlice = std::nullopt)
+        const std::optional<SliceQueryCandidate>& targetSlice = std::nullopt,
+        const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
     {
         std::vector<BamRecord> decodedRecords;
         if (containerHeader.NumBlocks == 0) {
@@ -1287,9 +1305,18 @@ struct CramReader::Impl
                 externalReference.Get(sliceHeader.RefSeqId, sliceStart,
                                       sliceStart + sliceHeader.AlignmentSpan);
             }
-            ValidateSliceReferenceMd5(sliceHeader,
-                                      compressionHeader.PreservationMap.ReferenceRequired,
-                                      embeddedReference, externalReference, header);
+            // A query of a region reads the slices of its CRAI rows again for each region:
+            // the MD5 of the reference of a slice is checked once for each reader.
+            const std::pair<std::int64_t, std::int64_t> sliceKey{
+                targetSlice ? targetSlice->ContainerOffset : -1, sliceOffset};
+            if (!targetSlice || !validatedSlices.contains(sliceKey)) {
+                ValidateSliceReferenceMd5(sliceHeader,
+                                          compressionHeader.PreservationMap.ReferenceRequired,
+                                          embeddedReference, externalReference, header);
+                if (targetSlice) {
+                    validatedSlices.insert(sliceKey);
+                }
+            }
 
             CramBitReader coreReader{coreBlock.Data};
             std::int64_t previousApos{sliceHeader.AlignmentStart};
@@ -1315,12 +1342,26 @@ struct CramReader::Impl
                 .ExternalReference = externalReference,
             };
 
+            // In a coordinate-sorted single-reference slice, the records after one at stopPos
+            // or later are past it too: the decode stops there, when no decoded record waits
+            // for a mate further down.
+            const bool canStop{(stopPos < std::numeric_limits<std::int64_t>::max()) &&
+                               (sliceHeader.RefSeqId >= 0) && (header.SortOrder() == "coordinate")};
+            std::int64_t matesUntil{0};
             for (std::int32_t ri = 0; ri < sliceHeader.NumRecords; ++ri) {
                 BamRecord record;
                 downstreamMateDistance = -1;
                 DecodeRecord(record, decodeCtx);
+                const std::int64_t pos{record.Pos()};
                 sliceRecords.push_back(std::move(record));
                 downstreamMateDistances.push_back(downstreamMateDistance);
+                if (downstreamMateDistance >= 0) {
+                    matesUntil =
+                        std::max<std::int64_t>(matesUntil, ri + downstreamMateDistance + 1);
+                }
+                if (canStop && (pos >= stopPos) && (ri >= matesUntil)) {
+                    break;
+                }
             }
 
             ResolveDownstreamMates(sliceRecords, downstreamMateDistances);
@@ -1364,7 +1405,11 @@ struct CramReader::Impl
             taskCount);
     }
 
-    std::vector<BamRecord> LoadIndexedSliceRecords(const SliceQueryCandidate& candidate)
+    /// \brief The records of the slice of a CRAI row. With stopPos, the decode can stop at the
+    ///        first record at stopPos or later (see DecodeContainerRecords).
+    std::vector<BamRecord> LoadIndexedSliceRecords(
+        const SliceQueryCandidate& candidate,
+        const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
     {
         if (candidate.ContainerOffset < 0 || candidate.SliceOffset < 0) {
             throw std::runtime_error("CramReader: CRAI entry has negative container/slice offset");
@@ -1386,7 +1431,7 @@ struct CramReader::Impl
 
         const auto blockData =
             ReadExactBytes(static_cast<std::size_t>(containerHeader.Length), "container payload");
-        return DecodeContainerRecords(containerHeader, blockData, candidate);
+        return DecodeContainerRecords(containerHeader, blockData, candidate, stopPos);
     }
 
     bool LoadNextContainer()
@@ -1913,7 +1958,8 @@ std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t re
     std::vector<BamRecord> queriedRecords;
     try {
         for (const SliceQueryCandidate& candidate : candidates) {
-            std::vector<BamRecord> decoded = impl.LoadIndexedSliceRecords(candidate);
+            std::vector<BamRecord> decoded = impl.LoadIndexedSliceRecords(
+                candidate, (refId >= 0) ? end : std::numeric_limits<std::int64_t>::max());
             for (BamRecord& record : decoded) {
                 if (KeepRecordForQuery(record, refId, beg, end)) {
                     queriedRecords.push_back(std::move(record));
