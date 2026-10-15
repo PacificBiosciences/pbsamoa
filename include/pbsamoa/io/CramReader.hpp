@@ -4,6 +4,7 @@
 #include <pbsamoa/core/BamRecord.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
+#include <pbsamoa/cram/CramReference.hpp>
 #include <pbsamoa/index/CraiIndex.hpp>
 
 #include <filesystem>
@@ -21,7 +22,15 @@ namespace Samoa {
 struct CramReaderConfig
 {
     /// \brief Optional FASTA file for decoding reference-based CRAM slices.
+    ///
+    /// The reader loads the whole FASTA into memory. Set ReferencePath or Reference, not both.
     std::filesystem::path ReferencePath{};
+
+    /// \brief Optional reference for decoding reference-based CRAM slices, given in windows.
+    ///
+    /// One sequence per @SQ line, in header order. The reader keeps the bases of one window
+    /// only. Several readers can share one reference.
+    std::shared_ptr<const CramReference> Reference{};
 
     /// \brief Number of worker threads for parallel CRAM block decompression.
     ///

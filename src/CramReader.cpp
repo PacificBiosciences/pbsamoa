@@ -439,9 +439,114 @@ std::string SliceSpanLabel(const CramSliceHeader& sliceHeader)
     return std::format("start={} span={}", start, span);
 }
 
-std::vector<std::byte> ResolveSliceReferenceWindow(
-    const CramSliceHeader& sliceHeader, std::span<const std::byte> embeddedReference,
-    const std::vector<std::string>& externalReferenceById, const SamHeader& header)
+// The reference of CramReaderConfig::ReferencePath: the text of each @SQ sequence, in header
+// order. A sequence that is not in the FASTA has length 0.
+class FastaTextReference final : public CramReference
+{
+public:
+    explicit FastaTextReference(std::vector<std::string> sequences)
+        : sequences_{std::move(sequences)}
+    {
+    }
+
+    std::int32_t NumSequences() const override
+    {
+        return static_cast<std::int32_t>(std::size(sequences_));
+    }
+
+    std::int64_t Length(const std::int32_t refId) const override
+    {
+        return static_cast<std::int64_t>(std::size(sequences_[static_cast<std::size_t>(refId)]));
+    }
+
+    std::string_view Bases(const std::int32_t refId, const std::int64_t start,
+                           const std::int64_t length, std::string& /*buffer*/) const override
+    {
+        return std::string_view{sequences_[static_cast<std::size_t>(refId)]}.substr(
+            static_cast<std::size_t>(start), static_cast<std::size_t>(length));
+    }
+
+private:
+    std::vector<std::string> sequences_;
+};
+
+}  // namespace
+
+// A named namespace, not the unnamed one: CramReader::Impl holds a ReferenceWindow, and in a
+// unity build GCC flags a field whose type has internal linkage (-Wsubobject-linkage).
+namespace CramReaderInternal {
+
+/// \brief The bases of the external reference that one reader decodes with, in upper case.
+///
+/// It keeps one window of one sequence, not a window per sequence: a reader that queries
+/// regions of many sequences then holds the bases of about one slice, not of the genome.
+class ReferenceWindow
+{
+public:
+    /// \brief A view of the bases from 0-based position Start on.
+    struct View
+    {
+        std::string_view Bases;
+        std::int64_t Start{0};
+    };
+
+    void Reset(std::shared_ptr<const CramReference> reference)
+    {
+        reference_ = std::move(reference);
+        refId_ = -1;
+        start_ = 0;
+        bases_.clear();
+    }
+
+    /// \brief A window that covers [start, end) of refId, clipped to the sequence. Empty if
+    ///        there is no reference, refId is not a sequence, or nothing is left after the
+    ///        clip. The view is valid until the next call.
+    View Get(const std::int32_t refId, std::int64_t start, std::int64_t end)
+    {
+        if (!reference_ || (refId < 0) || (refId >= reference_->NumSequences())) {
+            return {};
+        }
+        const std::int64_t length{reference_->Length(refId)};
+        start = std::max<std::int64_t>(start, 0);
+        end = std::min(end, length);
+        if (start >= end) {
+            return {};
+        }
+        if ((refId != refId_) || (start < start_) || (end > start_ + std::ssize(bases_))) {
+            // A miss reads at least MIN_FETCH_BASES: the records of a multi-reference slice
+            // then do not read the reference one record at a time.
+            constexpr std::int64_t MIN_FETCH_BASES{std::int64_t{1} << 16};
+            const std::int64_t fetchEnd{std::max(end, std::min(length, start + MIN_FETCH_BASES))};
+            const std::string_view bases{
+                reference_->Bases(refId, start, fetchEnd - start, buffer_)};
+            bases_.resize(std::size(bases));
+            std::ranges::transform(bases, bases_.begin(), [](const char c) {
+                return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            });
+            refId_ = refId;
+            start_ = start;
+        }
+        return {.Bases = bases_, .Start = start_};
+    }
+
+private:
+    std::shared_ptr<const CramReference> reference_;
+    std::int32_t refId_{-1};
+    std::int64_t start_{0};
+    std::string bases_;
+    std::string buffer_;
+};
+
+}  // namespace CramReaderInternal
+
+using CramReaderInternal::ReferenceWindow;
+
+namespace {
+
+std::vector<std::byte> ResolveSliceReferenceWindow(const CramSliceHeader& sliceHeader,
+                                                   std::span<const std::byte> embeddedReference,
+                                                   ReferenceWindow& externalReference,
+                                                   const SamHeader& header)
 {
     const auto referenceLabel = SliceReferenceLabel(sliceHeader, header);
     const auto spanLabel = SliceSpanLabel(sliceHeader);
@@ -469,27 +574,25 @@ std::vector<std::byte> ResolveSliceReferenceWindow(
         return {std::begin(window), std::end(window)};
     }
 
-    if (sliceHeader.RefSeqId >= 0 &&
-        static_cast<std::size_t>(sliceHeader.RefSeqId) < std::size(externalReferenceById)) {
-        const auto& fullReference =
-            externalReferenceById[static_cast<std::size_t>(sliceHeader.RefSeqId)];
-        if (!fullReference.empty()) {
-            if (windowStart >= std::size(fullReference) ||
-                windowLength > (std::size(fullReference) - windowStart)) {
-                throw std::runtime_error{
-                    std::format("CramReader: reference MD5 validation required but "
-                                "FASTA reference is too "
-                                "short for reference {} span {} (length {})",
-                                referenceLabel, spanLabel, std::size(fullReference))};
-            }
-
-            const auto src = std::string_view{fullReference}.substr(windowStart, windowLength);
-            std::vector<std::byte> window(windowLength);
-            std::ranges::transform(src, window.begin(), [](char c) {
-                return static_cast<std::byte>(static_cast<unsigned char>(c));
-            });
-            return window;
+    const ReferenceWindow::View external{
+        externalReference.Get(sliceHeader.RefSeqId, windowStart, windowStart + windowLength)};
+    if (!std::empty(external.Bases)) {
+        // The window ends at the end of the sequence: a shorter window means a short FASTA.
+        const std::size_t available = external.Start + std::size(external.Bases) - windowStart;
+        if (available < windowLength) {
+            throw std::runtime_error{
+                std::format("CramReader: reference MD5 validation required but "
+                            "FASTA reference is too "
+                            "short for reference {} span {} (length {})",
+                            referenceLabel, spanLabel, windowStart + available)};
         }
+
+        const auto src = external.Bases.substr(windowStart - external.Start, windowLength);
+        std::vector<std::byte> window(windowLength);
+        std::ranges::transform(src, window.begin(), [](char c) {
+            return static_cast<std::byte>(static_cast<unsigned char>(c));
+        });
+        return window;
     }
 
     throw std::runtime_error{
@@ -510,8 +613,7 @@ std::vector<std::byte> UppercaseBases(std::span<const std::byte> bases)
 
 void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenceRequired,
                                std::span<const std::byte> embeddedReference,
-                               const std::vector<std::string>& externalReferenceById,
-                               const SamHeader& header)
+                               ReferenceWindow& externalReference, const SamHeader& header)
 {
     if (!SliceRequiresReferenceMd5Validation(sliceHeader, referenceRequired)) {
         return;
@@ -521,7 +623,7 @@ void ValidateSliceReferenceMd5(const CramSliceHeader& sliceHeader, bool referenc
     const auto spanLabel = SliceSpanLabel(sliceHeader);
 
     const auto referenceWindow =
-        ResolveSliceReferenceWindow(sliceHeader, embeddedReference, externalReferenceById, header);
+        ResolveSliceReferenceWindow(sliceHeader, embeddedReference, externalReference, header);
     const auto normalizedReference = UppercaseBases(referenceWindow);
     const auto observedMd5 = detail::ComputeMd5(normalizedReference);
     if (observedMd5 != sliceHeader.RefMd5) {
@@ -707,7 +809,7 @@ struct CramReader::Impl
         std::int32_t& DownstreamMateDistance;
         bool ApDelta{false};
         bool ReadNamesIncluded{false};
-        const std::vector<std::string>& ExternalReferenceById;
+        ReferenceWindow& ExternalReference;
     };
 
     std::filesystem::path path;
@@ -720,7 +822,7 @@ struct CramReader::Impl
     // Current container state
     std::vector<BamRecord> pendingRecords;
     std::size_t pendingIdx{0};
-    std::vector<std::string> externalReferenceById;
+    ReferenceWindow externalReference;
     CramGzipDecompressorContext gzipContext;
     std::shared_ptr<Parallel::ThreadPool<>> decompressionPool;
 
@@ -737,13 +839,17 @@ struct CramReader::Impl
     {
         // Embedded is empty when the record cannot use the embedded window.
         std::span<const std::byte> Embedded;
-        // External is empty when the reader has not loaded an external reference for this ID.
+        // External is empty when the reader has no external reference for this ID. It holds
+        // the bases from 0-based position ExternalStart on.
         std::string_view External;
+        std::int64_t ExternalStart{0};
         std::int32_t EmbeddedStart{0};
     };
 
+    /// \brief The sources of the bases [refPos1Based, refPos1Based + length) of refId.
     static ReferenceSources ResolveReferenceSources(const DecodeRecordContext& ctx,
-                                                    std::int32_t refId)
+                                                    std::int32_t refId, std::int32_t refPos1Based,
+                                                    std::int32_t length)
     {
         ReferenceSources sources;
         if (!std::empty(ctx.EmbeddedReference) && ctx.SliceHeader.RefSeqId >= 0 && refId >= 0 &&
@@ -751,9 +857,11 @@ struct CramReader::Impl
             sources.Embedded = ctx.EmbeddedReference;
             sources.EmbeddedStart = ctx.SliceHeader.AlignmentStart;
         }
-        if (refId >= 0 && static_cast<std::size_t>(refId) < std::size(ctx.ExternalReferenceById)) {
-            sources.External = ctx.ExternalReferenceById[static_cast<std::size_t>(refId)];
-        }
+        const std::int64_t start{std::int64_t{refPos1Based} - 1};
+        const ReferenceWindow::View external{
+            ctx.ExternalReference.Get(refId, start, start + std::max(length, 1))};
+        sources.External = external.Bases;
+        sources.ExternalStart = external.Start;
         return sources;
     }
 
@@ -767,8 +875,8 @@ struct CramReader::Impl
             }
         }
 
-        if (!std::empty(sources.External) && refPos1Based > 0) {
-            const std::size_t idx = refPos1Based - 1;
+        if (!std::empty(sources.External) && refPos1Based > sources.ExternalStart) {
+            const std::size_t idx = refPos1Based - 1 - sources.ExternalStart;
             if (idx < std::size(sources.External)) {
                 return sources.External[idx];
             }
@@ -779,7 +887,8 @@ struct CramReader::Impl
     static std::optional<char> ReferenceBaseAt(const DecodeRecordContext& ctx, std::int32_t refId,
                                                std::int32_t refPos1Based)
     {
-        return ReferenceBaseFrom(ResolveReferenceSources(ctx, refId), refPos1Based);
+        return ReferenceBaseFrom(ResolveReferenceSources(ctx, refId, refPos1Based, 1),
+                                 refPos1Based);
     }
 
     static CramCodec* LookupCodec(const DecodeRecordContext& ctx, const CramDataSeries dataSeries)
@@ -804,7 +913,7 @@ struct CramReader::Impl
                                      std::int32_t refId, std::int32_t readPos1Based,
                                      std::int32_t refPos1Based, std::int32_t length)
     {
-        const ReferenceSources sources = ResolveReferenceSources(ctx, refId);
+        const ReferenceSources sources = ResolveReferenceSources(ctx, refId, refPos1Based, length);
         for (std::int32_t i = 0; i < length; ++i) {
             const std::size_t readIndex = readPos1Based - 1 + i;
             if (readIndex >= std::size(sequence)) {
@@ -859,6 +968,20 @@ struct CramReader::Impl
 
     void LoadExternalReferences()
     {
+        if (config.Reference && !config.ReferencePath.empty()) {
+            throw std::invalid_argument{
+                "CramReader: set ReferencePath or Reference in CramReaderConfig, not both"};
+        }
+        if (config.Reference) {
+            if (config.Reference->NumSequences() != std::ssize(header.ReferenceSequences())) {
+                throw std::invalid_argument{std::format(
+                    "CramReader: the reference has {} sequences, the header {} @SQ lines",
+                    config.Reference->NumSequences(), std::size(header.ReferenceSequences()))};
+            }
+            externalReference.Reset(config.Reference);
+            return;
+        }
+
         std::filesystem::path referencePath = config.ReferencePath;
         if (referencePath.empty()) {
             if (const char* envRef = std::getenv("PBSAMOA_CRAM_REFERENCE"); envRef) {
@@ -870,16 +993,15 @@ struct CramReader::Impl
         }
 
         auto referencesByName = LoadFastaSequences(referencePath);
-        externalReferenceById.clear();
-        externalReferenceById.resize(std::size(header.ReferenceSequences()));
-
+        std::vector<std::string> sequences(std::size(header.ReferenceSequences()));
         for (std::size_t i = 0; i < std::size(header.ReferenceSequences()); ++i) {
             const auto& sq = header.ReferenceSequences()[i];
             auto it = referencesByName.find(std::string{sq.Name()});
             if (it != std::end(referencesByName)) {
-                externalReferenceById[i] = std::move(it->second);
+                sequences[i] = std::move(it->second);
             }
         }
+        externalReference.Reset(std::make_shared<const FastaTextReference>(std::move(sequences)));
     }
 
     std::vector<std::byte> ReadBytes(std::size_t n)
@@ -1156,9 +1278,16 @@ struct CramReader::Impl
             if (sliceHeader.EmbeddedRefBlockId >= 0) {
                 embeddedReference = extStore.GetBlockData(sliceHeader.EmbeddedRefBlockId);
             }
+            // The window of a single-reference slice: its records then read no other window.
+            if ((sliceHeader.RefSeqId >= 0) && (sliceHeader.AlignmentStart > 0) &&
+                (sliceHeader.AlignmentSpan > 0)) {
+                const std::int64_t sliceStart{sliceHeader.AlignmentStart - 1};
+                externalReference.Get(sliceHeader.RefSeqId, sliceStart,
+                                      sliceStart + sliceHeader.AlignmentSpan);
+            }
             ValidateSliceReferenceMd5(sliceHeader,
                                       compressionHeader.PreservationMap.ReferenceRequired,
-                                      embeddedReference, externalReferenceById, header);
+                                      embeddedReference, externalReference, header);
 
             CramBitReader coreReader{coreBlock.Data};
             std::int64_t previousApos{sliceHeader.AlignmentStart};
@@ -1181,7 +1310,7 @@ struct CramReader::Impl
                 .DownstreamMateDistance = downstreamMateDistance,
                 .ApDelta = compressionHeader.PreservationMap.ApDelta,
                 .ReadNamesIncluded = compressionHeader.PreservationMap.ReadNamesIncluded,
-                .ExternalReferenceById = externalReferenceById,
+                .ExternalReference = externalReference,
             };
 
             for (std::int32_t ri = 0; ri < sliceHeader.NumRecords; ++ri) {
@@ -1765,20 +1894,35 @@ std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t re
         return {};
     }
 
-    // Query execution uses an isolated reader instance so sequential iteration
-    // state on this reader remains unchanged.
-    CramReader queryReader{impl_->path, impl_->config};
-    std::vector<BamRecord> queriedRecords;
+    // The query reads on the stream of this reader, then puts the stream back, so the
+    // sequential iteration goes on unchanged: its decoded records are in pendingRecords,
+    // which the query does not change. A second reader for each query would parse the header
+    // and load a ReferencePath FASTA again each time.
+    Impl& impl{*impl_};
+    impl.file.clear();
+    const std::streampos position{impl.file.tellg()};
+    const bool atEof{impl.atEof};
+    const auto restore = [&impl, position, atEof]() {
+        impl.file.clear();
+        impl.file.seekg(position);
+        impl.atEof = atEof;
+    };
 
-    for (const SliceQueryCandidate& candidate : candidates) {
-        std::vector<BamRecord> decoded = queryReader.impl_->LoadIndexedSliceRecords(candidate);
-        for (BamRecord& record : decoded) {
-            if (KeepRecordForQuery(record, refId, beg, end)) {
-                queriedRecords.push_back(std::move(record));
+    std::vector<BamRecord> queriedRecords;
+    try {
+        for (const SliceQueryCandidate& candidate : candidates) {
+            std::vector<BamRecord> decoded = impl.LoadIndexedSliceRecords(candidate);
+            for (BamRecord& record : decoded) {
+                if (KeepRecordForQuery(record, refId, beg, end)) {
+                    queriedRecords.push_back(std::move(record));
+                }
             }
         }
+    } catch (...) {
+        restore();
+        throw;
     }
-
+    restore();
     return queriedRecords;
 }
 

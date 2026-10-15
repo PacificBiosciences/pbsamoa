@@ -25,7 +25,7 @@ Cram tests resolve tool paths via env vars in `tests/meson.build` — run via `m
 
 **BAM/SAM API** — `BamRawReader` (sync/parallel BGZF, range + batch + whitelist interfaces, region queries via BAI; `Records()` yields owning `RawRecord`, `ReadBatch()` + `View(i)` is the copy-free path), `BamRecordReader` (wraps BamRawReader, pre-decodes to `BamRecord` via background producer thread + optional thread pool), `SamReader`, `BamWriter`, `SamWriter`, `BaiIndex`. Memory-budget sizing via `ByteLimit`.
 
-**CRAM v3** — `CramReader`, `CramWriter`, `CraiIndex` (CRAI interop), `CramCodec`/`CramCompression` (configurable block + data-series codecs incl. FQZ slices), `CramStructs`, `CramMd5`. Reference-based; round-trips with `BamRecord`.
+**CRAM v3** — `CramReader`, `CramWriter`, `CraiIndex` (CRAI interop), `CramCodec`/`CramCompression` (configurable block + data-series codecs incl. FQZ slices), `CramStructs`, `CramMd5`, `CramReference` (the reference in windows, for the writer and the reader). Reference-based; round-trips with `BamRecord`.
 
 **ZMW Index** — `ZmwIndex` (`.zmi`/`.pbi`, point/batch queries, chunking by `(rgId, zmw)`), `ZmwIdentity`, `ZmwWhitelist`, `ZmiWriter`, `ZmiBamWriter` (BAM+ZMI coordinated output), `BamZmwReader` (groups by ZMW). Chunking via `BamRawReaderConfig::ChunkNum`/`TotalChunks`.
 

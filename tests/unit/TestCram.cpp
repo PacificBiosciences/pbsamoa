@@ -3453,6 +3453,7 @@ public:
     std::string_view Bases(const std::int32_t refId, const std::int64_t start,
                            const std::int64_t length, std::string& buffer) const override
     {
+        ++calls_;
         const std::string& sequence{sequences_.at(static_cast<std::size_t>(refId))};
         if ((start < 0) || (length < 0) || ((start + length) > std::ssize(sequence))) {
             ++outside_;
@@ -3464,10 +3465,46 @@ public:
 
     std::int32_t Outside() const { return outside_; }
 
+    std::int32_t Calls() const { return calls_; }
+
 private:
     std::vector<std::string> sequences_;
     mutable std::atomic<std::int32_t> outside_{0};
+    mutable std::atomic<std::int32_t> calls_{0};
 };
+
+// A slice on both references, with a record past the end; then sorted slices on one
+// reference (the slice MD5), with a deletion and a lowercase stretch.
+std::vector<BamRecord> WindowedReferenceRecords(const std::string& first, const std::string& second,
+                                                BamRecord unmapped)
+{
+    std::vector<BamRecord> records;
+    records.push_back(
+        MakeAlignedRecord("first", 0, 10, {{CigarOpType::M, 40}}, Uppercase(first.substr(10, 40))));
+    records.push_back(
+        MakeAlignedRecord("second", 1, 20, {{CigarOpType::M, 40}}, second.substr(20, 40)));
+    records.push_back(MakeAlignedRecord("past_end", 1, 990, {{CigarOpType::M, 20}},
+                                        second.substr(990, 10) + "ACGTACGTAC"));
+    records.push_back(std::move(unmapped));
+    for (std::int32_t i = 0; i < 12; ++i) {
+        const std::int32_t pos{140 + (i * 20)};
+        std::string seq{Uppercase(first.substr(pos, 30)) + Uppercase(first.substr(pos + 33, 20))};
+        seq[i] = OtherBase(seq[i]);
+        records.push_back(MakeAlignedRecord(
+            std::format("sorted{}", i), 0, pos,
+            {{CigarOpType::M, 30}, {CigarOpType::D, 3}, {CigarOpType::M, 20}}, std::move(seq)));
+    }
+    return records;
+}
+
+std::vector<std::string> RecordNames(const std::span<const BamRecord> records)
+{
+    std::vector<std::string> names;
+    for (const BamRecord& record : records) {
+        names.emplace_back(record.Name());
+    }
+    return names;
+}
 
 }  // namespace
 
@@ -3479,24 +3516,8 @@ TEST_F(CramWriterReaderTest, WindowedReferenceGivesTheSameFile)
     SamHeader header = MakeMinimalHeader();
     header.AddReferenceSequence(ReferenceSequence{"ref2", TEST_REFERENCE_LENGTH});
 
-    // a slice on both references, with a record past the end; then sorted slices on one
-    // reference (the slice MD5), with a deletion and a lowercase stretch
-    std::vector<BamRecord> records;
-    records.push_back(
-        MakeAlignedRecord("first", 0, 10, {{CigarOpType::M, 40}}, Uppercase(first.substr(10, 40))));
-    records.push_back(
-        MakeAlignedRecord("second", 1, 20, {{CigarOpType::M, 40}}, second.substr(20, 40)));
-    records.push_back(MakeAlignedRecord("past_end", 1, 990, {{CigarOpType::M, 20}},
-                                        second.substr(990, 10) + "ACGTACGTAC"));
-    records.push_back(MakeUnmappedRecord("unmapped", "ACGTN"));
-    for (std::int32_t i = 0; i < 12; ++i) {
-        const std::int32_t pos{140 + (i * 20)};
-        std::string seq{Uppercase(first.substr(pos, 30)) + Uppercase(first.substr(pos + 33, 20))};
-        seq[i] = OtherBase(seq[i]);
-        records.push_back(MakeAlignedRecord(
-            std::format("sorted{}", i), 0, pos,
-            {{CigarOpType::M, 30}, {CigarOpType::D, 3}, {CigarOpType::M, 20}}, std::move(seq)));
-    }
+    const std::vector<BamRecord> records{
+        WindowedReferenceRecords(first, second, MakeUnmappedRecord("unmapped", "ACGTN"))};
     const std::span<const BamRecord> all{records};
 
     const auto write = [&](const std::filesystem::path& path, const CramWriterConfig& config) {
@@ -3536,6 +3557,68 @@ TEST_F(CramWriterReaderTest, WindowedReferenceGivesTheSameFile)
     both.Reference = reference;
     EXPECT_THROW((CramWriter{tmpPath.parent_path() / "both.cram", header, both}),
                  std::runtime_error);
+}
+
+TEST_F(CramWriterReaderTest, ReaderTakesAWindowedReference)
+{
+    const std::string first{MakeTestReference()};
+    std::string second{Uppercase(first)};
+    std::ranges::reverse(second);
+    SamHeader header = MakeMinimalHeader();
+    header.AddReferenceSequence(ReferenceSequence{"ref2", TEST_REFERENCE_LENGTH});
+    const std::vector<BamRecord> records{
+        WindowedReferenceRecords(first, second, MakeUnmappedRecord("unmapped", "ACGTN"))};
+    {
+        CramWriterConfig config;
+        config.ReferenceSequences = {first, second};
+        config.RecordsPerSlice = 5;
+        config.WriteCrai = true;
+        CramWriter writer{tmpPath, header, config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+
+    // the bases of the lowercase stretch come back in upper case
+    const auto reference =
+        std::make_shared<const CopyingReference>(std::vector<std::string>{first, second});
+    const CramReaderConfig config{.Reference = reference};
+    {
+        CramReader reader{tmpPath, config};
+        std::vector<BamRecord> decoded;
+        for (const BamRecord& record : reader.Records()) {
+            decoded.push_back(record);
+        }
+        ExpectSameRecords(records, decoded);
+    }
+    EXPECT_EQ(reference->Outside(), 0);
+
+    // a query reads the reference again only for another window, and the sequential
+    // iteration goes on after it
+    const CraiIndex index{CraiIndex::FromFile(tmpCraiPath)};
+    CramReader reader{tmpPath, config};
+    std::vector<std::string> names;
+    for (std::int32_t i = 0; i < 3; ++i) {
+        names.emplace_back(reader.ReadRecord()->Name());
+    }
+    const std::vector<std::string> overlapping{"sorted6", "sorted7", "sorted8", "sorted9"};
+    EXPECT_EQ(RecordNames(reader.Query(index, 0, 300, 330)), overlapping);
+    const std::int32_t calls{reference->Calls()};
+    for (std::int32_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(RecordNames(reader.Query(index, 0, 300, 330)), overlapping);
+    }
+    EXPECT_EQ(reference->Calls(), calls);
+    while (const std::optional<BamRecord> record{reader.ReadRecord()}) {
+        names.emplace_back(record->Name());
+    }
+    EXPECT_EQ(names, RecordNames(records));
+
+    CramReaderConfig both{config};
+    both.ReferencePath = tmpPath.parent_path() / "refs.fa";
+    EXPECT_THROW((CramReader{tmpPath, both}), std::invalid_argument);
+    const CramReaderConfig tooFew{
+        .Reference = std::make_shared<const CopyingReference>(std::vector<std::string>{first})};
+    EXPECT_THROW((CramReader{tmpPath, tooFew}), std::invalid_argument);
 }
 
 TEST(CramReferenceMd5, WindowsGiveTheMd5OfTheText)

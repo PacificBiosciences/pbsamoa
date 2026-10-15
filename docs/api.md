@@ -246,7 +246,15 @@ CramReader reader{"input.cram", CramReaderConfig{
 |         Field          | Default |                                Description                                 |
 | ---------------------- | ------- | -------------------------------------------------------------------------- |
 | `ReferencePath`        | `{}`    | Optional FASTA path for reference-based slices                             |
+| `Reference`            | `{}`    | Optional `CramReference` for reference-based slices, read in windows       |
 | `DecompressionWorkers` | `0`     | CRAM block decompression workers for slice data blocks (`0` = synchronous) |
+
+With `ReferencePath`, the reader loads the whole FASTA into memory. With `Reference` (a
+`shared_ptr<const CramReference>`, one sequence per @SQ line, in header order), the reader keeps
+the bases of one window only: the span of the current slice, or 64 KiB or more for a record of a
+multi-reference slice. Several readers can share one `Reference`. The reader makes the bases upper
+case. Set `ReferencePath` or `Reference`, not both: the constructor throws
+`std::invalid_argument`, and also when `Reference` does not have one sequence per @SQ line.
 
 ### Header access
 
@@ -298,6 +306,10 @@ const auto rawRecords = reader.QueryRaw(index, refId, 1000, 2000);
 ```
 
 Use `refId = -1` for unmapped query rows.
+
+A query reads on the stream of the reader and then puts the stream back, so the sequential
+iteration (`ReadRecord`, `Records()`) goes on after it unchanged. A query does not open the file
+again, parse the header again or load the reference again.
 
 ---
 
