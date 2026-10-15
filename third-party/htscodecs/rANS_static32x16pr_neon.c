@@ -1428,11 +1428,17 @@ unsigned char *rans_uncompress_O1_32x16_neon(unsigned char *in,
     unsigned int x;
 
     uint8_t *sfb_ = htscodecs_tls_alloc(256*(TOTFREQ_O1+MAGIC2)*sizeof(*sfb_));
-    uint32_t s3[256][TOTFREQ_O1_FAST];
+    // pbsamoa: s3 (1 MiB) and fb (256 KiB) come from the heap, not the stack. On the stack
+    // they overflow the 512 KiB stack of a secondary thread on macOS.
+    uint32_t (*s3)[TOTFREQ_O1_FAST] = htscodecs_tls_alloc(256*sizeof(*s3));
+    bf_t (*fb)[256] = htscodecs_tls_alloc(256*sizeof(*fb));
 
-    if (!sfb_)
+    if (!sfb_ || !s3 || !fb) {
+        htscodecs_tls_free(fb);
+        htscodecs_tls_free(s3);
+        htscodecs_tls_free(sfb_);
         return NULL;
-    bf_t fb[256][256];
+    }
     uint8_t *sfb[256];
     if ((*cp >> 4) == TF_SHIFT_O1) {
         for (i = 0; i < 256; i++)
@@ -1957,10 +1963,14 @@ unsigned char *rans_uncompress_O1_32x16_neon(unsigned char *in,
     }
     //fprintf(stderr, "    1 Decoded %d bytes\n", (int)(ptr-in)); //c-size
 
+    htscodecs_tls_free(fb);
+    htscodecs_tls_free(s3);
     htscodecs_tls_free(sfb_);
     return out;
 
  err:
+    htscodecs_tls_free(fb);
+    htscodecs_tls_free(s3);
     htscodecs_tls_free(sfb_);
     free(out_free);
     free(c_freq);

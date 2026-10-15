@@ -15,6 +15,7 @@
 #include <pbsamoa/core/CigarOp.hpp>
 
 #include <gtest/gtest.h>
+#include <htscodecs/rANS_static4x16.h>
 #include <libdeflate.h>
 
 #include <algorithm>
@@ -34,6 +35,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+
+#include <pthread.h>
+#include <sys/mman.h>
 
 namespace PacBio {
 namespace Samoa {
@@ -1344,6 +1349,77 @@ TEST(CramCompression, RansQualityBlocksPreserveEveryByteAcrossTheSimdThreshold)
             EXPECT_EQ(block.Data, original);
         }
     }
+}
+
+TEST(CramCompression, Rans32x16Order1DecodesOnASmallThreadStack)
+{
+    // samtools writes quality values as rANS 4x16 order 1 with 32 lanes. Its NEON decoder had
+    // 1.3 MiB of tables on the stack: more than the 512 KiB of a secondary thread on macOS.
+    // Runs, as in HiFi quality values: the encoder then takes the fast order-1 tables (10-bit
+    // frequencies), which the decoder fills on the stack.
+    std::vector<std::byte> original(200'000);
+    std::uint32_t state{12345};
+    std::uint8_t previous{60};
+    for (std::byte& quality : original) {
+        state = (state * 1103515245U) + 12345U;
+        const std::uint32_t random{state >> 16};
+        if ((random % 10) == 0) {
+            previous = 33 + ((random / 10) % 40);
+        }
+        quality = std::byte{previous};
+    }
+    unsigned int compressedSize{0};
+    unsigned char* compressed{rans_compress_4x16(reinterpret_cast<unsigned char*>(original.data()),
+                                                 std::size(original), &compressedSize,
+                                                 1 | RANS_ORDER_X32)};
+    ASSERT_NE(compressed, nullptr);
+    CramBlock block;
+    block.Method = CramBlockMethod::RANS4X16;
+    block.ContentType = CramBlockContentType::EXTERNAL_DATA;
+    block.RawSize = std::ssize(original);
+    block.Data.assign(reinterpret_cast<const std::byte*>(compressed),
+                      reinterpret_cast<const std::byte*>(compressed) + compressedSize);
+    std::free(compressed);
+
+    // A POSIX thread on a stack of 512 KiB above 2 MiB of PROT_NONE pages: a frame that
+    // does not fit then faults, also where the pages below a thread stack are mapped.
+    constexpr std::size_t STACK_BYTES{std::size_t{512} * 1024};
+    constexpr std::size_t GUARD_BYTES{std::size_t{2} * 1024 * 1024};
+    void* const mapping{mmap(nullptr, GUARD_BYTES + STACK_BYTES, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANON, -1, 0)};
+    ASSERT_NE(mapping, MAP_FAILED);
+    ASSERT_EQ(mprotect(mapping, GUARD_BYTES, PROT_NONE), 0);
+
+    struct Job
+    {
+        CramBlock& Block;
+        bool Failed{false};
+    } job{.Block = block};
+
+    pthread_attr_t attributes;
+    ASSERT_EQ(pthread_attr_init(&attributes), 0);
+    ASSERT_EQ(pthread_attr_setstack(&attributes, static_cast<std::byte*>(mapping) + GUARD_BYTES,
+                                    STACK_BYTES),
+              0);
+    pthread_t thread;
+    ASSERT_EQ(pthread_create(
+                  &thread, &attributes,
+                  [](void* argument) -> void* {
+                      Job& self{*static_cast<Job*>(argument)};
+                      try {
+                          DecompressCramBlock(self.Block);
+                      } catch (...) {
+                          self.Failed = true;
+                      }
+                      return nullptr;
+                  },
+                  &job),
+              0);
+    ASSERT_EQ(pthread_join(thread, nullptr), 0);
+    pthread_attr_destroy(&attributes);
+    munmap(mapping, GUARD_BYTES + STACK_BYTES);
+    EXPECT_FALSE(job.Failed);
+    EXPECT_EQ(block.Data, original);
 }
 
 TEST(CramCompression, QualityPackingPreservesAllAlphabetWidthsAndVectorTails)
