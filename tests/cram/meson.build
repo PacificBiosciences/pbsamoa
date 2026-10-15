@@ -13,6 +13,7 @@ if cram_script.found()
         'chunk_three_way',
         'chunk_two_way',
         'cli_validation',
+        'depth',
         'dump_header_flags',
         'cram_query_pbsamoa',
         'cram_query_samtools',

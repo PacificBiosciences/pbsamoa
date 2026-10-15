@@ -165,6 +165,39 @@ larger target with the same seed keeps a superset of the reads.
 
 The output header gets `@CO Sub-sampled yield=Y seed=S`.
 
+### depth — mean read depth in bins
+
+Write the mean read depth of each bin of each contig. The tool counts the same
+positions as `samtools depth -J`: `M`, `=`, `X` and `D` count, `N` does not.
+Unmapped, secondary, QC-fail and duplicate records do not count; supplementary
+records and MAPQ 0 do.
+
+```sh
+pbsamoa depth aligned.bam depth.tsv                  # 1 kb bins
+pbsamoa depth --bin-size 10000 aligned.bam depth.tsv
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--bin-size N` | Bin size in bp (default 1000) |
+| `--threads N` | BGZF threads and depth-sum threads; -1 = auto (default) |
+| `--status-json PATH` | Write a live status stream to PATH, as `subsample` |
+
+The output is a TSV file with a `#contig  start  end  mean_depth` header line.
+It has one line for each bin of each contig, in header order, also for bins and
+contigs without reads. `start` is 0-based and `end` is exclusive. The last bin
+of a contig is shorter. The mean prints as the shortest text that reads back as
+the same double, so `mean_depth * (end - start)` gives the exact integer sum of
+the depth in the bin.
+
+The tool reads the BAM once and does not need an index or a sorted input. Each
+thread keeps one 8-byte sum for each bin: for GRCh38 at 1 kb, that is 25 MB for
+each thread. The status stream has one phase, `depth`, in reads. Its metrics
+are `records`, `counted_records`, `depth_bases` (the sum of the depth over all
+positions), `bins` and `bin_size`.
+
 ### sort — sort a BAM file
 
 Sort a BAM file by coordinate, query name, or a 2-char tag, using a RAM-bounded

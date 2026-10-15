@@ -3,6 +3,7 @@
 #include "bench/Bench.hpp"
 #include "chunk/Chunk.hpp"
 #include "convert/Convert.hpp"
+#include "depth/Depth.hpp"
 #include "dump/Dump.hpp"
 #include "merge/Merge.hpp"
 #include "sort/Sort.hpp"
@@ -32,6 +33,7 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         {"merge", MergeTool::CreateInterface(), &MergeTool::Runner},
         {"convert", Convert::CreateInterface(), &Convert::Runner},
         {"subsample", Subsample::CreateInterface(), &Subsample::Runner},
+        {"depth", Depth::CreateInterface(), &Depth::Runner},
         {"undo", Undo::CreateInterface(), &Undo::Runner},
         {"bai-build", BaiBuild::CreateInterface(), &BaiBuild::Runner},
         {"bai-query", BaiQuery::CreateInterface(), &BaiQuery::Runner},
@@ -52,6 +54,7 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         "  pbsamoa merge      out.bam a.bam b.bam     Merge or concatenate BAMs\n"
         "  pbsamoa subsample  --fraction 0.1 in.bam out.bam  Keep 10% of templates\n"
         "  pbsamoa subsample  --yield 60G in.bam out.bam     Keep random ZMWs up to 60 Gb\n"
+        "  pbsamoa depth      aligned.bam depth.tsv  Mean depth in 1 kb bins\n"
         "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
         "  pbsamoa zmi-index  input.bam              Build .zmi sidecar (no rewrite)\n"
         "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
