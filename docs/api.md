@@ -632,7 +632,11 @@ BamRecord record = view.ToOwned();
 BamRecord record = view.ToOwned(DropTags{TagKey{'i','p'}, TagKey{'p','w'}});
 BamRecord record = view.ToOwned(KeepTags{TagKey{'R','G'}});
 TagMap tags = view.ParseTags();
+RawRecord raw = RawRecord::FromBamRecord(record);  // serialized in place, no second copy
 ```
+
+`RawRecord::SetNext(nextRefId, nextPos)` and `SetTlen(tlen)` set the mate fields of an owned
+record in place (the CRAM reader resolves attached mates on raw records).
 
 ---
 
