@@ -11,6 +11,7 @@
 #include <pbsamoa/core/Endian.hpp>
 #include <pbsamoa/core/RawRecord.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
+#include <pbsamoa/core/Tags.hpp>
 #include <pbsamoa/index/ZmwIndex.hpp>
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamWriter.hpp>
@@ -21,6 +22,7 @@
 #include <pbcopper/cli2/Results.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <filesystem>
@@ -51,6 +53,16 @@ constexpr std::size_t BAM_TEXT_OFFSET{8};  // magic(4) + l_text(4)
 constexpr std::size_t MAX_BGZF_BLOCK{65536};
 // samtools keeps 24 bits of the read-name hash. The yield mode uses the same resolution.
 constexpr std::uint32_t NUM_BUCKETS{std::uint32_t{1} << 24};
+// The HiFi kinetics: by strand (fi, fp, ri, rp) and over both strands (ip, pw). They are one
+// byte per base each, about 70% of a HiFi BAM with by-strand kinetics.
+constexpr std::array<TagKey, 6> KINETIC_TAGS{{
+    {'f', 'i'},
+    {'f', 'p'},
+    {'r', 'i'},
+    {'r', 'p'},
+    {'i', 'p'},
+    {'p', 'w'},
+}};
 
 const CLI_v2::Option Fraction{
     R"({
@@ -90,6 +102,12 @@ const CLI_v2::Option Compression{
     "description" : "Output BGZF compression level in [1, 12].",
     "type" : "integer",
     "default" : 6
+})"};
+
+const CLI_v2::Option StripKinetics{
+    R"({
+    "names" : ["strip-kinetics"],
+    "description" : "Remove the HiFi kinetics tags fi, fp, ri, rp, ip and pw from the kept records."
 })"};
 
 const CLI_v2::Option StatusJson{
@@ -365,13 +383,35 @@ JSON::Json CountsJson(const Counts& counts)
             {"kept_bases", counts.KeptBases}};
 }
 
-/// Copy each record whose bucket is below \p cutoff. Adds the records of each batch to
-/// \p done for the status stream.
+/// Copy the raw bytes of \p view to \p out without the kinetics tags. The fields before
+/// the aux data and the order of the other tags do not change.
+void CopyWithoutKinetics(const RawRecordView& view, std::vector<std::byte>& out)
+{
+    const std::span<const std::byte> raw{view.RawData()};
+    const std::span<const std::byte> aux{view.AuxData()};
+    out.assign(std::begin(raw), std::end(raw) - std::ssize(aux));
+    std::size_t offset{0};
+    while (offset < std::size(aux)) {
+        const std::size_t size{BamAuxEntrySize(aux, offset)};
+        const TagKey key{std::to_integer<char>(aux[offset]),
+                         std::to_integer<char>(aux[offset + 1])};
+        if (!std::ranges::contains(KINETIC_TAGS, key)) {
+            const std::span<const std::byte> entry{aux.subspan(offset, size)};
+            out.insert(std::end(out), std::begin(entry), std::end(entry));
+        }
+        offset += size;
+    }
+}
+
+/// Copy each record whose bucket is below \p cutoff, without the kinetics tags if
+/// \p stripKinetics. Adds the records of each batch to \p done for the status stream.
 template <typename BUCKET_OF>
 Counts WriteSubsample(BamRawReader& reader, BamWriter& writer, const std::uint32_t cutoff,
-                      const BUCKET_OF& bucketOf, std::atomic<std::int64_t>& done)
+                      const bool stripKinetics, const BUCKET_OF& bucketOf,
+                      std::atomic<std::int64_t>& done)
 {
     Counts counts;
+    std::vector<std::byte> stripped;
     while (const std::optional<RawRecordBatch> batch{reader.ReadBatch()}) {
         for (std::size_t i{0}; i < batch->RecordCount(); ++i) {
             const RawRecordView view{batch->View(i)};
@@ -379,7 +419,12 @@ Counts WriteSubsample(BamRawReader& reader, BamWriter& writer, const std::uint32
             ++counts.Records;
             counts.Bases += bases;
             if (bucketOf(view) < cutoff) {
-                writer.Write(view);
+                if (stripKinetics) {
+                    CopyWithoutKinetics(view, stripped);
+                    writer.Write(std::span<const std::byte>{stripped});
+                } else {
+                    writer.Write(view);
+                }
                 ++counts.KeptRecords;
                 counts.KeptBases += bases;
             }
@@ -398,6 +443,7 @@ struct Settings
     std::uint32_t Seed{0};
     std::size_t NumThreads{0};
     std::int32_t Compression{6};
+    bool StripKinetics{false};
     std::filesystem::path StatusJson;
 };
 
@@ -430,6 +476,8 @@ Settings ParseSettings(const CLI_v2::Results& results)
     settings.NumThreads = Tools::ResolveNumWorkers(requestedThreads, MAX_THREADS);
     const std::int32_t compression{results[Compression]};
     settings.Compression = Tools::CheckCompressionLevel(compression);
+    const bool stripKinetics = results[StripKinetics];
+    settings.StripKinetics = stripKinetics;
     const std::string statusJson = results[StatusJson];
     settings.StatusJson = statusJson;
     return settings;
@@ -480,18 +528,18 @@ YieldPlan PlanYield(const Settings& settings, Tools::StatusStream& status)
 }
 
 Counts WriteYieldSubsample(BamRawReader& reader, BamWriter& writer, const YieldPlan& plan,
-                           const std::uint32_t seed, std::atomic<std::int64_t>& done)
+                           const Settings& settings, std::atomic<std::int64_t>& done)
 {
     std::size_t row{0};
     const Counts counts{WriteSubsample(
-        reader, writer, plan.Cutoff,
+        reader, writer, plan.Cutoff, settings.StripKinetics,
         [&](const RawRecordView& view) {
             const ZmwIdentity id{YieldIdentity(view)};
             if (plan.Pbi) {
                 CheckPbiRow(*plan.Pbi, row, id, view.SeqLength());
                 ++row;
             }
-            return ZmwBucket(id, seed);
+            return ZmwBucket(id, settings.Seed);
         },
         done)};
     if (plan.Pbi && (row != plan.Pbi->NumRecords())) {
@@ -502,12 +550,12 @@ Counts WriteYieldSubsample(BamRawReader& reader, BamWriter& writer, const YieldP
     return counts;
 }
 
-Counts WriteFractionSubsample(BamRawReader& reader, BamWriter& writer, const double fraction,
-                              const std::uint32_t seed, std::atomic<std::int64_t>& done)
+Counts WriteFractionSubsample(BamRawReader& reader, BamWriter& writer, const Settings& settings,
+                              std::atomic<std::int64_t>& done)
 {
-    const std::uint32_t scrambledSeed{ScrambleSeed(seed)};
+    const std::uint32_t scrambledSeed{ScrambleSeed(settings.Seed)};
     return WriteSubsample(
-        reader, writer, CutoffForFraction(fraction),
+        reader, writer, CutoffForFraction(settings.Fraction), settings.StripKinetics,
         [&](const RawRecordView& view) { return NameBucket(view.Name(), scrambledSeed); }, done);
 }
 
@@ -564,7 +612,7 @@ CLI_v2::Interface CreateInterface()
     // `subsample` keeps its own --threads (-1 = auto, capped at min(hw, 8)); the built-in
     // --num-threads resolves 0 to the raw hardware count, which would drop that cap.
     interface.DisableNumThreadsOption();
-    interface.AddOptions({Fraction, Yield, Seed, Threads, Compression, StatusJson});
+    interface.AddOptions({Fraction, Yield, Seed, Threads, Compression, StripKinetics, StatusJson});
     interface.AddPositionalArguments({Input, Output});
     return interface;
 }
@@ -593,7 +641,7 @@ int Runner(const CLI_v2::Results& results)
                 std::format("Sub-sampled yield={} seed={}", *settings.TargetBases, settings.Seed),
                 status, plan.InputRecords,
                 [&](BamRawReader& reader, BamWriter& writer, std::atomic<std::int64_t>& done) {
-                    return WriteYieldSubsample(reader, writer, plan, settings.Seed, done);
+                    return WriteYieldSubsample(reader, writer, plan, settings, done);
                 });
             PrintCounts(counts,
                         std::format("target {}, seed {}, {}", *settings.TargetBases, settings.Seed,
@@ -612,8 +660,7 @@ int Runner(const CLI_v2::Results& results)
                 std::format("Sub-sampled fraction={:g} seed={}", settings.Fraction, settings.Seed),
                 status, total,
                 [&](BamRawReader& reader, BamWriter& writer, std::atomic<std::int64_t>& done) {
-                    return WriteFractionSubsample(reader, writer, settings.Fraction, settings.Seed,
-                                                  done);
+                    return WriteFractionSubsample(reader, writer, settings, done);
                 });
             PrintCounts(counts,
                         std::format("fraction {:g}, seed {}", settings.Fraction, settings.Seed));
@@ -621,6 +668,9 @@ int Runner(const CLI_v2::Results& results)
             metrics["fraction"] = settings.Fraction;
         }
         metrics["seed"] = settings.Seed;
+        if (settings.StripKinetics) {
+            metrics["strip_kinetics"] = true;
+        }
         status.Final(
             "FINISHED", {}, std::move(metrics),
             JSON::Json::array({{{"path", std::filesystem::absolute(settings.Output).string()},

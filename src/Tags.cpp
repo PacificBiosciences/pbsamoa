@@ -749,6 +749,56 @@ TagMap ParseTagsFromBam(std::span<const std::byte> data)
     return result;
 }
 
+std::size_t BamAuxEntrySize(const std::span<const std::byte> data, const std::size_t offset)
+{
+    RequireBamAuxBytes(data, offset, 3);
+    const char type{std::to_integer<char>(data[offset + 2])};
+    const std::size_t valueOffset{offset + 3};
+    std::size_t valueSize{0};
+    switch (type) {
+        case 'A':
+        case 'c':
+        case 'C':
+            valueSize = 1;
+            break;
+        case 's':
+        case 'S':
+            valueSize = 2;
+            break;
+        case 'i':
+        case 'I':
+        case 'f':
+            valueSize = 4;
+            break;
+        case 'Z':
+        case 'H': {
+            const std::span<const std::byte> text{data.subspan(valueOffset)};
+            const auto nul{std::ranges::find(text, std::byte{0})};
+            if (nul == std::ranges::end(text)) {
+                throw std::runtime_error{"Tags: unterminated BAM auxiliary text payload"};
+            }
+            valueSize = (nul - std::ranges::begin(text)) + 1;
+            break;
+        }
+        case 'B': {
+            RequireBamAuxBytes(data, valueOffset, 5);
+            const char elemType{std::to_integer<char>(data[valueOffset])};
+            const std::size_t elemSize{TagArrayElementSize(elemType)};
+            if (elemSize == 0) {
+                throw std::runtime_error{
+                    std::format("Tags: unsupported B-array element type '{}'", elemType)};
+            }
+            const std::size_t count{ReadU32LE(std::data(data) + valueOffset + 1)};
+            valueSize = 5 + (count * elemSize);
+            break;
+        }
+        default:
+            throw std::runtime_error{std::format("Tags: unsupported BAM tag type '{}'", type)};
+    }
+    RequireBamAuxBytes(data, valueOffset, valueSize);
+    return 3 + valueSize;
+}
+
 std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text)
 {
     // Format: XX:T:VALUE  (minimum length 5: 2 key + ':' + type + ':')

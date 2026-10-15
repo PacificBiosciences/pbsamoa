@@ -108,6 +108,10 @@ inline const TagKey RG_TAG{'R', 'G'};
 /// \throws std::runtime_error if \p data contains malformed or unsupported tag data.
 TagMap ParseTagsFromBam(std::span<const std::byte> data);
 
+/// \brief The byte size of the raw BAM aux entry at \p offset: the key, the type and the value.
+/// \throws std::runtime_error if the entry is truncated or has an unsupported type.
+std::size_t BamAuxEntrySize(std::span<const std::byte> data, std::size_t offset);
+
 /// \brief Parse a single tag from SAM text (e.g., "NM:i:5").
 std::optional<std::pair<TagKey, TagValue>> ParseTagFromSam(std::string_view text);
 

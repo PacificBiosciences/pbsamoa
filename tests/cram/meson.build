@@ -55,6 +55,7 @@ if cram_script.found()
         'sort_errors',
         'sort_queryname',
         'sort_spill',
+        'subsample_kinetics',
         'subsample_samtools',
         'subsample_status',
         'subsample_yield',

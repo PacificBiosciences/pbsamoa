@@ -2,10 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <limits>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -447,6 +449,51 @@ TEST(TagBamSerialize, BArrayIntExtremesFillTheSizedBuffer)
     // When count equals 0, the buffer size is zero. The writer must return startPos
     // unchanged and must not emit a stray separator.
     EXPECT_EQ(serialize('i', 0, {}), "\tXA:B:i");
+}
+
+TEST(TagBamAuxEntrySize, WalksEachEntryOfEveryType)
+{
+    TagArray kinetics{'C'};
+    kinetics.Resize(3);
+    TagMap tags;
+    tags.Set(TagKey{'X', 'A'}, TagValue{'q'});
+    tags.Set(TagKey{'N', 'M'}, TagValue{std::int64_t{7}});
+    tags.Set(TagKey{'X', 'S'}, TagValue{std::int64_t{-300}});
+    tags.Set(TagKey{'z', 'm'}, TagValue{std::int64_t{2756925}});
+    tags.Set(TagKey{'r', 'q'}, TagValue{0.999f});
+    tags.Set(TagKey{'R', 'G'}, TagValue{std::string{"c98fae94"}});
+    tags.Set(TagKey{'X', 'H'}, TagValue{HexString{"1AE3"}});
+    tags.Set(TagKey{'f', 'i'}, TagValue{kinetics});
+    const std::vector<std::byte> data{SerializeTagsToBam(tags)};
+
+    std::vector<TagKey> keys;
+    std::size_t offset{0};
+    while (offset < std::size(data)) {
+        const std::size_t size{BamAuxEntrySize(data, offset)};
+        const TagMap entry{ParseTagsFromBam(std::span{data}.subspan(offset, size))};
+        ASSERT_EQ(entry.Size(), 1UZ);
+        keys.push_back(entry.Entries()[0].first);
+        offset += size;
+    }
+    EXPECT_EQ(offset, std::size(data));
+    EXPECT_TRUE(std::ranges::equal(keys, tags.Entries(), {}, {}, &TagMap::Entry::first));
+}
+
+TEST(TagBamAuxEntrySize, RejectsMalformedEntries)
+{
+    const std::vector<std::vector<std::byte>> malformed{
+        {std::byte{'N'}, std::byte{'M'}},                                  // incomplete header
+        {std::byte{'N'}, std::byte{'M'}, std::byte{'i'}, std::byte{1}},    // truncated int32
+        {std::byte{'R'}, std::byte{'G'}, std::byte{'Z'}, std::byte{'x'}},  // no NUL
+        {std::byte{'X'}, std::byte{'X'}, std::byte{'q'}, std::byte{0}},    // unknown type
+        {std::byte{'X'}, std::byte{'X'}, std::byte{'B'}, std::byte{'x'}, std::byte{0}, std::byte{0},
+         std::byte{0}, std::byte{0}},  // unknown array element type
+        {std::byte{'X'}, std::byte{'A'}, std::byte{'B'}, std::byte{'I'}, std::byte{1}, std::byte{0},
+         std::byte{0}, std::byte{0}},  // array count 1, no payload
+    };
+    for (const auto& data : malformed) {
+        EXPECT_THROW((void)BamAuxEntrySize(data, 0), std::runtime_error);
+    }
 }
 
 TEST(TagBamParse, EmptyData)
