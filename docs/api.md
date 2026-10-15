@@ -311,6 +311,18 @@ A query reads on the stream of the reader and then puts the stream back, so the 
 iteration (`ReadRecord`, `Records()`) goes on after it unchanged. A query does not open the file
 again, parse the header again or load the reference again.
 
+To decode each slice once for many queries, take the slices of a region from the index and
+decode each one whole:
+
+```cpp
+for (const CraiEntry& row : index.Query(refId, 1000, 2000)) {  // one row per slice, file order
+    const std::vector<RawRecord> records = reader.ReadSliceRaw(row);  // or ReadSlice
+}
+```
+
+`ReadSlice` reads on the stream of the reader as `Query` does. A multi-reference slice also has
+the records of other references.
+
 ---
 
 ## CramWriter

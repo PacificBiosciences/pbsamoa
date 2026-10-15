@@ -693,42 +693,22 @@ struct SliceQueryCandidate
     std::int64_t SliceSize{};
 };
 
-std::array<std::int64_t, 3> SliceQueryCandidateKey(const SliceQueryCandidate& candidate)
+SliceQueryCandidate SliceCandidate(const CraiEntry& entry)
 {
-    return {candidate.ContainerOffset, candidate.SliceOffset, candidate.SliceSize};
+    return {
+        .ContainerOffset = entry.ContainerOffset,
+        .SliceOffset = entry.SliceOffset,
+        .SliceSize = entry.SliceSize,
+    };
 }
 
 std::vector<SliceQueryCandidate> BuildSliceCandidates(const CraiIndex& index, std::int32_t refId,
                                                       std::int32_t beg, std::int32_t end)
 {
     std::vector<SliceQueryCandidate> candidates;
-
-    const auto entries = index.EntriesForReference(refId);
-    candidates.reserve(std::size(entries));
-
-    for (const CraiEntry& entry : entries) {
-        if (refId >= 0) {
-            const std::int64_t rowBeg = entry.AlignmentStart - 1;
-            const std::int64_t rowEnd =
-                rowBeg + std::max<std::int64_t>(entry.AlignmentSpan, static_cast<std::int64_t>(1));
-            if (!(rowBeg < end && rowEnd > beg)) {
-                continue;
-            }
-        } else if (entry.SequenceId != -1) {
-            continue;
-        }
-
-        candidates.push_back(SliceQueryCandidate{
-            .ContainerOffset = entry.ContainerOffset,
-            .SliceOffset = entry.SliceOffset,
-            .SliceSize = entry.SliceSize,
-        });
+    for (const CraiEntry& entry : index.Query(refId, beg, end)) {
+        candidates.push_back(SliceCandidate(entry));
     }
-
-    std::ranges::sort(candidates, {}, SliceQueryCandidateKey);
-    const auto duplicateStart =
-        std::ranges::unique(candidates, std::ranges::equal_to{}, SliceQueryCandidateKey);
-    candidates.erase(duplicateStart.begin(), std::end(candidates));
     return candidates;
 }
 
@@ -1407,6 +1387,30 @@ struct CramReader::Impl
 
     /// \brief The records of the slice of a CRAI row. With stopPos, the decode can stop at the
     ///        first record at stopPos or later (see DecodeContainerRecords).
+    /// \brief Runs read on the stream of this reader, then puts the stream back, so that the
+    ///        sequential iteration goes on unchanged: its decoded records are in
+    ///        pendingRecords, which read does not change. A second reader for each query
+    ///        would parse the header and load a ReferencePath FASTA again each time.
+    template <typename READ>
+    void OnIndexedStream(READ&& read)
+    {
+        file.clear();
+        const std::streampos position{file.tellg()};
+        const bool wasAtEof{atEof};
+        const auto restore = [this, position, wasAtEof]() {
+            file.clear();
+            file.seekg(position);
+            atEof = wasAtEof;
+        };
+        try {
+            read();
+        } catch (...) {
+            restore();
+            throw;
+        }
+        restore();
+    }
+
     std::vector<BamRecord> LoadIndexedSliceRecords(
         const SliceQueryCandidate& candidate,
         const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
@@ -1941,24 +1945,10 @@ std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t re
         return {};
     }
 
-    // The query reads on the stream of this reader, then puts the stream back, so the
-    // sequential iteration goes on unchanged: its decoded records are in pendingRecords,
-    // which the query does not change. A second reader for each query would parse the header
-    // and load a ReferencePath FASTA again each time.
-    Impl& impl{*impl_};
-    impl.file.clear();
-    const std::streampos position{impl.file.tellg()};
-    const bool atEof{impl.atEof};
-    const auto restore = [&impl, position, atEof]() {
-        impl.file.clear();
-        impl.file.seekg(position);
-        impl.atEof = atEof;
-    };
-
     std::vector<BamRecord> queriedRecords;
-    try {
+    impl_->OnIndexedStream([&]() {
         for (const SliceQueryCandidate& candidate : candidates) {
-            std::vector<BamRecord> decoded = impl.LoadIndexedSliceRecords(
+            std::vector<BamRecord> decoded = impl_->LoadIndexedSliceRecords(
                 candidate, (refId >= 0) ? end : std::numeric_limits<std::int64_t>::max());
             for (BamRecord& record : decoded) {
                 if (KeepRecordForQuery(record, refId, beg, end)) {
@@ -1966,12 +1956,27 @@ std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t re
                 }
             }
         }
-    } catch (...) {
-        restore();
-        throw;
-    }
-    restore();
+    });
     return queriedRecords;
+}
+
+std::vector<BamRecord> CramReader::ReadSlice(const CraiEntry& entry)
+{
+    std::vector<BamRecord> records;
+    impl_->OnIndexedStream(
+        [&]() { records = impl_->LoadIndexedSliceRecords(SliceCandidate(entry)); });
+    return records;
+}
+
+std::vector<RawRecord> CramReader::ReadSliceRaw(const CraiEntry& entry)
+{
+    const std::vector<BamRecord> records{ReadSlice(entry)};
+    std::vector<RawRecord> rawRecords;
+    rawRecords.reserve(std::size(records));
+    for (const BamRecord& record : records) {
+        rawRecords.push_back(ToRawRecord(record));
+    }
+    return rawRecords;
 }
 
 std::vector<RawRecord> CramReader::QueryRaw(const CraiIndex& index, std::int32_t refId,

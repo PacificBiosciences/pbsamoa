@@ -35,6 +35,14 @@ public:
     /// Includes unmapped rows when refId is -1.
     [[nodiscard]] std::vector<CraiEntry> EntriesForReference(std::int32_t refId) const;
 
+    /// \brief The rows of the slices that overlap [beg, end) of refId (0-based, end exclusive),
+    ///        one row for each slice, in file order (container offset, then slice offset).
+    ///
+    /// A multi-reference slice has a row for each reference: the result keeps one of them.
+    /// For refId -1, the rows of the unmapped records.
+    [[nodiscard]] std::vector<CraiEntry> Query(std::int32_t refId, std::int64_t beg,
+                                               std::int64_t end) const;
+
 private:
     void AddEntry(CraiEntry entry);
 

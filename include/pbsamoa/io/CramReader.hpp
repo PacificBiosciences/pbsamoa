@@ -78,6 +78,15 @@ public:
     std::vector<RawRecord> QueryRaw(const CraiIndex& index, std::int32_t refId, std::int32_t beg,
                                     std::int32_t end);
 
+    /// \brief All records of the slice of a CRAI row (from CraiIndex::Query), in file order.
+    ///
+    /// Like Query, it reads on the stream of the reader, and the sequential iteration goes on
+    /// unchanged. A caller that keeps decoded slices queries each slice once.
+    std::vector<BamRecord> ReadSlice(const CraiEntry& entry);
+
+    /// \brief ReadSlice with raw BAM-layout records.
+    std::vector<RawRecord> ReadSliceRaw(const CraiEntry& entry);
+
     /// \brief Range interface for iteration.
     class RecordRange : public std::ranges::view_interface<RecordRange>
     {

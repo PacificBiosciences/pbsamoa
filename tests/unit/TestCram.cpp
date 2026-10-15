@@ -3621,6 +3621,53 @@ TEST_F(CramWriterReaderTest, ReaderTakesAWindowedReference)
     EXPECT_THROW((CramReader{tmpPath, tooFew}), std::invalid_argument);
 }
 
+TEST_F(CramWriterReaderTest, ReadSliceGivesTheRecordsOfEachCraiRow)
+{
+    const std::string first{MakeTestReference()};
+    std::string second{Uppercase(first)};
+    std::ranges::reverse(second);
+    SamHeader header = MakeMinimalHeader();
+    header.AddReferenceSequence(ReferenceSequence{"ref2", TEST_REFERENCE_LENGTH});
+    const std::vector<BamRecord> records{
+        WindowedReferenceRecords(first, second, MakeUnmappedRecord("unmapped", "ACGTN"))};
+    {
+        CramWriterConfig config;
+        config.ReferenceSequences = {first, second};
+        config.RecordsPerSlice = 5;
+        config.WriteCrai = true;
+        CramWriter writer{tmpPath, header, config};
+        for (const BamRecord& record : records) {
+            writer.Write(record);
+        }
+    }
+    const CraiIndex index{CraiIndex::FromFile(tmpCraiPath)};
+    const CramReaderConfig config{.Reference = std::make_shared<const CopyingReference>(
+                                      std::vector<std::string>{first, second})};
+    CramReader reader{tmpPath, config};
+
+    // one row for each slice, in file order; the first slice has records on both references
+    const std::vector<CraiEntry> rows{index.Query(0, 0, TEST_REFERENCE_LENGTH)};
+    ASSERT_GE(std::size(rows), 2U);
+    EXPECT_TRUE(std::ranges::is_sorted(rows, {}, [](const CraiEntry& row) {
+        return std::pair{row.ContainerOffset, row.SliceOffset};
+    }));
+    EXPECT_EQ(std::size(index.Query(0, 145, 150)), 1U);
+    EXPECT_TRUE(std::empty(index.Query(0, 0, 10)));
+
+    const std::string firstName{reader.ReadRecord()->Name()};
+    std::vector<std::string> fromSlices;
+    for (const CraiEntry& row : rows) {
+        for (const RawRecord& record : reader.ReadSliceRaw(row)) {
+            if (record.RefId() == 0) {
+                fromSlices.emplace_back(record.Name());
+            }
+        }
+    }
+    EXPECT_EQ(fromSlices, RecordNames(reader.Query(index, 0, 0, TEST_REFERENCE_LENGTH)));
+    EXPECT_EQ(reader.ReadRecord()->Name(), records[1].Name());
+    EXPECT_EQ(firstName, records[0].Name());
+}
+
 TEST(CramReferenceMd5, WindowsGiveTheMd5OfTheText)
 {
     // 40 windows of 64 KiB, with lowercase bases

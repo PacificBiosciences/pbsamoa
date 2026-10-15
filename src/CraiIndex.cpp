@@ -183,6 +183,36 @@ std::vector<CraiEntry> CraiIndex::EntriesForReference(std::int32_t refId) const
     return it->second;
 }
 
+std::vector<CraiEntry> CraiIndex::Query(const std::int32_t refId, const std::int64_t beg,
+                                        const std::int64_t end) const
+{
+    std::vector<CraiEntry> rows;
+    const auto it{entries_.find(refId)};
+    if (it == std::end(entries_)) {
+        return rows;
+    }
+    for (const CraiEntry& entry : it->second) {
+        if (refId >= 0) {
+            const std::int64_t rowBeg{entry.AlignmentStart - 1};
+            const std::int64_t rowEnd{rowBeg + std::max<std::int64_t>(entry.AlignmentSpan, 1)};
+            if ((rowBeg >= end) || (rowEnd <= beg)) {
+                continue;
+            }
+        } else if (entry.SequenceId != -1) {
+            continue;
+        }
+        rows.push_back(entry);
+    }
+    const auto key = [](const CraiEntry& entry) {
+        return std::array<std::int64_t, 3>{entry.ContainerOffset, entry.SliceOffset,
+                                           entry.SliceSize};
+    };
+    std::ranges::sort(rows, {}, key);
+    const auto duplicates{std::ranges::unique(rows, std::ranges::equal_to{}, key)};
+    rows.erase(std::begin(duplicates), std::end(rows));
+    return rows;
+}
+
 void CraiIndex::AddEntry(CraiEntry entry)
 {
     entries_[entry.SequenceId].push_back(std::move(entry));
