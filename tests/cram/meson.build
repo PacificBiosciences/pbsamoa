@@ -54,6 +54,8 @@ if cram_script.found()
         'sort_errors',
         'sort_queryname',
         'sort_spill',
+        'subsample_samtools',
+        'subsample_yield',
         'undo_lima',
         'zmi_build',
         'zmi_chunk',

@@ -59,4 +59,22 @@ read_c	0	chr1	300	30	5M	*	0	0	ACGTA	IIIII
 EOF
 samtools view -bS "${OUTDIR}/unsorted.sam" > "${OUTDIR}/unsorted.bam"
 
+# 5. Unaligned HiFi BAM with a .pbi (300 ZMWs, two of them split by strand)
+python3 -c "
+import random
+random.seed(7)
+movie = 'm84000_240101_000000_s1'
+print('@HD\tVN:1.6\tSO:unknown\tpb:5.0.0')
+print(f'@RG\tID:a1b2c3d4\tPL:PACBIO\tDS:READTYPE=CCS;BINDINGKIT=102-739-100;SEQUENCINGKIT=102-118-800;BASECALLERVERSION=5.0;FRAMERATEHZ=100.000000\tPU:{movie}\tPM:REVIO')
+zmws = sorted(random.sample(range(1, 50000000), 300))
+for i, zmw in enumerate(zmws):
+    suffixes = ['ccs/fwd', 'ccs/rev'] if i in (10, 200) else ['ccs']
+    for suffix in suffixes:
+        length = random.randint(200, 2000)
+        seq = ''.join(random.choice('ACGT') for _ in range(length))
+        qual = ''.join(chr(33 + random.randint(20, 40)) for _ in range(length))
+        print(f'{movie}/{zmw}/{suffix}\t4\t*\t0\t255\t*\t*\t0\t0\t{seq}\t{qual}\tRG:Z:a1b2c3d4\tzm:i:{zmw}\trq:f:0.999')
+" | samtools view -b --no-PG -o "${OUTDIR}/hifi.bam" -
+python3 "$(dirname "$0")/make_pbi.py" "${OUTDIR}/hifi.bam"
+
 echo "Test data generated in ${OUTDIR}"

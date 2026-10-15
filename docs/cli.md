@@ -91,6 +91,62 @@ groups collapse onto their base ID and lima `@PG` records are removed.
 pbsamoa undo demux.bam original.bam
 ```
 
+### subsample — keep a fraction of the templates, or a target yield
+
+Keep a fraction of the templates in a BAM file, or keep random ZMWs until their
+bases reach a target yield. Give `--fraction` or `--yield`, not both.
+
+```sh
+pbsamoa subsample --fraction 0.1 input.bam output.bam            # auto seed
+pbsamoa subsample --fraction 0.1 --seed 42 input.bam output.bam  # fixed seed
+pbsamoa subsample --yield 60G hifi_reads.bam output.bam          # 60 * 10^9 bases
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--fraction F` | Fraction of templates to keep, in (0, 1] |
+| `--yield Y` | Target yield in bases; suffixes K, M, G, T are powers of 1000 |
+| `--seed S` | Unsigned integer, or `auto` (default): the FNV-1a hash of the input header text, as in samtools >= 1.24 |
+| `--threads N` | BGZF threads for reading and for writing; -1 = auto (default) |
+| `--compression N` | Output BGZF compression level in [1, 12] (default 6) |
+
+Both modes write a `@PG` record. The tool prints the kept records and bases on
+stderr.
+
+**`--fraction`** replaces `samtools view --subsample FRAC --subsample-seed SEED`
+and keeps the same records. The tool hashes the read name, so all records of a
+template (mates, subreads of one ZMW name) are kept or dropped together. The
+output header gets `@CO Sub-sampled fraction=F seed=S`, as samtools writes it.
+Like samtools, the tool scrambles a non-zero seed with the C library `rand()`.
+glibc and macOS give different values, so for a non-zero seed the kept records
+are the same as samtools on the same platform only. Seed 0 gives the same
+records on every platform. Unlike samtools, `--fraction 0` is an error, not
+"keep everything".
+
+**`--yield`** is for unaligned HiFi reads. The yield is the sum of the read
+lengths. The tool hashes (read group, ZMW) with the seed into 2^24 buckets and
+keeps the buckets in hash order until their bases reach the target. Thus the
+kept yield is at least the target, and it overshoots by less than one bucket,
+usually one read. Both strand records of a by-strand ZMW stay together. A
+larger target with the same seed keeps a superset of the reads.
+
+- With `BAM.pbi`, the tool reads the lengths from the index (`qEnd - qStart`)
+  and reads the BAM once. It checks each record against its index row and stops
+  with an error if the `.pbi` is stale. Then it removes the partial output.
+- Without a `.pbi`, the tool reads the BAM twice: once for the lengths and once
+  to write. The kept records are the same as with the `.pbi`.
+- Read names must be PacBio names `movie/zmw/...`.
+- The selection does not use `rand()`, so it is the same on every platform. It
+  does not match a samtools run, because samtools has no yield mode.
+- If the input has less than the target, the tool keeps every record and prints
+  a warning.
+- The bucket table uses a fixed 128 MiB of memory (2^24 bucket counts of 8
+  bytes), for any input size.
+
+The output header gets `@CO Sub-sampled yield=Y seed=S`.
+
 ### sort — sort a BAM file
 
 Sort a BAM file by coordinate, query name, or a 2-char tag, using a RAM-bounded

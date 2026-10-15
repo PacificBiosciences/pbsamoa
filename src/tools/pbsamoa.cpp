@@ -6,6 +6,7 @@
 #include "dump/Dump.hpp"
 #include "merge/Merge.hpp"
 #include "sort/Sort.hpp"
+#include "subsample/Subsample.hpp"
 #include "undo/Undo.hpp"
 #include "zmi-build/ZmiBuild.hpp"
 #include "zmi-index/ZmiIndex.hpp"
@@ -30,6 +31,7 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         {"sort", SortTool::CreateInterface(), &SortTool::Runner},
         {"merge", MergeTool::CreateInterface(), &MergeTool::Runner},
         {"convert", Convert::CreateInterface(), &Convert::Runner},
+        {"subsample", Subsample::CreateInterface(), &Subsample::Runner},
         {"undo", Undo::CreateInterface(), &Undo::Runner},
         {"bai-build", BaiBuild::CreateInterface(), &BaiBuild::Runner},
         {"bai-query", BaiQuery::CreateInterface(), &BaiQuery::Runner},
@@ -48,6 +50,8 @@ PacBio::CLI_v2::MultiToolInterface CreateMultiToolInterface()
         "  pbsamoa chunk      input.bam 1 4          Dump chunk 1 of 4 as SAM\n"
         "  pbsamoa sort       input.bam sorted.bam   Coordinate-sort a BAM\n"
         "  pbsamoa merge      out.bam a.bam b.bam     Merge or concatenate BAMs\n"
+        "  pbsamoa subsample  --fraction 0.1 in.bam out.bam  Keep 10% of templates\n"
+        "  pbsamoa subsample  --yield 60G in.bam out.bam     Keep random ZMWs up to 60 Gb\n"
         "  pbsamoa zmi-build  input.bam output.bam   Copy BAM and build ZMI index\n"
         "  pbsamoa zmi-index  input.bam              Build .zmi sidecar (no rewrite)\n"
         "  pbsamoa zmi-query  input.bam 42           Query by ZMW hole number\n"
