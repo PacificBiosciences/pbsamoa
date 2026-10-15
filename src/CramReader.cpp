@@ -517,8 +517,9 @@ public:
             const std::string_view bases{
                 reference_->Bases(refId, start, fetchEnd - start, buffer_)};
             bases_.resize(std::size(bases));
+            // ASCII upper case without std::toupper, a call for each base.
             std::ranges::transform(bases, bases_.begin(), [](const char c) {
-                return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                return ((c >= 'a') && (c <= 'z')) ? static_cast<char>(c - ('a' - 'A')) : c;
             });
             refId_ = refId;
             start_ = start;
@@ -1261,7 +1262,7 @@ struct CramReader::Impl
                     coreBlock = std::move(block);
                     sawCoreBlock = true;
                 } else if (block.ContentType == CramBlockContentType::EXTERNAL_DATA) {
-                    extStore.AddBlock(block.ContentId, block.Data);
+                    extStore.AddBlock(block.ContentId, std::move(block.Data));
                 } else {
                     throw std::runtime_error("CramReader: unexpected block type in slice payload");
                 }

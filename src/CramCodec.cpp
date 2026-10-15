@@ -195,6 +195,13 @@ void CramExternalBlockStore::AddBlock(std::int32_t contentId, std::span<const st
     state->readPos = 0;
 }
 
+void CramExternalBlockStore::AddBlock(const std::int32_t contentId, std::vector<std::byte>&& data)
+{
+    auto* state = FindOrCreateBlock(contentId);
+    state->data = std::move(data);
+    state->readPos = 0;
+}
+
 std::span<const std::byte> CramExternalBlockStore::ReadBytesView(std::int32_t contentId,
                                                                  std::size_t n)
 {

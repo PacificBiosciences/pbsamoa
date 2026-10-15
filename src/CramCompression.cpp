@@ -143,8 +143,26 @@ std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data)
 
 std::vector<std::byte> CramRans4x16Decompress(std::span<const std::byte> data, std::size_t rawSize)
 {
-    return CheckedDecompress<unsigned int>(data, rawSize, "CramRans4x16Decompress",
-                                           rans_uncompress_4x16);
+    // Decodes into the result, not into a buffer of the codec that is then copied: the
+    // quality block of a slice of HiFi reads holds about 24 MB.
+    constexpr std::string_view CONTEXT{"CramRans4x16Decompress"};
+    if (rawSize == 0) {
+        return {};
+    }
+    const unsigned int inputSize{
+        CheckedSizeCast<unsigned int>(std::size(data), CONTEXT, "input/output size too large")};
+    unsigned int outSize{
+        CheckedSizeCast<unsigned int>(rawSize, CONTEXT, "input/output size too large")};
+    std::vector<std::byte> output(rawSize);
+    if (rans_uncompress_to_4x16(NonConstBytes(data), inputSize,
+                                reinterpret_cast<unsigned char*>(std::data(output)),
+                                &outSize) == nullptr) {
+        throw std::runtime_error(std::format("{}: codec returned null output", CONTEXT));
+    }
+    if (outSize != rawSize) {
+        throw std::runtime_error(std::format("{}: decompressed size mismatch", CONTEXT));
+    }
+    return output;
 }
 
 std::vector<std::byte> CramRans4x16Compress(std::span<const std::byte> data)

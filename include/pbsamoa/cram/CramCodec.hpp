@@ -88,6 +88,9 @@ public:
     /// \brief Add a block's uncompressed data by content ID.
     void AddBlock(std::int32_t contentId, std::span<const std::byte> data);
 
+    /// \brief Add a block's uncompressed data by content ID, without a copy.
+    void AddBlock(std::int32_t contentId, std::vector<std::byte>&& data);
+
     /// \brief Read n bytes from the block with the given content ID.
     std::vector<std::byte> ReadBytes(std::int32_t contentId, std::size_t n);
 
