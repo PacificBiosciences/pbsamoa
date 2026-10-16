@@ -1,31 +1,63 @@
 # Architecture
 
-pbsamoa is organized in four layers. Each layer depends only on the layers
-below it.
+pbsamoa has five layers. The public headers are in four directories:
+`core/` (Compression and Record), `cram/`, `index/`, and `io/` (the API).
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│  API                                                   │
-│  BamRawReader  BamRecordReader  SamReader  CramReader  │
-│  BamWriter  SamWriter  CramWriter  BaiIndex  CraiIndex │
-│  BamZmwReader  ZmiBamWriter                            │
+│  BAM/SAM API (io/)                                     │
+│  BamRawReader  BamRecordReader  SamReader  BamFile     │
+│  BamWriter  SamWriter  BamCollection  SortBam MergeBam │
+│  MergeReadAhead  CramReader  CramWriter                │
+│  BamZmwReader  ZmiWriter  ZmiBamWriter                 │
 ├────────────────────────────────────────────────────────┤
-│  Record                                                │
-│  RawRecord  BamRecord  RawRecordBatch                  │
-│  ZmwGroup                                              │
-│  CigarOp  SequenceView  TagMap  SamHeader              │
+│  Indexes (index/)                                      │
+│  BaiIndex  BaiStreamBuilder  CraiIndex                 │
+│  ZmwIndex  ZmwWhitelist                                │
 ├────────────────────────────────────────────────────────┤
-│  Compression                                           │
-│  BgzfReader  BgzfWriter  VirtualOffset  CramCodec      │
-│  CramCompression                                       │
+│  CRAM v3 (cram/)                                       │
+│  CramStructs  CramCodec  CramCompression  CramReference│
+├────────────────────────────────────────────────────────┤
+│  Record (core/)                                        │
+│  RawRecordView  RawRecord  BamRecord  RawRecordBatch   │
+│  CigarOp  SequenceView  TagMap  SamHeader  TagClipper  │
+├────────────────────────────────────────────────────────┤
+│  Compression (core/)                                   │
+│  BgzfReader  BgzfWriter  BgzfWriterPool  VirtualOffset │
+│  BgzfBlockEncoder  BgzfBlockWriter                     │
 └────────────────────────────────────────────────────────┘
 ```
+
+The `core/` headers include only other `core/` headers. The `cram/` and `index/`
+headers include `core/` headers. The `io/` headers use all the layers.
+One exception exists: `src/BaiIndex.cpp` includes `io/BamRawReader.hpp`.
+
+### Dependencies
+
+- **pbcopper** gives `Parallel::ThreadPool` and `Parallel::Dispatch`. All the
+  worker pools use them. The CLI tools also use pbcopper CLIv2.
+- **libdeflate** does the DEFLATE compression, the decompression, and the CRC32 of BGZF
+  and of CRAM gzip blocks.
+- **third-party/rigtorp** gives `rigtorp::SPSCQueue`, the lock-free queue of
+  the BGZF pipelines and of `BamRecordReader`.
+- **third-party/htscodecs** gives the CRAM rANS 4x8, rANS 4x16, adaptive
+  arithmetic, fqzcomp, and name tokeniser codecs. On x86-64, meson adds the
+  AVX2 rANS and PACK kernels when the compiler accepts `-mavx2`.
+- **ISA-L** (optional, meson option `isal`, x86-64 with NASM only) gives
+  `BgzfBlockEncoder` its level 0. With `auto` (the default), meson builds it
+  when it finds NASM. With `enabled`, the build stops when meson cannot build
+  ISA-L.
+  The `pbsamoa` dependency exports the variable `isal`.
+- **bzip2** and **liblzma** (optional) enable the CRAM block methods `BZIP2`
+  and `LZMA` when meson finds them. Without them, the registry does not have
+  these methods.
 
 ## Class Dependencies
 
 Arrows show composition ("owns") or required dependencies ("uses"). Dotted
-arrows show decode-on-demand relationships. The only inheritance hierarchy
-is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
+arrows show decode-on-demand relationships. Inheritance is rare. The public
+hierarchies are `TagClipStrategy` (see `TagClipping.hpp`), `CramCodec` (the
+CRAM encodings, see `CramCodec.hpp`), and the `CramReference` interface.
 
 ```
 ┌─ API ──────────────────────────────────────────────────────────────────┐
@@ -36,11 +68,12 @@ is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
 │                       └──► RecordData(i) → span<const byte>            │
 │                                                                        │
 │  BamRecordReader ┬──► BamRawReader                                     │
-│                  ├──► SPSCQueue<BamRecord> (pre-decode pipeline)       │
+│                  ├──► SPSCQueue<expected<BamRecord, exception_ptr>>    │
 │                  ├──► std::jthread (background producer)               │
 │                  └──► ThreadPool (optional, for parallel ToOwned)      │
 │                                                                        │
-│  BamZmwReader ───► BamRecordReader (synchronous ZMW grouping)          │
+│  BamZmwReader ┬──► BamRecordReader                                     │
+│               └──► std::jthread + deque<ZmwGroup> (ZMW prefetch)       │
 │                                                                        │
 │  BamWriter ──┬──► BgzfWriter                                           │
 │              └──► SamHeader                                            │
@@ -52,10 +85,14 @@ is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
 │                                                                        │
 │  CramReader ──┬──► SamHeader                                           │
 │               ├──► CramCodec + CramCompression                         │
+│               ├──► CramReference (optional, reference-based decode)    │
+│               ├──► ThreadPool (optional, container decode read-ahead)  │
 │               └──► CraiIndex (for region query)                        │
 │                                                                        │
 │  CramWriter ──┬──► SamHeader                                           │
 │               ├──► CramCodec + CramCompression                         │
+│               ├──► CramReference (optional, reference-based encode)    │
+│               ├──► ThreadPool (optional, slice compression)            │
 │               └──► optional CRAI writer                                │
 │                                                                        │
 │  BaiIndex ──────► Chunk ──► VirtualOffset                              │
@@ -86,6 +123,7 @@ is `TagClipStrategy` and its subclasses (see `TagClipping.hpp`).
 │  BgzfReader ─────► VirtualOffset (current position)                    │
 │                                                                        │
 │  BgzfWriter ─────► parallel compression pipeline + callback dispatch   │
+│             └────► BgzfWriterPool (optional, shared by many writers)   │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -98,17 +136,34 @@ Key relationships:
   objects that own their backing buffers and provide indexed access to raw
   record spans via `RecordData(i)`. Supports chunked reading via
   `ChunkNum`/`TotalChunks` in config and ZMW whitelist filtering via
-  `Whitelist()`.
+  `Whitelist()`. The config field `BamRawReaderConfig::Whitelist` does not
+  filter records. The constructor only checks that it is not set with chunking.
+
+- **BamFile** holds a BAM path, its header, and the path of its `.bai`
+  sidecar. It can make the `.bai` (`CreateStandardIndex()`).
+  **BamCollection** holds an ordered list of `BamFile` inputs and one merged,
+  compatible header. `BamRawReader`, `BamRecordReader`, and `BamZmwReader`
+  accept a `BamCollection`, a list of paths, or a list of `BamFile` objects.
+  The reader then reads the files one after the other, in list order.
 
 - **BamRecordReader** wraps a `BamRawReader` and pre-decodes views into
   owned `BamRecord` objects in a background `std::jthread`. Records are
   pushed through an SPSC queue for consumption. Optional `ThreadPool`
   parallelizes the `ToOwned()` decode step across batch views.
+  The defaults are `DecodeWorkers{4}`, `BatchBudget` 4 MiB, and
+  `OutputCapacity{1024}` queue slots. `TagFilter` (`DropTags` or `KeepTags`)
+  applies to each decode. The queue items are
+  `std::expected<BamRecord, std::exception_ptr>`, so a producer error reaches
+  the caller in record order. `Query(GenomicInterval)` uses the sibling `.bai`
+  of each input. For a collection, it merges the inputs on
+  `(refId, pos, name, input order)`.
 
 - **BamZmwReader** wraps a `BamRecordReader` and groups consecutive records
-  by ZMW hole number, parsed from the read name (`movie/zmw/…`). Grouping is
-  synchronous — no background threads. `CurrentZmw()` returns the current
-  group's `ZmwIdentity` with `rgId` always set to 0.
+  by `(rgId, zmw)`. The hole number comes from the read name (`movie/zmw/…`).
+  The `rgId` comes from the base PacBio read-group ID of the `RG` tag, or is 0
+  without one. A background `std::jthread` prefetches complete groups into a
+  bounded `std::deque`. `PrefetchCapacityZmws` sets its capacity (default 4).
+  `CurrentZmw()` returns the identity of the last returned group.
 
 - **BamWriter** owns a `BgzfWriter` for compression and a `SamHeader` for
   the output file header. Accepts `BamRecord`, `RawRecordView`, `RawRecord`,
@@ -118,8 +173,12 @@ Key relationships:
   `BamRecord` objects. Container payload parsing is centralized through
   `ParseContainer(...)`, then slices are decompressed/decoded in order.
   It supports optional reference-based decoding and region queries via
-  `CraiIndex`, plus `RawRecord` accessors that serialize decoded records into
-  BAM layout on demand.
+  `CraiIndex` (`Query`, `QueryRaw`, `ReadSlice`, `ReadSliceRaw`).
+  `ReadRawRecord()`, `RawRecords()`, and the `*Raw` queries give `RawRecord`
+  objects. The decode makes each record a `RawRecord` immediately after its
+  decode, so a slice is not held two times. The reader then resolves attached
+  mates in place with `RawRecord::SetNext` and `RawRecord::SetTlen`.
+  See [CRAM](#cram) for the threads and the reference.
 
 - **CramWriter** uses a two-level write buffer:
   `pendingRecords` (records for the current slice) and `pendingSlices`
@@ -129,16 +188,19 @@ Key relationships:
   ordered with an async write future. It can emit a samtools-compatible CRAI
   sidecar with per-slice offsets. With reference sequences it writes
   reference-based CRAM. `EncodeContainer` encodes a container on any thread,
-  and `WriteContainer` writes it in order.
+  and `WriteContainer` writes it in order. `Serialize` also runs on any
+  thread, and `WriteSerialized` writes its bytes in order.
 
 - **ZmiBamWriter** composes a `BamWriter` and a `ZmiWriter` so every record
   written is simultaneously indexed.
 
 - **SortBam / MergeBam** (free functions in `io/BamSort.hpp`, `io/BamMerge.hpp`)
   combine files rather than streaming a single one. `SortBam` is a RAM-bounded
-  external merge sort (spill sorted runs, then the k-way `MergeRuns` core, which
-  caps simultaneously-open run files and falls back to a multi-pass merge when the
-  run count would exceed the process open-file limit). `MergeBam` detects the mode
+  external merge sort (spill sorted runs, then the k-way `MergeRuns` core).
+  `SortConfig::MaxMemory` (default 768 MiB) sets the run size.
+  `SortConfig::MergeFanIn` (default 64) sets the maximum number of open runs.
+  With more runs, `MergeRuns` merges them in more passes. The intermediate
+  files use compression level 1. `MergeBam` detects the mode
   from the inputs' `@HD SO`: a sorted merge (coordinate/queryname; deterministic via
   source-index tie-break) or, for unsorted inputs / `--concat`, byte-level
   concatenation through BGZF block passthrough (compressed blocks copied
@@ -161,7 +223,11 @@ Key relationships:
   compresses in parallel. A single `ReadAheadMemory` budget caps the summed
   in-flight decompressed bytes across all inputs, with condition-variable
   backpressure (no busy-spin) and a per-source head-batch guarantee so a sub-batch
-  budget cannot stall the merge. Per-source file order is preserved, so the merged
+  budget cannot stall the merge. The defaults are `ReadAheadMemory` 768 MiB,
+  `BatchBytes` 256 KiB for each handoff batch, and `WriterQueueCapacity` 256
+  output blocks. A producer reads 32 BGZF blocks at a time. `DecodeThreads` and
+  `CompressThreads` set the two pools. They default to `NumThreads`, and
+  0 means min(hardware threads, 8). Per-source file order is preserved, so the merged
   output is independent of thread count, decode timing, and budget. Avoiding the
   per-record allocation is what lets input decompression actually overlap the
   merge — on a 16-input sorted benchmark with 8,535,828 records,
@@ -182,7 +248,7 @@ random access via virtual offsets.
 
 CRAM uses container/slice structures and block-level codecs selected from
 CRAM v3.x methods (`raw`, `gzip`, `bzip2`, `lzma`, `rANS`, `arith`,
-`fqzcomp`, `name tokeniser`) via `CramCodec` + `CramCompression`.
+`fqzcomp`, `name tokeniser`) via `CramCompression`. See [CRAM](#cram).
 
 ### BgzfReader
 
@@ -194,13 +260,32 @@ decompresses each group into one buffer, and a consumer thread finds the record
 boundaries in the group. The group buffer becomes a `RawRecordBatch`: `ReadBatch()`
 gives it to the caller and does not copy the records. A record that spans groups
 goes behind the data of the group where it ends. `ReadRecord()` copies one record
-out of the current batch.
+out of the current batch. The IO thread and the consumer thread are
+`std::jthread` objects that the reader owns. The pool is a pbcopper
+`ThreadPool` with `numWorkers` threads. A `rigtorp::SPSCQueue` of 8 batches
+(about 2 MiB each) connects the consumer thread to the caller.
+
+With `numWorkers == 0`, the reader decompresses on the calling thread and
+starts no threads. `Tell()` then gives the exact virtual offset of the next
+record. The one-argument constructor opens a block-only reader for index files.
 
 ### BgzfWriter
 
-Accumulates data into 64 KiB blocks and compresses each with libdeflate in a
-parallel writer pipeline. Compression level 1–12 (default 6). Appends the
-standard 28-byte EOF marker on close.
+Accumulates data into blocks of at most 65280 bytes (`BGZF_MAX_UNCOMPRESSED_BLOCK`)
+and compresses each with libdeflate in a parallel writer pipeline. Compression
+level 1–12 (default 6). Appends the standard 28-byte EOF marker on close.
+
+`BgzfWriterConfig` holds `CompressionLevel{6}`, `BgzfWorkers{4}`,
+`InputQueueCapacity{256}`, `BlocksPerBatch{32}`, `UseTempFile`, and `Pool`.
+Each writer owns a packer thread, an IO writer thread, and a pbcopper
+`ThreadPool` of `BgzfWorkers` threads. A `rigtorp::SPSCQueue` with
+`InputQueueCapacity` slots connects the caller to the packer thread. The
+packer sends `BlocksPerBatch` blocks to the pool as one task.
+
+With `Pool` set to a shared `BgzfWriterPool`, the writer packs blocks on the
+calling thread and starts no threads of its own. The pool has one set of
+compression workers and one ordered output thread for all its writers. This
+mode is for many open writers, for example demultiplexed output.
 
 When a callback is configured (via `BamWriter`), callback dispatch happens on
 the BGZF IO writer thread after block file offsets are known, not on the caller
@@ -215,7 +300,11 @@ producer threads must do the compression, for example when an aligner holds an
 output lock: the lock then covers only a queue push. `Write()` blocks while the
 queue holds `MaxPendingBytes`, so slow storage stops the producers. The writer does not track
 virtual offsets and has no index callback. `EncodeBamRecord()` adds a BAM
-record to an encoder.
+record to an encoder. `MaxPendingBytes` is 64 MiB by default.
+
+`BgzfBlockEncoder` takes levels 0–12 (default 6). Levels 1–12 use libdeflate.
+Level 0 uses ISA-L igzip level 1 when the build has ISA-L. Without ISA-L,
+level 0 uses libdeflate level 1. `BgzfWriter` does not accept level 0.
 
 ### VirtualOffset
 
@@ -338,27 +427,45 @@ write for downstream index building.
 **BaiIndex** reads, writes, builds, and queries BAM index files (`.bai`).
 `Build()` scans a coordinate-sorted BAM to create an index.
 `Query(refId, beg, end)` returns merged, sorted chunks of virtual offsets
-for records overlapping a genomic region.
+for records overlapping a genomic region. `Build(bamPath, numWorkers)`
+decompresses blocks in parallel when `numWorkers > 0`.
+
+**BaiStreamBuilder** builds a `BaiIndex` while records go by.
+`Observe(beginOffset, recordBytes)` adds one record. `Finalize(endOffset)`
+gives the index. `Build()` and the merge option `BaiOutput` give the same
+bytes for the same records.
+
+**CraiIndex** reads a gzip-compressed `.crai` file. `Query(refId, beg, end)`
+gives one row for each slice that overlaps the region, in file order.
+`CramReader::ReadSlice` decodes the slice of one row.
 
 ### PacBio extensions
 
 **ZmwIndex** — In-memory index mapping ZMW hole numbers to virtual offsets.
 Reads `.zmi` (native format) or `.pbi` (legacy PacBio index). Supports
 point queries (`Find(zmw)`, `Find(ZmwIdentity)`), batch queries
-(`Find(span<const ZmwIdentity>)`), and chunking via `UniqueZmws()`.
+(`Find(span<const ZmwIdentity>)`), and chunking via `UniqueZmws()` and
+`ContiguousChunk()`. `Open(bamPath)` tries the `.zmi` first, then the `.pbi`.
+A ZMI 1.1 index also holds barcodes: `FindBarcodes()` and `BarcodePairs()`
+use them. `QueryLengths()` gives the per-record query lengths of a `.pbi`;
+a `.zmi` has none.
 
 **ZmwWhitelist** — A set of ZMW hole numbers or identities to select from
 a BAM file. Resolves against a `ZmwIndex` to produce sorted virtual offsets.
 Used via `BamRawReader::Whitelist()` for seek-per-record iteration.
 
 **ZmiWriter** — Streaming writer for `.zmi` files. Appends `(rgId, zmw,
-virtualOffset)` entries in BAM write order. BGZF-compressed.
+virtualOffset, forwardBarcode, reverseBarcode)` entries in BAM write order.
+BGZF-compressed through a `BgzfWriter`. The format has a 64-byte header with
+the magic `ZMI\1` and version 1.1.0, then one 24-byte entry for each record.
+The first 16 bytes of an entry are the same as in ZMI 1.0.
 
 **BamZmwReader** — Groups consecutive records by ZMW identity, producing
 groups of `BamRecord` objects (one group per ZMW). Wraps a `BamRecordReader`
 and prefetches complete groups into a bounded queue on a background thread.
 
-**ZmiBamWriter** — Writes a BAM and its `.zmi` index simultaneously.
+**ZmiBamWriter** — Writes a BAM and its `.zmi` index simultaneously. The
+`.zmi` path is `bamPath + ".zmi"`.
 
 ## Reader Pipeline
 
@@ -411,9 +518,9 @@ while (auto view = reader.ReadRecord()) { /* … */ }
 ```
 
 `ChunkNum` is 1-based (1 through `TotalChunks`). Internally the reader calls
-`ZmwIndex::ContiguousChunk()` scans the columnar index directly, partitions the
-file-order ZMW runs proportionally, then returns one seek offset and an exact
-record limit. Ordered BAM indexes require no hash tables or per-record lookup
+`ZmwIndex::ContiguousChunk()`. This function scans the columnar index directly,
+partitions the file-order ZMW runs proportionally, and returns one seek offset
+and an exact record limit. Ordered BAM indexes require no hash tables or per-record lookup
 vectors during chunk selection.
 
 Setting `ChunkingMode = ChunkMode::SCATTER` keeps the same exact-partition
@@ -422,8 +529,9 @@ chaotic-but-deterministic sample) instead of one contiguous range. The unique
 ZMWs are grouped into tiles of up to `ChunkTileZmws` consecutive ZMWs, the tiles
 are shuffled by a seeded balanced Fisher–Yates permutation (`ChunkSeed`), and
 this chunk takes its slice of the shuffled order. Each tile is read as a seek to
-its first record plus its exact record count (counts, not virtual-offset
-boundaries, because sync `BgzfReader::Tell()` is block-granular). Scatter reads
+its first record plus its exact record count. The reader sorts the tiles of
+its chunk into file order and joins adjacent tiles into one read. The defaults
+are `ChunkTileZmws{100}` and `ChunkSeed{42}`. Scatter reads
 synchronously; both `ReadRecord` and `ReadBatch` honor the scatter plan (each
 batch stays within one tile), so the `BamRecordReader` pre-decode path works in
 scatter mode as well.
@@ -439,6 +547,110 @@ while (auto view = reader.ReadRecord()) { /* exactly 1000 records */ }
 
 Both limits are enforced in `ReadRecord()` and `ReadBatch()`.
 
+## CRAM
+
+pbsamoa has its own CRAM v3 implementation. It does not use htslib.
+`CramReader` reads CRAM 3.x. `CramWriter` writes CRAM 3.0 or 3.1
+(`MinorVersion`).
+
+### Codecs
+
+`CramCodec` and its subclasses are the data-series encodings: `NullCodec`,
+`ExternalCodec`, `HuffmanCodec`, `BetaCodec`, `GammaCodec`, `SubexpCodec`,
+`ByteArrayLenCodec`, and `ByteArrayStopCodec`.
+
+`CramCompression` holds `CompressionRegistry`, the block compression methods.
+It registers the CRAM methods 0–8 (`CramBlockMethod`):
+
+| ID | Method | Implementation |
+|----|--------|----------------|
+| 0 | `RAW` | built in |
+| 1 | `GZIP` | libdeflate |
+| 2 | `BZIP2` | bzip2, only when meson finds it |
+| 3 | `LZMA` | liblzma, only when meson finds it |
+| 4 | `RANS4X8` | htscodecs |
+| 5 | `RANS4X16` | htscodecs |
+| 6 | `ADAPTIVE_ARITH` | htscodecs |
+| 7 | `FQZCOMP` | htscodecs |
+| 8 | `NAME_TOKENISER` | htscodecs |
+
+`CompressionRegistry::Register()` adds custom methods with IDs above 8. It
+cannot replace the methods 0–8.
+
+`CramWriterConfig::BlockCompressionMethod` (default `GZIP`) sets the method of
+the data blocks. `DataSeriesCompressionMethods` sets a different method for
+one data series, for example `QS`. `CompressionLevel` can stay empty; for gzip
+it sets a libdeflate level in [0, 12].
+
+### Reference
+
+A reference-based CRAM stores only the differences of a mapped record to the
+reference. `CramReference` is the interface for the reference. It gives the
+bases of a window of one reference sequence. Several threads can call it at
+the same time, so many readers and writers can share one reference.
+
+- `CramReaderConfig::ReferencePath` loads a whole FASTA file into memory.
+- `CramReaderConfig::Reference` and `CramWriterConfig::Reference` take a
+  `CramReference`. The reader keeps the bases of one window only.
+- `CramWriterConfig::ReferenceSequences` takes one `std::string_view` for each
+  `@SQ` line, in header order.
+
+Set one reference source only. The writer puts the MD5 of the reference bases
+in each slice. It adds an `M5` tag to each `@SQ` line that has none.
+`CramReferenceMd5()` computes the `M5` value. The reader checks the reference
+MD5 of each slice that needs the reference. A query checks each slice one time
+for each reader. Without a reference, the writer stores all the bases of each
+record.
+
+### Reader threads
+
+`CramReaderConfig::DecompressionWorkers` (default 0) sets the size of a pbcopper
+`ThreadPool`. With 0, the reader decodes all containers on the calling thread.
+
+With workers, the sequential read works as follows:
+
+```
+ caller thread                         ThreadPool (DecompressionWorkers)
+ ─────────────                         ─────────────────────────────────
+ read container bytes from the file
+   │  (up to 2 containers per worker)
+   ├──► submit decode task ─────────────► decode container to BamRecord
+   │    push future to readAhead deque      or RawRecord, with its own
+   │                                        ReferenceWindow
+   ▼
+ pop the front future (file order) ◄──── set_value / set_exception
+ give its records one by one
+```
+
+- Only the calling thread reads the file.
+- Each task decodes one whole container. The task decodes to the record type
+  that the caller reads (`BamRecord` or `RawRecord`).
+- The futures stay in file order, so the records come out in file order.
+- A task gives its exception to its future. `ReadRecord()` throws it in file
+  order.
+- The pool is the last member of the reader, so it joins its tasks first.
+
+`Query`, `QueryRaw`, `ReadSlice`, and `ReadSliceRaw` read on the same stream
+as the sequential read. The sequential read then continues unchanged. These
+calls use the pool for the blocks of one slice when there are 2 or more
+workers and 8 or more blocks. In a coordinate-sorted, single-reference slice,
+the query decode stops after the region end when no record waits for a mate.
+
+### Writer threads
+
+`CramWriterConfig` sets the layout: `RecordsPerSlice{10000}` and
+`SlicesPerContainer{1}`. A value of `SlicesPerContainer` <= 0 flushes only at
+`Close()`. `CompressionWorkers` (default 0) sets the size of a pbcopper
+`ThreadPool` that compresses the slices. With workers, `std::async` writes each
+container, so the next container can encode while the previous one writes.
+
+`EncodeContainer()` and `Serialize()` are `const` and run on any thread.
+`WriteContainer()` and `WriteSerialized()` write the result in order. An
+aligner can then encode on its own threads and keep only the write in a lock.
+
+`WriteCrai` writes a samtools-compatible `.crai` file next to the output, or at
+`CraiPath`.
+
 ## Error Handling
 
 Two error policy types are defined in `<pbsamoa/io/BamRawReader.hpp>`:
@@ -447,6 +659,10 @@ Two error policy types are defined in `<pbsamoa/io/BamRawReader.hpp>`:
   `std::runtime_error` on corrupt records.
 - **SkipPolicy** — `OnCorruptRecord()` silently skips; `SkippedCount()`
   returns the total number of records skipped.
+
+No reader takes a policy at this time. The readers throw `std::runtime_error`
+on a corrupt record or a corrupt block. The parallel pipelines catch an
+exception on a worker thread and throw it again on the caller thread.
 
 ## Data Flow
 
@@ -489,10 +705,28 @@ to `TagClipStrategy` subclasses:
 `TagClipper::PacBioDefault()` returns a pre-configured clipper with all
 PacBio-standard strategies registered.
 
+The clipping modules are in `core/`:
+
+- **CigarClipping** — `ClipCigarToQuery()` and `ClipCigarToReference()` clip a
+  CIGAR. They give a `ClipResult` with the query offset, the query length, and
+  the new reference position.
+- **Basemods** — `ParseBasemodString()` and `WriteBasemodString()` convert the
+  `MM` tag. `BasemodClipStrategy` uses them. `ClipBasemodRecord()` finds which
+  sites of one modification type fall before, in, and after a clip window.
+  `ClipToQueryLossless()` uses it.
+- **LosslessClipping** — `ClipToQueryLossless()` clips a record to a query
+  range and keeps the removed flanks in a msgpack `ls` tag. The `ls` format is
+  the same as in lima. `RestoreFromLossless()` uses the `ls` tag to restore
+  the record, like `lima-undo`. It does not restore CIGAR or POS, so it is for
+  unmapped reads.
+
 ## Metrics
 
-All readers and writers expose `GetMetrics()` for runtime performance
-monitoring.
+The BGZF readers and writers expose `GetMetrics()` for runtime performance
+monitoring: `BgzfReader`, `BgzfWriter`, `BamRawReader`, `BamRecordReader`,
+`BamZmwReader`, and `BamWriter`. `SamReader`, `SamWriter`, `CramReader`, and
+`CramWriter` have no metrics. `MergeBam` gives `MergeStats::Runtime`, and
+`MergeReadAhead` gives `MergeReadAheadStats`.
 
 - **BgzfMetrics** — IO throughput, decompression pool stats, SPSC queue
   depth, stall counters, cumulative stage timing (nanoseconds)

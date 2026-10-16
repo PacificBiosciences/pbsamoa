@@ -5,6 +5,38 @@ indexing, and performance benchmarking.
 
 ## pbsamoa
 
+```sh
+pbsamoa <tool> [options] <arguments>
+pbsamoa --help              # list the tools
+pbsamoa <tool> --help       # options of one tool
+pbsamoa --version
+```
+
+The tools are `dump`, `chunk`, `sort`, `merge`, `convert`, `subsample`,
+`depth`, `undo`, `bai-build`, `bai-query`, `zmi-build`, `zmi-index`,
+`zmi-query`, and `bench`.
+
+### Common options and exit status
+
+All tools have these options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `-h`, `--help` | Show the help and exit |
+| `--version` | Show the version and exit |
+| `--log-level LEVEL` | `TRACE`, `DEBUG`, `INFO`, `WARN`, or `FATAL` (default: `WARN`) |
+| `--log-file FILE` | Write the log to `FILE`, not to stderr |
+
+Tool options have only long names. `-h` is the only short flag.
+
+A tool exits with status `0` on success. On an error, it writes the message
+to stderr and exits with status `1`. An unknown tool name also gives status
+`1`.
+
+Memory sizes (`--memory`, `--batch-bytes`) accept a `K`, `M`, or `G` suffix
+in upper or lower case. These suffixes are powers of 1024. The `--yield` of
+`subsample` is different: its suffixes are powers of 1000.
+
 ### dump — BAM/SAM/CRAM to SAM text
 
 Convert BAM, SAM, or CRAM input to SAM text on stdout.
@@ -14,22 +46,28 @@ pbsamoa dump input.bam
 pbsamoa dump input.sam
 pbsamoa dump input.cram
 pbsamoa dump input.cram > output.sam
+pbsamoa dump --header-only input.bam
 ```
 
 Options:
 
-| Flag | Alias | Description |
-| ---- | ----- | ----------- |
-| `--bgzf-threads N` | | Decompression worker threads (default: auto, max 10) |
-| `--format-threads N` | | SAM formatting thread pool size for BAM input (default: `max(hw_concurrency, 4)`) |
-| `--reference ref.fa` | | Reference FASTA for reference-based CRAM decoding |
-| `--region ref:start-end|*` | | CRAM-only region query (`*` selects unmapped) |
-| `--index file.crai` | | CRAM-only CRAI path override (requires `--region`) |
+| Flag | Description |
+| ---- | ----------- |
+| `--bgzf-threads N` | Decompression worker threads; `-1` = auto, `min(hw, 8)` (default: `-1`). An explicit count is capped at 10 |
+| `--format-threads N` | SAM formatting thread pool size for BAM input; `0` = auto, `max(hw, 4)` (default: `0`) |
+| `--reference ref.fa` | Reference FASTA for reference-based CRAM decoding |
+| `--region ref:start-end|*` | CRAM-only region query (`*` selects unmapped) |
+| `--index file.crai` | CRAM-only CRAI path override (requires `--region`) |
+| `--no-header` | Do not write the SAM header |
+| `--header-only` | Write only the SAM header |
 
 Notes:
 
 - `--region` and `--index` are only supported for CRAM input.
 - If `--region` is set and `--index` is omitted, `dump` loads `<input>.crai`.
+- `--no-header` and `--header-only` are mutually exclusive.
+- The tool selects the input format from the file extension: `.sam`, `.cram`,
+  or else BAM.
 
 Environment:
 
@@ -49,13 +87,13 @@ Options:
 
 | Flag | Description |
 | ---- | ----------- |
-| `--records-per-slice N` | Maximum records per CRAM slice (default: `10000`) |
-| `--bgzf-threads N` | BAM input decompression workers (default: auto, max 8; `0` = serial; explicit counts capped at 16) |
+| `--records-per-slice N` | Maximum records per CRAM slice (default: `10000`; must be > 0) |
+| `--bgzf-threads N` | BAM input decompression workers (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 16) |
 | `--convert-to-bam-record` | Opt in to decoding BAM input into `BamRecord` before CRAM write |
-| `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: auto, max 8; `0` = serial; explicit counts capped at 16). Also enables that mode when set explicitly |
-| `--compression-threads N` | CRAM block compression workers (default: auto, max 8; `0` = serial) |
-| `--block-compression METHOD` | Default CRAM block method |
-| `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable) |
+| `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 16). A value of `0` or more also enables that mode |
+| `--compression-threads N` | CRAM block compression workers (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 8) |
+| `--block-compression METHOD` | Default CRAM block method (default: `rans4x8`) |
+| `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable; `SERIES` is not case-sensitive) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
 | `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines get `M5`. Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error |
 
@@ -91,6 +129,10 @@ groups collapse onto their base ID and lima `@PG` records are removed.
 pbsamoa undo demux.bam original.bam
 ```
 
+The tool has no options other than the common options. It adds a
+`pbsamoa.undo` `@PG` record. On stderr it prints
+`pbsamoa undo: N records, M restored`.
+
 ### subsample — keep a fraction of the templates, or a target yield
 
 Keep a fraction of the templates in a BAM file, or keep random ZMWs until their
@@ -108,18 +150,19 @@ Options:
 |------|-------------|
 | `--fraction F` | Fraction of templates to keep, in (0, 1] |
 | `--yield Y` | Target yield in bases; suffixes K, M, G, T are powers of 1000 |
-| `--seed S` | Unsigned integer, or `auto` (default): the FNV-1a hash of the input header text, as in samtools >= 1.24 |
-| `--threads N` | BGZF threads for reading and for writing; -1 = auto (default) |
+| `--seed S` | Unsigned 32-bit integer, or `auto` (default): the FNV-1a hash of the input header text, as in samtools >= 1.24 |
+| `--threads N` | BGZF threads for reading and for writing; -1 = auto, `min(hw, 8)` (default). An explicit count is capped at 64 |
 | `--compression N` | Output BGZF compression level in [1, 12] (default 6) |
+| `--strip-kinetics` | Remove the HiFi kinetics tags `fi`, `fp`, `ri`, `rp`, `ip`, and `pw` from the kept records |
 | `--status-json PATH` | Write a live status stream to PATH (see below) |
 
 Both modes write a `@PG` record. The tool prints the kept records and bases on
-stderr.
+stderr. On an error, the tool removes the partial output BAM.
 
-**`--status-json PATH`** writes one JSON object per line, as in the tool status
-stream of pbhuman (`doc/tool-status-stream.md` there): `run_info` first, a
+**`--status-json PATH`** writes one JSON object per line: `run_info` first, a
 `start` and an `end` line for each phase, a `progress` line each second while
 the count changes, and `final` last (`FINISHED`, or `FAILED` with the cause).
+`run_info` contains the command line, the host name, and the thread count.
 The phases:
 
 | Mode | Phases | Unit and total of `progress` |
@@ -128,9 +171,11 @@ The phases:
 | `--yield` without a `.pbi` | `count`, `write` | `count`: reads, total not known; `write`: reads, total from `count` |
 | `--fraction` | `write` | reads, total from the `.pbi` if there is one |
 
-The `end` lines and `final` have the counts as `metrics` (`records`, `bases`,
-`kept_records`, `kept_bases`, and `target_bases` or `fraction`, and `seed`).
-`final` lists the output BAM in `outputs`. A write error disables the stream
+The `end` lines have the counts as `metrics`. The `end` line of `select` or
+`count` has `records`, `bases`, and `target_bases`. The `end` line of `write`
+has `records`, `bases`, `kept_records`, and `kept_bases`. `final` has the
+`write` counts, `target_bases` or `fraction`, `seed`, and `strip_kinetics`
+when it is set. `final` lists the output BAM in `outputs`. A write error disables the stream
 with one warning; it never fails the run.
 
 **`--fraction`** replaces `samtools view --subsample FRAC --subsample-seed SEED`
@@ -163,7 +208,8 @@ larger target with the same seed keeps a superset of the reads.
 - The bucket table uses a fixed 128 MiB of memory (2^24 bucket counts of 8
   bytes), for any input size.
 
-The output header gets `@CO Sub-sampled yield=Y seed=S`.
+The output header gets `@CO Sub-sampled yield=Y seed=S`. `Y` is the number
+of bases, for example `yield=60000000000` for `--yield 60G`.
 
 ### depth — mean read depth in bins
 
@@ -181,8 +227,8 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `--bin-size N` | Bin size in bp (default 1000) |
-| `--threads N` | BGZF threads and depth-sum threads; -1 = auto (default) |
+| `--bin-size N` | Bin size in bp (default 1000; must be at least 1) |
+| `--threads N` | BGZF threads and depth-sum threads; -1 = auto, `min(hw, 8)` (default). An explicit count is capped at 64 |
 | `--status-json PATH` | Write a live status stream to PATH, as `subsample` |
 
 The output is a TSV file with a `#contig  start  end  mean_depth` header line.
@@ -199,7 +245,8 @@ each thread. The status stream has one phase, `depth`, in reads. With
 and unmapped counts of all references and the unplaced reads). A `.bai` older
 than the BAM gives no total. The metrics are `records`, `counted_records`,
 `depth_bases` (the sum of the depth over all positions), `bins`, `bin_size`,
-and `index_records` when the `.bai` gives the total.
+and `index_records` when the `.bai` gives the total. `final` lists the TSV
+file in `outputs`.
 
 ### sort — sort a BAM file
 
@@ -220,8 +267,11 @@ Options:
 | `--tag XX` | 2-char tag to sort by (required iff `--order tag`) |
 | `--memory SIZE` | Peak run-buffer budget, `K`/`M`/`G` suffix (default: `768M`) |
 | `--temp-dir DIR` | Directory for temporary run files (default: output directory) |
-| `--threads N` | Worker threads, `0`/auto = `min(hw, 8)` |
+| `--threads N` | Worker threads, `0`/auto = `min(hw, 8)` (default: `0`) |
 | `--compression L` | Output BGZF level `[1,12]` (default: `6`) |
+
+The tool adds a `pbsamoa.sort` `@PG` record. On stderr it prints
+`pbsamoa sort: N records, M spilled run(s)`.
 
 ### merge — merge or concatenate BAM files
 
@@ -290,6 +340,13 @@ Options:
 The thread/memory knobs (except `--compression`) apply to the sorted-merge path
 only; `--concat` is single-threaded BGZF passthrough.
 
+`--concat` has priority over `--order`. With both options, the tool
+concatenates the inputs and does not show an error.
+
+On stderr, the tool prints a summary line, then a runtime report. The report
+shows the wall time, the peak RSS, the CPU time, and the time of each pipeline
+stage. It ends with a `verdict` line that names the probable bottleneck.
+
 ### bai-query — region query
 
 Extract records overlapping a genomic region using a BAI index.
@@ -301,6 +358,9 @@ pbsamoa bai-query sorted.bam chr1:1000-2000
 
 Arguments: BAM path, region (`ref:start-end`, 1-based inclusive).
 
+The output is SAM text on stdout: the header, then the records. If
+`<bam>.bai` does not exist, the tool stops with an error.
+
 ### bai-build — build BAI
 
 Build a `.bai` index from a coordinate-sorted BAM file.
@@ -308,7 +368,14 @@ Build a `.bai` index from a coordinate-sorted BAM file.
 ```sh
 pbsamoa bai-build sorted.bam
 # creates sorted.bam.bai
+pbsamoa bai-build --threads 4 sorted.bam
 ```
+
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--threads N` | BGZF decompression workers; `0` = auto, `min(hw, 8)` (default: `0`) |
 
 ### zmi-build — build ZMW index
 
@@ -336,13 +403,24 @@ pbsamoa zmi-index input.bam
 pbsamoa zmi-index --threads 8 --quiet input.bam
 ```
 
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--threads N` | Worker threads; `0` = auto, all hardware threads (default: `0`). A negative value is an error |
+| `--quiet` | Do not write the summary line `ZMI index written to <path> (N records)` to stderr |
+
 ### zmi-query — query by ZMW
 
-Extract records for specific ZMW hole numbers.
+Extract the records of one ZMW hole number.
 
 ```sh
 pbsamoa zmi-query movie.bam 12345
 ```
+
+The output is SAM text on stdout: the header, then the records. The tool needs
+a ZMW index (`.zmi` or `.pbi`) next to the BAM. Without one, it stops with the
+error `No ZMW index found for: <bam>`.
 
 ### chunk — partitioned reading
 
@@ -365,11 +443,22 @@ pbsamoa chunk movie.bam 1 4 --mode scatter --tile 64  # 64 ZMWs/seek (fewer seek
 pbsamoa chunk movie.bam 1 4 --mode scatter --seed 7   # reproducible shuffle seed
 ```
 
-Scatter assigns tiles of up to `M` consecutive ZMWs (`--tile M`, default 1) to
-chunks via a seeded balanced shuffle (`--seed S`, default 0). The same
+Scatter assigns tiles of up to `M` consecutive ZMWs (`--tile M`, default 100) to
+chunks via a seeded balanced shuffle (`--seed S`, default 42). The same
 `(file, CHUNK, TOTAL, M, S)` always yields the same chunk on every platform.
 Larger `M` reads more ZMWs per seek (less disk seeking, coarser sampling).
 Both modes require a ZMW index (`.zmi`/`.pbi`); see `zmi-build`.
+
+The output is SAM text on stdout: the header, then the records of the chunk.
+`--tile` and `--seed` without `--mode scatter` are an error.
+
+Options:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--mode MODE` | `contiguous` \| `scatter` (default: `contiguous`) |
+| `--tile M` | Scatter only: up to `M` consecutive ZMWs per seek, `>= 1` (default: `100`) |
+| `--seed S` | Scatter only: unsigned 64-bit shuffle seed (default: `42`) |
 
 ### bench — benchmarks
 
@@ -384,7 +473,13 @@ pbsamoa bench input.bam
 
 Options:
 
-| Flag | Alias | Description |
-| ---- | ----- | ----------- |
-| `--bgzf-threads N` | | BGZF decompression worker threads (default: auto, max 10) |
-| `--decode-threads N` | | BamRecord decode worker threads (default: 4) |
+| Flag | Description |
+| ---- | ----------- |
+| `--bgzf-threads N` | BGZF decompression worker threads; `-1` = auto, `min(hw, 8)` (default: `-1`). An explicit count is capped at 10 |
+| `--decode-threads N` | BamRecord decode worker threads; `0` = serial (default: 4) |
+
+With `--bgzf-threads 0`, the tool skips `pipeline_raw_read`. With
+`--bgzf-threads 0 --decode-threads 0`, it also skips the parallel
+`record_reader`. Without `<input>.bai`, it skips `region_query`. The `write`
+benchmark writes a temporary BAM in the system temp directory and removes it.
+The tool writes the results to stdout.

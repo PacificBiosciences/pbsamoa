@@ -57,6 +57,10 @@ _pbsamoa_ provides three record types with different trade-offs:
 Its batch API provides non-owning `RawRecordView`s without per-record byte copies.
 
 ```cpp
+#include <pbsamoa/io/BamRawReader.hpp>
+
+#include <print>
+
 BamRawReader reader{"input.bam"};
 
 int mapped{0};
@@ -68,6 +72,8 @@ std::println("Mapped reads: {}", mapped);
 Enable parallel BGZF decompression for large files:
 
 ```cpp
+#include <pbsamoa/io/BamRawReader.hpp>
+
 BamRawReader reader{"input.bam", BamRawReaderConfig{.BgzfWorkers = 4}};
 ```
 
@@ -78,6 +84,10 @@ thread pool. Fields like `Sequence()` and `Tags()` are ready to use without per-
 cost. The decompressed bytes are omitted.
 
 ```cpp
+#include <pbsamoa/io/BamRecordReader.hpp>
+
+#include <print>
+
 BamRecordReader reader{"input.bam"};
 
 for (const auto& rec : reader.Records()) {
@@ -90,7 +100,10 @@ for (const auto& rec : reader.Records()) {
 Drop large PacBio pulse tags you don't need:
 
 ```cpp
-BamRecordReader reader{"input.bam", BamRecordReaderConfig{.TagFilter = DropTags{{"ip", "pw"}}}};
+#include <pbsamoa/io/BamRecordReader.hpp>
+
+BamRecordReader reader{"input.bam",
+                       BamRecordReaderConfig{.TagFilter = DropTags{TagKey{'i', 'p'}, TagKey{'p', 'w'}}}};
 ```
 
 ### Chunking – parallel-by-ZMW sharding
@@ -100,6 +113,8 @@ processes can work on the same file without overlap. It requires a `.zmi` (new) 
 index alongside the BAM.
 
 ```cpp
+#include <pbsamoa/io/BamRawReader.hpp>
+
 BamRawReaderConfig cfg{
   .ChunkNum = 2,      // 1-based: this process handles chunk 2
   .TotalChunks = 5,   // divide ZMWs into 5 roughly-equal groups
@@ -111,19 +126,26 @@ for (const auto& rec : reader.Records()) {
 }
 ```
 
-**How it works.** The reader opens the ZMW index, gets the file-order list of unique ZMWs, divides
-them into `TotalChunks` slices with floating-point boundaries (`std::lround`), then seeks the BGZF
-stream to the first record of the slice and sets a record limit to the exact count. Reading stops
-automatically when the chunk is exhausted – no per-record index lookups after setup.
+**How it works.** The reader opens the ZMW index and counts the unique ZMWs in file order. It divides
+them into `TotalChunks` slices with integer boundaries: boundary `k` is `floor(N * k / TotalChunks)`
+for `N` ZMWs. Then it seeks the BGZF stream to the first record of the slice and sets a record limit
+to the exact count. Reading stops automatically when the chunk is exhausted – no per-record index
+lookups after setup.
 
 ```
 ZMWs:    [10, 20, 30, 40, 50]    5 unique ZMWs, TotalChunks=3
-chunk 1: [10, 20]   ← lround(5/3 * 0) .. lround(5/3 * 1) = indices 0..2
-chunk 2: [30, 40]   ← indices 2..3
-chunk 3: [50]       ← indices 3..5 (clamped)
+chunk 1: [10]       ← floor(5 * 0 / 3) .. floor(5 * 1 / 3) = indices 0..1
+chunk 2: [20, 30]   ← indices 1..3
+chunk 3: [40, 50]   ← indices 3..5
 ```
 
-Chunking and `Whitelist` are mutually exclusive – the constructor rejects combining both.
+This is the default `ChunkMode::CONTIGUOUS`. With `ChunkingMode = ChunkMode::SCATTER`, each chunk
+gets shuffled tiles of `ChunkTileZmws` ZMWs from all of the file. Scatter mode ignores
+`BgzfWorkers` and reads on the caller thread.
+
+Chunking and the config field `Whitelist` are mutually exclusive – the constructor rejects combining
+both. The config field does not filter records; use `BamRawReader::Whitelist()` to select ZMWs.
+Chunking and `Whitelist` work on one BAM file only. A reader on more than one file rejects them.
 
 ### Read Pipeline – layered stages for maximum throughput
 
@@ -139,44 +161,52 @@ via lock-free SPSC queues, so I/O, decompression, parsing, and decoding all over
   ▼
  Consumer thread – parses raw BAM records from decompressed bytes
   │
-  ▼  SPSCQueue<RawRecord>  [4096]
+  ▼  SPSCQueue<RawRecordBatch>  [8]   one batch = 32 blocks, about 2 MiB
   │
  BamRawReader::ReadBatch(ByteLimit)
-  │  accumulates records into a single contiguous RawRecordBatch
+  │  gives one RawRecordBatch
   ▼
- Producer thread – dispatches decode tasks to ThreadPool (DecodeWorkers)
-  │  each record: RawRecord → BamRecord (field decode + tag filter)
-  ▼  SPSCQueue<BamRecord>  [4096]
+ Producer thread – reads batches up to BatchBudget,
+  │  dispatches decode tasks to ThreadPool (DecodeWorkers)
+  │  each record: raw bytes → BamRecord (field decode + tag filter)
+  ▼  SPSCQueue<BamRecord>  [OutputCapacity, default 1024]
   │
  Caller thread – BamRecordReader::ReadRecord()
 ```
 
 **Layer 1 – BGZF (BgzfReader).** Three concurrent stages when `BgzfWorkers > 0`: a dedicated IO
 thread reads compressed blocks from disk, a thread pool decompresses them with libdeflate, and a
-consumer thread parses the decompressed bytes into `RawRecord`s. With `BgzfWorkers = 0` everything
-runs synchronously on the caller thread.
+consumer thread parses the decompressed bytes into one `RawRecordBatch` for each group of 32 blocks.
+With `BgzfWorkers = 0` everything runs synchronously on the caller thread.
 
-**Layer 2 – Batching (BamRawReader).** `ReadBatch(ByteLimit)` drains records from Layer 1 into a
-contiguous `RawRecordBatch` – one record-byte allocation plus N extents – up to a memory budget
-(default 256 MiB).
+**Layer 2 – Batching (BamRawReader).** `ReadBatch(ByteLimit)` gives a `RawRecordBatch` – one
+record-byte buffer plus N extents. The default limit is 256 MiB. With `BgzfWorkers = 0`, the batch
+copies records from Layer 1 until it reaches the limit. With `BgzfWorkers > 0`, a batch holds the
+records of at most one group of 32 blocks (about 2 MiB). A larger limit does not join groups.
 `RawRecordBatch::View()` decodes directly from that buffer and does not allocate a byte copy. This
 amortises allocation overhead and gives Layer 3 a batch-sized unit of work.
 
-**Layer 3 – Decoding (BamRecordReader).** A background producer thread calls `ReadBatch`, then fans
-out record-level decoding across `DecodeWorkers` (default
-4) threads. Each record is independently converted from raw BAM bytes to a `BamRecord` with
-structured fields, applying `TagFilter` (drop/keep) during `ToOwned()`. Decoded records are pushed
-into the output SPSC queue for the caller.
+**Layer 3 – Decoding (BamRecordReader).** A background producer thread calls `ReadBatch` until it
+has `BatchBudget` bytes (default 4 MiB). Then it fans out record-level decoding across
+`DecodeWorkers` (default 4) threads. Each record is independently converted from raw BAM bytes to a
+`BamRecord` with structured fields, applying `TagFilter` (drop/keep) during `ToOwned()`. Decoded
+records are pushed into the output SPSC queue for the caller.
 
-Every queue boundary has a named stall counter (`ioStalls`, `consumerStalls`, `producerStalls`,
-etc.) accessible from `GetMetrics()`, so you can identify the bottleneck stage without external
-instrumentation.
+Every queue boundary has a named stall counter, so you can identify the bottleneck stage without
+external instrumentation. `BamRawReader::GetMetrics()` returns `BgzfMetrics` with `IoStalls`,
+`ConsumerStalls`, and `ReaderStalls`. `BamRecordReader::GetMetrics()` returns `ReaderMetrics`. It
+adds `DecodeMetrics` with `ProducerStalls` and `ConsumerStalls`. With `BgzfWorkers = 0`, only
+`RecordsConsumed` of `BgzfMetrics` has a value.
 
 ```cpp
+#include <pbsamoa/io/BamRecordReader.hpp>
+
+using namespace PacBio::Samoa::Literals;
+
 BamRecordReaderConfig cfg;
 cfg.RawReaderConfig.BgzfWorkers = 8;  // layer 1: decompression threads
 cfg.BatchBudget = 4_MiB;              // layer 2: batch size
 cfg.DecodeWorkers = 4;                // layer 3: decode threads
-cfg.TagFilter = DropTags{{"ip", "pw"}};
+cfg.TagFilter = DropTags{TagKey{'i', 'p'}, TagKey{'p', 'w'}};
 BamRecordReader reader{"input.bam", cfg};
 ```

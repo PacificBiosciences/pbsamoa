@@ -4,7 +4,21 @@ A C++23 library for reading and writing SAM/BAM/CRAM files, with BAI/CRAI
 index support. Built for throughput: parallel BGZF decompression, zero-copy
 record views, and batch processing with memory budgets.
 
-External dependencies: [libdeflate](https://github.com/ebiggers/libdeflate).
+Required dependencies:
+
+- [libdeflate](https://github.com/ebiggers/libdeflate) (Meson wrap, or a system package)
+- pbcopper (Meson wrap). pbcopper needs Boost from the system and gets simde as a wrap.
+- threads
+
+Optional dependencies:
+
+- bzip2 and liblzma (system packages). They enable the BZIP2 and LZMA block methods of CRAM.
+- [ISA-L](https://github.com/intel/isa-l) (Meson wrap, x86-64 only, needs NASM). It makes BGZF
+  compression faster. Use the option `-Disal=enabled|disabled|auto` (default `auto`).
+- pbtestutils and googletest (Meson wraps) for the tests. Use `-Dtests=false` to skip them.
+
+The source tree includes [htscodecs](https://github.com/samtools/htscodecs) and the rigtorp
+`SPSCQueue` in `third-party/`.
 
 ## Building
 
@@ -14,12 +28,12 @@ meson compile -C build
 meson test -C build
 ```
 
-Dependencies are resolved via Meson subproject wraps — no system packages
-required.
+Meson gets libdeflate, pbcopper, ISA-L, and the test dependencies through subproject wraps.
+Install Boost, and optionally bzip2 and liblzma, as system packages.
 
 ## Quick Start
 
-### Read a BAM file (views)
+### Read a BAM file (raw records)
 
 ```cpp
 #include <pbsamoa/io/BamRawReader.hpp>
@@ -28,8 +42,8 @@ required.
 PacBio::Samoa::BamRawReader reader{"input.bam"};
 
 // Print every read name (decode on demand)
-for (const auto& view : reader.Records()) {
-    std::println("{}", view.Name());
+for (const auto& record : reader.Records()) {
+    std::println("{}", record.Name());
 }
 ```
 
@@ -51,6 +65,8 @@ for (const auto& record : reader.Records()) {
 
 ```cpp
 #include <pbsamoa/io/BamRawReader.hpp>
+
+#include <cstddef>
 
 using namespace PacBio::Samoa::Literals;
 
@@ -74,8 +90,23 @@ while (auto batch = reader.ReadBatch(128_MiB)) {
 PacBio::Samoa::BamRawReader reader{"input.bam"};
 PacBio::Samoa::BamWriter writer{"output.bam", reader.Header()};
 
-for (const auto& view : reader.Records()) {
-    writer.Write(view);  // zero-copy passthrough
+for (const auto& record : reader.Records()) {
+    writer.Write(record);  // writes the raw bytes, no encode step
+}
+```
+
+`Records()` makes an owning `RawRecord` for each record. To skip this step, write whole
+batches:
+
+```cpp
+#include <pbsamoa/io/BamRawReader.hpp>
+#include <pbsamoa/io/BamWriter.hpp>
+
+PacBio::Samoa::BamRawReader reader{"input.bam"};
+PacBio::Samoa::BamWriter writer{"output.bam", reader.Header()};
+
+while (auto batch = reader.ReadBatch()) {
+    writer.WriteBatch(*batch);
 }
 ```
 
@@ -118,16 +149,18 @@ writer.Close();
 ### Region query with BAI index
 
 ```cpp
-#include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/index/BaiIndex.hpp>
+#include <pbsamoa/io/BamRawReader.hpp>
+
+#include <cstdint>
 
 PacBio::Samoa::BamRawReader reader{"sorted.bam"};
 auto index = PacBio::Samoa::BaiIndex::FromFile("sorted.bam.bai");
 
 std::int32_t refId{reader.Header().ReferenceId("chr1")};
 
-for (const auto& view : reader.Query(index, refId, 1000, 2000)) {
-    // records overlapping chr1:1000-2000
+for (const auto& record : reader.Query(index, refId, 1000, 2000)) {
+    // records that overlap chr1 [1000, 2000), 0-based, end exclusive
 }
 ```
 
@@ -140,8 +173,8 @@ for (const auto& view : reader.Query(index, refId, 1000, 2000)) {
 PacBio::Samoa::BamRawReader reader{"input.bam"};
 PacBio::Samoa::BamWriter writer{"output.bam", reader.Header()};
 
-for (const auto& view : reader.Records()) {
-    auto record = view.ToOwned();
+for (const auto& raw : reader.Records()) {
+    auto record = raw.ToOwned();
     record.MapQ(60);
     writer.Write(record);
 }
@@ -153,12 +186,22 @@ Large tags (PacBio kinetics `ip`/`pw`) can dominate memory. Drop them when
 converting views to owned records:
 
 ```cpp
+#include <pbsamoa/core/RawRecord.hpp>
+#include <pbsamoa/core/Tags.hpp>
+
+using namespace PacBio::Samoa;
+
 auto record = view.ToOwned(DropTags{TagKey{'i', 'p'}, TagKey{'p', 'w'}});
 ```
 
 Or keep only the tags you need:
 
 ```cpp
+#include <pbsamoa/core/RawRecord.hpp>
+#include <pbsamoa/core/Tags.hpp>
+
+using namespace PacBio::Samoa;
+
 auto record = view.ToOwned(KeepTags{TagKey{'R', 'G'}, TagKey{'N', 'M'}});
 ```
 
