@@ -32,9 +32,11 @@ struct CramReaderConfig
     /// only. Several readers can share one reference.
     std::shared_ptr<const CramReference> Reference{};
 
-    /// \brief Number of worker threads for parallel CRAM block decompression.
+    /// \brief Number of worker threads that decode the containers of the sequential read.
     ///
-    /// 0 disables parallel decompression and uses synchronous decoding.
+    /// The workers decode up to 2 containers each ahead of the caller, and the reader gives
+    /// their records in file order. Query and ReadSlice use the workers for the blocks of a
+    /// slice. 0 decodes all on the calling thread.
     std::size_t DecompressionWorkers{0};
 };
 

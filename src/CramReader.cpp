@@ -15,8 +15,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <deque>
 #include <format>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -24,6 +26,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include <cctype>
@@ -824,13 +827,23 @@ struct CramReader::Impl
     SamHeader header;
     bool atEof{false};
 
+    // The records of one container, in file order: BamRecords for ReadRecord, RawRecords for
+    // ReadRawRecord.
+    using ContainerRecords = std::variant<std::vector<BamRecord>, std::vector<RawRecord>>;
+
     // Current container state
-    std::vector<BamRecord> pendingRecords;
+    ContainerRecords pendingRecords;
     std::size_t pendingIdx{0};
+    // The external reference of the decode tasks: each task has its own window of it.
+    std::shared_ptr<const CramReference> reference;
     ReferenceWindow externalReference;
     // The (container offset, slice offset) of the indexed slices whose reference MD5 is checked.
     std::set<std::pair<std::int64_t, std::int64_t>> validatedSlices;
     CramGzipDecompressorContext gzipContext;
+    // The containers after the pending one, in file order, that the pool decodes.
+    std::deque<std::future<ContainerRecords>> readAhead;
+    // Declared last, so it is destroyed first: its destructor waits for the decode tasks,
+    // which use header and reference.
     std::shared_ptr<Parallel::ThreadPool<>> decompressionPool;
 
     /// \brief The two reference sources that a record can use for bases.
@@ -999,7 +1012,8 @@ struct CramReader::Impl
                     "CramReader: the reference has {} sequences, the header {} @SQ lines",
                     config.Reference->NumSequences(), std::size(header.ReferenceSequences()))};
             }
-            externalReference.Reset(config.Reference);
+            reference = config.Reference;
+            externalReference.Reset(reference);
             return;
         }
 
@@ -1022,7 +1036,8 @@ struct CramReader::Impl
                 sequences[i] = std::move(it->second);
             }
         }
-        externalReference.Reset(std::make_shared<const FastaTextReference>(std::move(sequences)));
+        reference = std::make_shared<const FastaTextReference>(std::move(sequences));
+        externalReference.Reset(reference);
     }
 
     std::vector<std::byte> ReadBytes(std::size_t n)
@@ -1183,10 +1198,12 @@ struct CramReader::Impl
 
     // RECORD: BamRecord, or RawRecord. A RawRecord is made right after the decode of each
     // record, so the slice is not held as BamRecords too: a slice of HiFi reads holds about
-    // 50 MB as BamRecords.
+    // 50 MB as BamRecords. window: the reference window of the calling thread. onPool: a task
+    // of decompressionPool calls it, so the blocks decompress on this thread.
     template <typename RECORD = BamRecord>
     std::vector<RECORD> DecodeContainerRecords(
-        const CramContainerHeader& containerHeader, std::span<const std::byte> blockData,
+        ReferenceWindow& window, const bool onPool, const CramContainerHeader& containerHeader,
+        std::span<const std::byte> blockData,
         const std::optional<SliceQueryCandidate>& targetSlice = std::nullopt,
         const std::int64_t stopPos = std::numeric_limits<std::int64_t>::max())
     {
@@ -1278,7 +1295,7 @@ struct CramReader::Impl
             sliceBlocks.push_back(slice.CoreBlock);
             sliceBlocks.insert(std::end(sliceBlocks), std::begin(slice.ExternalBlocks),
                                std::end(slice.ExternalBlocks));
-            DecompressBlocks(sliceBlocks);
+            DecompressBlocks(sliceBlocks, onPool);
 
             CramBlock coreBlock;
             bool sawCoreBlock = false;
@@ -1308,8 +1325,8 @@ struct CramReader::Impl
             if ((sliceHeader.RefSeqId >= 0) && (sliceHeader.AlignmentStart > 0) &&
                 (sliceHeader.AlignmentSpan > 0)) {
                 const std::int64_t sliceStart{sliceHeader.AlignmentStart - 1};
-                externalReference.Get(sliceHeader.RefSeqId, sliceStart,
-                                      sliceStart + sliceHeader.AlignmentSpan);
+                window.Get(sliceHeader.RefSeqId, sliceStart,
+                           sliceStart + sliceHeader.AlignmentSpan);
             }
             // A query of a region reads the slices of its CRAI rows again for each region:
             // the MD5 of the reference of a slice is checked once for each reader.
@@ -1318,7 +1335,7 @@ struct CramReader::Impl
             if (!targetSlice || !validatedSlices.contains(sliceKey)) {
                 ValidateSliceReferenceMd5(sliceHeader,
                                           compressionHeader.PreservationMap.ReferenceRequired,
-                                          embeddedReference, externalReference, header);
+                                          embeddedReference, window, header);
                 if (targetSlice) {
                     validatedSlices.insert(sliceKey);
                 }
@@ -1345,7 +1362,7 @@ struct CramReader::Impl
                 .DownstreamMateDistance = downstreamMateDistance,
                 .ApDelta = compressionHeader.PreservationMap.ApDelta,
                 .ReadNamesIncluded = compressionHeader.PreservationMap.ReadNamesIncluded,
-                .ExternalReference = externalReference,
+                .ExternalReference = window,
             };
 
             // In a coordinate-sorted single-reference slice, the records after one at stopPos
@@ -1383,7 +1400,9 @@ struct CramReader::Impl
         return decodedRecords;
     }
 
-    void DecompressBlocks(std::vector<CramBlock>& blocks)
+    // onPool: a task of decompressionPool calls it. A dispatch to the pool then could wait for
+    // itself, so the blocks decompress on this thread.
+    void DecompressBlocks(std::vector<CramBlock>& blocks, const bool onPool)
     {
         if (std::empty(blocks)) {
             return;
@@ -1395,6 +1414,12 @@ struct CramReader::Impl
 
         const std::size_t workers = config.DecompressionWorkers;
         constexpr std::size_t MIN_BLOCKS_FOR_PARALLEL = 8;
+        if (onPool) {
+            for (auto& block : blocks) {
+                DecompressCramBlock(block, ThreadLocalGzipDecompressor());
+            }
+            return;
+        }
         if (!decompressionPool || workers <= 1 || std::size(blocks) < MIN_BLOCKS_FOR_PARALLEL) {
             for (auto& block : blocks) {
                 DecompressCramBlock(block, gzipContext.Decompressor.get());
@@ -1466,39 +1491,138 @@ struct CramReader::Impl
 
         const auto blockData =
             ReadExactBytes(static_cast<std::size_t>(containerHeader.Length), "container payload");
-        return DecodeContainerRecords<RECORD>(containerHeader, blockData, candidate, stopPos);
+        return DecodeContainerRecords<RECORD>(externalReference, false, containerHeader, blockData,
+                                              candidate, stopPos);
     }
 
-    bool LoadNextContainer()
+    /// \brief The header and the payload of the next container. Empty at EOF.
+    std::optional<std::pair<CramContainerHeader, std::vector<std::byte>>> ReadNextContainer()
     {
-        pendingRecords.clear();
-        pendingIdx = 0;
-
-        while (!atEof && std::empty(pendingRecords)) {
-            const auto headerBytesOpt = ReadContainerHeaderBytes();
-            if (!headerBytesOpt) {
-                atEof = true;
-                break;
-            }
-
-            std::size_t headerBytesRead = 0;
-            const auto containerHeader = ParseContainerHeader(*headerBytesOpt, headerBytesRead);
-            if (headerBytesRead != std::size(*headerBytesOpt)) {
-                throw std::runtime_error("CramReader: failed to consume full container header");
-            }
-            if (containerHeader.Length < 0) {
-                throw std::runtime_error("CramReader: negative container length");
-            }
-            if (containerHeader.NumBlocks < 0) {
-                throw std::runtime_error("CramReader: negative container block count");
-            }
-
-            const auto blockData = ReadExactBytes(static_cast<std::size_t>(containerHeader.Length),
-                                                  "container payload");
-            pendingRecords = DecodeContainerRecords(containerHeader, blockData);
+        const auto headerBytesOpt = ReadContainerHeaderBytes();
+        if (!headerBytesOpt) {
+            atEof = true;
+            return std::nullopt;
         }
 
-        return !std::empty(pendingRecords);
+        std::size_t headerBytesRead = 0;
+        const auto containerHeader = ParseContainerHeader(*headerBytesOpt, headerBytesRead);
+        if (headerBytesRead != std::size(*headerBytesOpt)) {
+            throw std::runtime_error("CramReader: failed to consume full container header");
+        }
+        if (containerHeader.Length < 0) {
+            throw std::runtime_error("CramReader: negative container length");
+        }
+        if (containerHeader.NumBlocks < 0) {
+            throw std::runtime_error("CramReader: negative container block count");
+        }
+
+        auto blockData =
+            ReadExactBytes(static_cast<std::size_t>(containerHeader.Length), "container payload");
+        return std::pair{containerHeader, std::move(blockData)};
+    }
+
+    /// \brief Reads containers until 2 for each worker wait in readAhead, and gives their
+    ///        decode to the pool. The file is read on this thread only.
+    template <typename RECORD>
+    void FillReadAhead()
+    {
+        constexpr std::size_t CONTAINERS_PER_WORKER{2};
+        while (!atEof &&
+               (std::size(readAhead) < CONTAINERS_PER_WORKER * config.DecompressionWorkers)) {
+            auto container = ReadNextContainer();
+            if (!container) {
+                return;
+            }
+            auto promise = std::make_shared<std::promise<ContainerRecords>>();
+            readAhead.push_back(promise->get_future());
+            // The pool stops at the first exception of a task: the task gives it to the
+            // future instead, and ReadRecord throws it in file order.
+            decompressionPool->Submit(
+                [this, promise,
+                 container =
+                     std::make_shared<decltype(container)::value_type>(std::move(*container))]() {
+                    try {
+                        ReferenceWindow window;
+                        window.Reset(reference);
+                        promise->set_value(DecodeContainerRecords<RECORD>(
+                            window, true, container->first, container->second));
+                    } catch (...) {
+                        promise->set_exception(std::current_exception());
+                    }
+                });
+        }
+    }
+
+    /// \brief Makes the next container with records the pending one. RECORD is the type that
+    ///        the caller reads: the containers that the pool decodes after this call have it.
+    template <typename RECORD>
+    bool LoadNextContainer()
+    {
+        pendingRecords = std::vector<RECORD>{};
+        pendingIdx = 0;
+
+        if (!decompressionPool) {
+            while (!atEof) {
+                const auto container = ReadNextContainer();
+                if (!container) {
+                    break;
+                }
+                auto records = DecodeContainerRecords<RECORD>(externalReference, false,
+                                                              container->first, container->second);
+                if (!std::empty(records)) {
+                    pendingRecords = std::move(records);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        FillReadAhead<RECORD>();
+        while (!std::empty(readAhead)) {
+            ContainerRecords records{readAhead.front().get()};
+            readAhead.pop_front();
+            FillReadAhead<RECORD>();
+            if (std::visit([](const auto& v) { return !std::empty(v); }, records)) {
+                pendingRecords = std::move(records);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The next pending record as RECORD; a record of the other type is converted.
+    template <typename RECORD>
+    std::optional<RECORD> TakePendingRecord()
+    {
+        return std::visit(
+            [this](auto& records) -> std::optional<RECORD> {
+                if (pendingIdx >= std::size(records)) {
+                    return std::nullopt;
+                }
+                auto& record = records[pendingIdx++];
+                using STORED = std::remove_cvref_t<decltype(record)>;
+                if constexpr (std::is_same_v<STORED, RECORD>) {
+                    return std::move(record);
+                } else if constexpr (std::is_same_v<RECORD, RawRecord>) {
+                    return ToRawRecord(record);
+                } else {
+                    return record.View().ToOwned();
+                }
+            },
+            pendingRecords);
+    }
+
+    template <typename RECORD>
+    std::optional<RECORD> ReadNext()
+    {
+        while (true) {
+            if (auto record{TakePendingRecord<RECORD>()}) {
+                return record;
+            }
+            if (!LoadNextContainer<RECORD>()) {
+                return std::nullopt;
+            }
+        }
     }
 
     void DecodeRecord(BamRecord& record, DecodeRecordContext& ctx)
@@ -1913,20 +2037,6 @@ struct CramReader::Impl
 // CramReader
 // ---------------------------------------------------------------------------
 
-namespace {
-
-std::optional<BamRecord> TakePendingRecord(std::vector<BamRecord>& pendingRecords,
-                                           std::size_t& pendingIdx)
-{
-    if (pendingIdx >= std::size(pendingRecords)) {
-        return std::nullopt;
-    }
-
-    return std::move(pendingRecords[pendingIdx++]);
-}
-
-}  // namespace
-
 CramReader::CramReader(const std::filesystem::path& path, const CramReaderConfig& config)
     : impl_{std::make_unique<Impl>()}
 {
@@ -1941,27 +2051,9 @@ CramReader& CramReader::operator=(CramReader&&) noexcept = default;
 
 const SamHeader& CramReader::Header() const { return impl_->header; }
 
-std::optional<BamRecord> CramReader::ReadRecord()
-{
-    if (auto record{TakePendingRecord(impl_->pendingRecords, impl_->pendingIdx)}) {
-        return record;
-    }
+std::optional<BamRecord> CramReader::ReadRecord() { return impl_->ReadNext<BamRecord>(); }
 
-    if (impl_->atEof || !impl_->LoadNextContainer()) {
-        return std::nullopt;
-    }
-
-    return TakePendingRecord(impl_->pendingRecords, impl_->pendingIdx);
-}
-
-std::optional<RawRecord> CramReader::ReadRawRecord()
-{
-    auto record = ReadRecord();
-    if (!record) {
-        return std::nullopt;
-    }
-    return ToRawRecord(*record);
-}
+std::optional<RawRecord> CramReader::ReadRawRecord() { return impl_->ReadNext<RawRecord>(); }
 
 std::vector<BamRecord> CramReader::Query(const CraiIndex& index, std::int32_t refId,
                                          std::int32_t beg, std::int32_t end)

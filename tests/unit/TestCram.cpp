@@ -1766,6 +1766,114 @@ TEST_F(CramWriterReaderTest, QueryRawReturnsOverlappingRecords)
     EXPECT_EQ(queried[0].Seq().ToString(), "ACGT");
 }
 
+namespace {
+
+// Writes 100 mapped records in containers of 3 records: the reader with workers decodes
+// many containers ahead.
+void WriteManyContainers(const std::filesystem::path& path, const SamHeader& header)
+{
+    CramWriterConfig config;
+    config.WriteCrai = true;
+    config.RecordsPerSlice = 3;
+    CramWriter writer{path, header, config};
+    for (std::int32_t i = 0; i < 100; ++i) {
+        BamRecord record;
+        const std::string seq{(i % 2) == 0 ? "ACGTACGTAA" : "TTGCATGCAA"};
+        record.Name(std::format("read{}", i))
+            .Flag(0)
+            .RefId(0)
+            .Pos(i * 5)
+            .MapQ(30)
+            .Cigar({CigarOp{CigarOpType::M, 10}})
+            .NextRefId(-1)
+            .NextPos(-1)
+            .Tlen(0)
+            .Sequence(seq)
+            .Qualities(std::vector<std::uint8_t>(10, 20 + (i % 10)));
+        record.MutableTags().Set(TagKey{'N', 'M'}, TagValue{std::int64_t{i}});
+        writer.Write(record);
+    }
+}
+
+std::vector<std::vector<std::byte>> ReadAllAsBam(CramReader& reader, const bool raw)
+{
+    std::vector<std::vector<std::byte>> lines;
+    while (true) {
+        if (raw) {
+            const std::optional<RawRecord> record{reader.ReadRawRecord()};
+            if (!record) {
+                break;
+            }
+            lines.push_back(record->View().ToOwned().SerializeToBam());
+        } else {
+            const std::optional<BamRecord> record{reader.ReadRecord()};
+            if (!record) {
+                break;
+            }
+            lines.push_back(record->SerializeToBam());
+        }
+    }
+    return lines;
+}
+
+}  // namespace
+
+TEST_F(CramWriterReaderTest, DecompressionWorkersGiveTheSameRecordsInOrder)
+{
+    const SamHeader header = MakeMinimalHeader();
+    WriteManyContainers(tmpPath, header);
+
+    CramReader serial{tmpPath};
+    const std::vector<std::vector<std::byte>> expected{ReadAllAsBam(serial, false)};
+    ASSERT_EQ(std::ssize(expected), 100);
+
+    for (const std::size_t workers : {1UZ, 4UZ}) {
+        for (const bool raw : {false, true}) {
+            CramReader reader{tmpPath, CramReaderConfig{.DecompressionWorkers = workers}};
+            EXPECT_EQ(ReadAllAsBam(reader, raw), expected) << workers << " workers, raw " << raw;
+        }
+    }
+}
+
+TEST_F(CramWriterReaderTest, DecompressionWorkersTakeMixedCallsAndQueries)
+{
+    const SamHeader header = MakeMinimalHeader();
+    WriteManyContainers(tmpPath, header);
+    CramReader serial{tmpPath};
+    const std::vector<std::vector<std::byte>> expected{ReadAllAsBam(serial, false)};
+
+    const CraiIndex index = CraiIndex::FromFile(tmpCraiPath);
+    CramReader reader{tmpPath, CramReaderConfig{.DecompressionWorkers = 4}};
+    std::vector<std::vector<std::byte>> lines;
+    for (std::int32_t i = 0; i < 100; ++i) {
+        if ((i % 7) == 3) {
+            const std::vector<BamRecord> queried{reader.Query(index, 0, 200, 205)};
+            ASSERT_FALSE(std::empty(queried));
+        }
+        if ((i % 2) == 0) {
+            const std::optional<RawRecord> record{reader.ReadRawRecord()};
+            ASSERT_TRUE(record);
+            lines.push_back(record->View().ToOwned().SerializeToBam());
+        } else {
+            const std::optional<BamRecord> record{reader.ReadRecord()};
+            ASSERT_TRUE(record);
+            lines.push_back(record->SerializeToBam());
+        }
+    }
+    EXPECT_FALSE(reader.ReadRecord());
+    EXPECT_EQ(lines, expected);
+}
+
+TEST_F(CramWriterReaderTest, DecompressionWorkersStopWithContainersInFlight)
+{
+    const SamHeader header = MakeMinimalHeader();
+    WriteManyContainers(tmpPath, header);
+    for (std::int32_t i = 0; i < 20; ++i) {
+        CramReader reader{tmpPath, CramReaderConfig{.DecompressionWorkers = 4}};
+        ASSERT_TRUE(reader.ReadRecord());
+    }
+}
+
 TEST_F(CramWriterReaderTest, WriteRawRecordBatchRoundTrip)
 {
     const SamHeader header = MakeMinimalHeader();

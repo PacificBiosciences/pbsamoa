@@ -243,11 +243,11 @@ CramReader reader{"input.cram", CramReaderConfig{
 
 `CramReaderConfig` fields:
 
-|         Field          | Default |                                Description                                 |
-| ---------------------- | ------- | -------------------------------------------------------------------------- |
-| `ReferencePath`        | `{}`    | Optional FASTA path for reference-based slices                             |
-| `Reference`            | `{}`    | Optional `CramReference` for reference-based slices, read in windows       |
-| `DecompressionWorkers` | `0`     | CRAM block decompression workers for slice data blocks (`0` = synchronous) |
+|         Field          | Default |                                                                                     Description                                                                                      |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ReferencePath`        | `{}`    | Optional FASTA path for reference-based slices                                                                                                                                       |
+| `Reference`            | `{}`    | Optional `CramReference` for reference-based slices, read in windows                                                                                                                 |
+| `DecompressionWorkers` | `0`     | Workers that decode up to 2 containers each ahead of `ReadRecord`/`ReadRawRecord`, in file order; for `Query`/`ReadSlice`, they decompress the blocks of a slice (`0` = synchronous) |
 
 With `ReferencePath`, the reader loads the whole FASTA into memory. With `Reference` (a
 `shared_ptr<const CramReference>`, one sequence per @SQ line, in header order), the reader keeps
