@@ -305,6 +305,9 @@ record to an encoder. `MaxPendingBytes` is 64 MiB by default.
 `BgzfBlockEncoder` takes levels 0–12 (default 6). Levels 1–12 use libdeflate.
 Level 0 uses ISA-L igzip level 1 when the build has ISA-L. Without ISA-L,
 level 0 uses libdeflate level 1. `BgzfWriter` does not accept level 0.
+The ISA-L wrap applies `subprojects/packagefiles/isa-l-write-first-byte-hash.patch`:
+without it, the compressed bytes of level 0 depend on the address of the ISA-L stream
+struct and change from run to run (the data stays the same).
 
 ### VirtualOffset
 

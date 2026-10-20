@@ -1,0 +1,19 @@
+igzip: hash the input bytes, not the stream pointer, on the first byte
+
+In isal_deflate_icf_body (igzip_icf_body_h1_gr_bt.asm), .write_first_byte
+computes hash2 from tmp2 (rcx). On this path nothing loads tmp2 after the
+function entry, where rcx holds the isal_zstream pointer. So the hash of
+the third input byte comes from bits 16-47 of the stream address, and the
+compressed bytes depend on where the stream struct is in memory (always a
+valid deflate stream). .loop2 loads tmp2 from curr_data first; do the same.
+
+--- a/igzip/igzip_icf_body_h1_gr_bt.asm
++++ b/igzip/igzip_icf_body_h1_gr_bt.asm
+@@ -858,6 +858,7 @@
+ 	mov	[hash_table + 2 * hash], f_i %+ w
+ 
+ 	mov	hash, hash2
++	mov	tmp2, curr_data
+ 	shr	tmp2, 16
+ 	compute_hash	hash2, tmp2
+ 
