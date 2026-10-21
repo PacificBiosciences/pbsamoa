@@ -2737,8 +2737,20 @@ bool BgzfReader::Impl::RefillRecordBuffer()
 
 std::optional<RawRecord> BgzfReader::Impl::ReadRecordSync()
 {
-    while ((recordBufSize - recordBufPos) < RECORD_BLOCK_SIZE_FIELD) {
+    // At the end of the file RefillRecordBuffer() returns true while bytes remain, but it adds
+    // no bytes. A record that the file cuts would loop forever: stop when no bytes come.
+    const auto refill = [this] {
+        const std::size_t before{recordBufSize - recordBufPos};
         if (!RefillRecordBuffer()) {
+            return false;
+        }
+        if ((recordBufSize - recordBufPos) == before) {
+            throw std::runtime_error{"BAM: truncated record at the end of the file"};
+        }
+        return true;
+    };
+    while ((recordBufSize - recordBufPos) < RECORD_BLOCK_SIZE_FIELD) {
+        if (!refill()) {
             return std::nullopt;
         }
     }
@@ -2753,7 +2765,7 @@ std::optional<RawRecord> BgzfReader::Impl::ReadRecordSync()
     const std::size_t totalRecordBytes{RECORD_BLOCK_SIZE_FIELD + blockSize};
 
     while ((recordBufSize - recordBufPos) < totalRecordBytes) {
-        if (!RefillRecordBuffer()) {
+        if (!refill()) {
             return std::nullopt;
         }
     }

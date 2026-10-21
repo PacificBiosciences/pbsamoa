@@ -716,6 +716,11 @@ struct BaiStreamBuilder::Impl
                 ++meta.nMapped;
                 ReferenceIndex& refIdx{references[static_cast<std::size_t>(r.refId)]};
 
+                // a BAI holds 0 <= position < 2^29 (SAMv1 5.3); htslib refuses other records
+                if ((r.pos < 0) || ((static_cast<std::int64_t>(r.pos) + r.refLen) > (1 << 29))) {
+                    throw std::runtime_error{
+                        "BAI build: a mapped record is outside [0, 2^29); use a CSI index"};
+                }
                 const std::int32_t endPos{
                     CheckedInt32(static_cast<std::int64_t>(r.pos) + r.refLen, "alignment end")};
                 const std::int32_t nonEmptyEnd{NonEmptyAlignmentEnd(r.pos, endPos)};
@@ -787,6 +792,9 @@ void BaiStreamBuilder::Observe(VirtualOffset recordBeginVo, std::span<const std:
     std::int64_t refLen{0};
     if (nCigarOp > 0) {
         const std::size_t cigarOffset{BAM_FIXED_FIELDS_SIZE + nameLen};
+        if ((cigarOffset + (std::size_t{nCigarOp} * 4)) > std::size(recordBytes)) {
+            throw std::runtime_error{"BAI build: the CIGAR goes past the end of a BAM record"};
+        }
         for (std::uint16_t ci{0}; ci < nCigarOp; ++ci) {
             const std::uint32_t cigarVal{ReadU32LE(rec + cigarOffset + ci * 4)};
             const std::uint8_t opCode{static_cast<std::uint8_t>(cigarVal & 0xFU)};
