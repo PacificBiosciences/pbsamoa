@@ -425,7 +425,7 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `BlockCompressionMethod`       | `CramBlockMethod`                                | `GZIP`  | Default block method                                              |
 | `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series method overrides                                  |
 | `RecordsPerSlice`              | `int32_t`                                        | `10000` | Max records per slice                                             |
-| `BasesPerSlice`                | `int64_t`                                        | `5000000` | Max bases per slice: sequence bases plus BAM aux bytes (`0` = no limit) |
+| `BasesPerSlice`                | `int64_t`                                        | `20000000` | Max bases per slice: sequence bases plus BAM aux bytes (`0` = no limit) |
 | `SlicesPerContainer`           | `int32_t`                                        | `1`     | Max slices per container (`<= 0` means unlimited until `Close()`) |
 | `MajorVersion`                 | `uint8_t`                                        | `3`     | CRAM major version (must be `3`)                                  |
 | `MinorVersion`                 | `uint8_t`                                        | `0`     | CRAM minor version (`0` or `1`)                                   |
@@ -441,7 +441,7 @@ Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
 - `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
 - A slice ends with the record that reaches `RecordsPerSlice` or `BasesPerSlice`, so it holds at
-  least one record. The bases limit and its default are htslib's (`bases_per_slice`).
+  least one record. The bases limit counts as htslib's `bases_per_slice` does; htslib's default is 5000000.
 - The constructor throws `std::runtime_error` when `MajorVersion != 3`, `RecordsPerSlice <= 0`,
   `BasesPerSlice < 0`, `CompressionLevel` is outside `[0, 12]`, or a `ReferenceSequences` entry does not have the
   length of its @SQ line.

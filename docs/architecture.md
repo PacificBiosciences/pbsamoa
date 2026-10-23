@@ -689,11 +689,12 @@ the query decode stops after the region end when no record waits for a mate.
 ### Writer threads
 
 `CramWriterConfig` sets the layout: `RecordsPerSlice{10000}`,
-`BasesPerSlice{5000000}` and `SlicesPerContainer{1}`. A slice ends with the record
+`BasesPerSlice{20000000}` and `SlicesPerContainer{1}`. A slice ends with the record
 that reaches either limit. The bases limit counts sequence bases plus BAM aux
-bytes, as htslib does, and has htslib's default: HiFi reads then get slices of a
-few hundred records instead of 10000, so a reader holds far less decoded data and
-a region query decodes less. A value of `SlicesPerContainer` <= 0 flushes only at
+bytes, as htslib does. HiFi reads then get slices of about a thousand records
+instead of 10000, so a reader holds far less decoded data and a region query
+decodes less. htslib's default is 5000000; each slice adds its block headers and
+codec tables, and on HG002 HiFi that gave a 5% larger file at the same speed. A value of `SlicesPerContainer` <= 0 flushes only at
 `Close()`. `CompressionWorkers` (default 0) sets the size of a pbcopper
 `ThreadPool`. With 2 or more workers, `Write()` hands each full container to
 the pool as one task, which owns its records, and goes on with the next

@@ -52,7 +52,7 @@ const CLI_v2::Option BasesPerSlice{
     "names" : ["bases-per-slice"],
     "description" : "Maximum bases (sequence plus aux bytes) per CRAM slice; 0 = no limit.",
     "type" : "integer",
-    "default" : 5000000
+    "default" : 20000000
 })"};
 
 // Thread counts use -1 as a sentinel meaning "not user-provided / auto-detect".

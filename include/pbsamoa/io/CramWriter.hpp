@@ -41,10 +41,11 @@ struct CramWriterConfig
     /// bytes.
     ///
     /// A slice ends with the record that reaches the limit, so it holds at least one record.
-    /// The default, 5,000,000, is htslib's (500 per record of RecordsPerSlice): long reads then
-    /// get slices of a few hundred records, which keeps decode memory and region queries small.
+    /// The default, 20,000,000, gives HiFi reads slices of about a thousand records, which
+    /// keeps decode memory and region queries small. htslib uses 5,000,000; each slice costs
+    /// its block headers and codec tables, so that is 5% larger for the same speed.
     /// 0 means no limit.
-    std::int64_t BasesPerSlice{5'000'000};
+    std::int64_t BasesPerSlice{20'000'000};
 
     /// \brief Maximum number of slices per container.
     ///

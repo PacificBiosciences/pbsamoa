@@ -91,7 +91,7 @@ Options:
 | Flag | Description |
 | ---- | ----------- |
 | `--records-per-slice N` | Maximum records per CRAM slice (default: `10000`; must be > 0) |
-| `--bases-per-slice N` | Maximum bases per CRAM slice, sequence bases plus aux bytes as htslib counts (default: `5000000`; `0` = no limit) |
+| `--bases-per-slice N` | Maximum bases per CRAM slice, sequence bases plus aux bytes as htslib counts (default: `20000000`; `0` = no limit) |
 | `--bgzf-threads N` | BAM input decompression workers (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 16) |
 | `--convert-to-bam-record` | Opt in to decoding BAM input into `BamRecord` before CRAM write |
 | `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 16). A value of `0` or more also enables that mode |
