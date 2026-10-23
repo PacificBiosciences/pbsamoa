@@ -85,6 +85,26 @@ TEST(SamWriterConfigTest, Defaults)
     EXPECT_FALSE(config.UseTempFile);
 }
 
+TEST_F(SamWriterTest, DestructorSuppressesCloseError)
+{
+    // The final rename fails because the directory is gone; the destructor must not throw.
+    const auto dir = tmpPath.parent_path() / "removed";
+    std::filesystem::create_directories(dir);
+    SamWriterConfig config{};
+    config.UseTempFile = true;
+    const auto writeIntoRemovedDir = [&] {
+        const SamWriter writer{dir / "output.sam", MakeMinimalHeader(), config};
+        std::filesystem::remove_all(dir);
+    };
+    EXPECT_NO_THROW(writeIntoRemovedDir());
+
+    // The same failure surfaces from an explicit Close().
+    std::filesystem::create_directories(dir);
+    SamWriter writer{dir / "output.sam", MakeMinimalHeader(), config};
+    std::filesystem::remove_all(dir);
+    EXPECT_THROW(writer.Close(), std::runtime_error);
+}
+
 TEST_F(SamWriterTest, WriteHeaderOnly)
 {
     const SamHeader header = MakeMinimalHeader();

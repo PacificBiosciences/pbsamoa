@@ -129,8 +129,12 @@ SamWriter::SamWriter(const std::filesystem::path& path, const SamHeader& header,
 
 SamWriter::~SamWriter()
 {
+    // A destructor must not throw; call Close() to see write and close errors.
     if (impl_ && !impl_->closed) {
-        Close();
+        try {
+            Close();
+        } catch (...) {
+        }
     }
 }
 

@@ -116,8 +116,12 @@ BamWriter::BamWriter(const std::filesystem::path& path, const SamHeader& header,
 
 BamWriter::~BamWriter()
 {
+    // A destructor must not throw; call Close() to see write and close errors.
     if (impl_ && !impl_->closed) {
-        Close();
+        try {
+            Close();
+        } catch (...) {
+        }
     }
 }
 
