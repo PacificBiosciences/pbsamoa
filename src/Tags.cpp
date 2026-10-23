@@ -206,35 +206,9 @@ bool AppendIntegerArrayElement(TagArray& array, char elemType, std::int64_t valu
     }
 }
 
-void AppendTagArrayElementToSam(std::string& result, char elemType, const std::byte* data)
-{
-    switch (elemType) {
-        case 'f':
-            std::format_to(std::back_inserter(result), "{:g}", ReadF32LE(data));
-            break;
-        case 'c':
-            std::format_to(std::back_inserter(result), "{}",
-                           static_cast<std::int8_t>(std::to_integer<std::uint8_t>(*data)));
-            break;
-        case 'C':
-            std::format_to(std::back_inserter(result), "{}", std::to_integer<std::uint8_t>(*data));
-            break;
-        case 's':
-            std::format_to(std::back_inserter(result), "{}", ReadI16LE(data));
-            break;
-        case 'S':
-            std::format_to(std::back_inserter(result), "{}", ReadU16LE(data));
-            break;
-        case 'i':
-            std::format_to(std::back_inserter(result), "{}", ReadI32LE(data));
-            break;
-        case 'I':
-            std::format_to(std::back_inserter(result), "{}", ReadU32LE(data));
-            break;
-        default:
-            break;
-    }
-}
+// ",v1,v2,..." of a B array; defined with the raw-tag fast paths below.
+void AppendTagArrayElementsToSam(std::string& out, char elemType, const std::byte* data,
+                                 std::uint32_t count);
 
 char SmallestIntType(std::int64_t v)
 {
@@ -441,17 +415,7 @@ struct SamSerializeVisitor
         result += "B:";
         result += v.ElementType();
 
-        const std::size_t count{v.Count()};
-        const std::span<const std::byte> data{v.Data()};
-        const char elemType{v.ElementType()};
-        const std::size_t elemSize{TagArrayElementSize(elemType)};
-        const std::byte* element{std::data(data)};
-
-        for (std::size_t i{0}; i < count; ++i) {
-            result += ',';
-            AppendTagArrayElementToSam(result, elemType, element);
-            element += elemSize;
-        }
+        AppendTagArrayElementsToSam(result, v.ElementType(), std::data(v.Data()), v.Count());
     }
 };
 
@@ -1131,6 +1095,36 @@ void SerializeBArrayFloat(const std::byte* data, std::uint32_t count, std::strin
     for (std::uint32_t i{0}; i < count; ++i) {
         out += ',';
         AppendFloatRaw(out, ReadF32LE(data + i * 4));
+    }
+}
+
+void AppendTagArrayElementsToSam(std::string& out, const char elemType, const std::byte* data,
+                                 const std::uint32_t count)
+{
+    switch (elemType) {
+        case 'c':
+            SerializeBArrayInt8(data, count, out);
+            break;
+        case 'C':
+            SerializeBArrayUInt8(data, count, out);
+            break;
+        case 's':
+            SerializeBArrayInt<std::int16_t>(data, count, out);
+            break;
+        case 'S':
+            SerializeBArrayInt<std::uint16_t>(data, count, out);
+            break;
+        case 'i':
+            SerializeBArrayInt<std::int32_t>(data, count, out);
+            break;
+        case 'I':
+            SerializeBArrayInt<std::uint32_t>(data, count, out);
+            break;
+        case 'f':
+            SerializeBArrayFloat(data, count, out);
+            break;
+        default:
+            break;
     }
 }
 

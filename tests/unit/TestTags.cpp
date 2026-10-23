@@ -647,6 +647,41 @@ TEST(TagSerialize, ToSamString)
     EXPECT_EQ(result, "RG:Z:lane1");
 }
 
+TEST(TagSerialize, ToSamArraysOfEveryElementType)
+{
+    const auto sam = [](const TagArray& array) {
+        return SerializeTagToSam(TagKey{'X', 'A'}, TagValue{array});
+    };
+    TagArray c{'c'};
+    c.AppendInt8(-128);
+    c.AppendInt8(127);
+    EXPECT_EQ(sam(c), "XA:B:c,-128,127");
+    TagArray uc{'C'};
+    uc.AppendUInt8(0);
+    uc.AppendUInt8(9);
+    uc.AppendUInt8(10);
+    uc.AppendUInt8(255);
+    EXPECT_EQ(sam(uc), "XA:B:C,0,9,10,255");
+    TagArray s{'s'};
+    s.AppendInt16(-32768);
+    EXPECT_EQ(sam(s), "XA:B:s,-32768");
+    TagArray us{'S'};
+    us.AppendUInt16(65535);
+    EXPECT_EQ(sam(us), "XA:B:S,65535");
+    TagArray i{'i'};
+    i.AppendInt32(std::numeric_limits<std::int32_t>::min());
+    EXPECT_EQ(sam(i), "XA:B:i,-2147483648");
+    TagArray ui{'I'};
+    ui.AppendUInt32(std::numeric_limits<std::uint32_t>::max());
+    EXPECT_EQ(sam(ui), "XA:B:I,4294967295");
+    TagArray f{'f'};
+    f.AppendFloat(0.5F);
+    f.AppendFloat(-1.25e-7F);
+    f.AppendFloat(123456789.0F);
+    EXPECT_EQ(sam(f), "XA:B:f,0.5,-1.25e-07,1.23457e+08");
+    EXPECT_EQ(sam(TagArray{'C'}), "XA:B:C");
+}
+
 TEST(TagSerialize, ToSamChar)
 {
     const std::string result{SerializeTagToSam(TagKey{'X', 'S'}, TagValue{'+'})};
