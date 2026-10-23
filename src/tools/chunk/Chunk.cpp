@@ -12,6 +12,7 @@
 #include <pbcopper/cli2/Results.h>
 
 #include <filesystem>
+#include <format>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -116,6 +117,11 @@ int Runner(const CLI_v2::Results& results)
     const std::int32_t chunkNum{Tools::ParseIntegerOrThrow<std::int32_t>(positional[1], "CHUNK")};
     const std::int32_t totalChunks{
         Tools::ParseIntegerOrThrow<std::int32_t>(positional[2], "TOTAL")};
+
+    if ((chunkNum < 1) || (totalChunks < 1)) {
+        throw std::runtime_error{
+            std::format("CHUNK and TOTAL must be >= 1, got {} and {}", chunkNum, totalChunks)};
+    }
 
     if (tileOrSeedSet && (readerConfig.ChunkingMode != ChunkMode::SCATTER)) {
         throw std::runtime_error{"--tile/--seed require --mode scatter"};

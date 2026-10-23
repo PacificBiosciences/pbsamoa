@@ -456,6 +456,18 @@ TEST(BamRawReader, MultiPathVectorRejectsWhitelist)
                  std::invalid_argument);
 }
 
+TEST(BamRawReader, RejectsHalfSetChunking)
+{
+    const auto path = tests::DataDir / "spec_example.bam";
+    BamRawReaderConfig onlyTotal{};
+    onlyTotal.TotalChunks = 2;
+    EXPECT_THROW(BamRawReader(path, onlyTotal), std::invalid_argument);
+
+    BamRawReaderConfig onlyChunk{};
+    onlyChunk.ChunkNum = 1;
+    EXPECT_THROW(BamRawReader(path, onlyChunk), std::invalid_argument);
+}
+
 TEST_F(BamRawReaderWhitelistTest, ChunkingWithManyChunksStillCoversAllRecords)
 {
     std::size_t total{0};
@@ -698,6 +710,23 @@ std::vector<std::vector<std::int32_t>> ScatterHolePartition(const std::filesyste
 }
 
 }  // namespace
+
+TEST(BamRawReaderScatter, ReadBatchHonoursRecordLimit)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("scatter_record_limit");
+    const std::filesystem::path path{tempDir.File("scatter.bam")};
+    BuildScatterBam(path, /*numZmws=*/12, /*subreadsPerZmw=*/2);
+
+    auto config{ScatterConfig(1, 2, 1, 0)};
+    config.RecordLimit = 3;
+    BamRawReader reader{path, config};
+    std::size_t count{0};
+    while (auto batch = reader.ReadBatch(ByteLimit{1024U * 1024U})) {
+        count += batch->RecordCount();
+    }
+    EXPECT_EQ(count, 3U);
+}
 
 TEST(BamRawReaderScatter, CoversEveryRecordExactlyOnceSubreads)
 {

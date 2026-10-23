@@ -77,6 +77,7 @@ struct BamRawReaderConfig
     std::size_t RecordLimit{0};   // 0 = unlimited; >0 = stop after N records
     std::int32_t ChunkNum{0};     // 0 = no chunking; 1-based chunk number
     std::int32_t TotalChunks{0};  // 0 = no chunking; total number of chunks
+    // Set both or neither: one without the other throws std::invalid_argument.
     // Scatter-chunking knobs (ignored unless ChunkingMode == SCATTER):
     ChunkMode ChunkingMode{ChunkMode::CONTIGUOUS};
     std::int32_t ChunkTileZmws{100};  // M: tile = up to M consecutive ZMWs (>= 1)
@@ -231,7 +232,8 @@ public:
     WhitelistRange Whitelist(const ZmwWhitelist& whitelist);
 
     /// \brief Number of unique ZMWs this reader will yield.
-    /// Returns -1 when the count is not available (no chunking, or multi-file input).
+    /// With chunking, the count of the chunk; otherwise read from the .zmi/.pbi.
+    /// Returns -1 for multi-file input or when no ZMW index loads.
     [[nodiscard]] std::int32_t NumZmws() const;
 
     /// \brief Snapshot of BGZF pipeline metrics. Thread-safe, lock-free.

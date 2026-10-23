@@ -24,3 +24,14 @@ Single chunk returns everything:
 
   $ "${PBSAMOA}" chunk indexed.bam 1 1 | grep -v "^@" | wc -l | sed 's/ //g'
   11
+
+CHUNK and TOTAL must both be at least 1:
+
+  $ "${PBSAMOA}" chunk indexed.bam 0 2 2>&1 | grep -o 'CHUNK and TOTAL.*'
+  CHUNK and TOTAL must be >= 1, got 0 and 2
+  $ "${PBSAMOA}" chunk indexed.bam 0 2 > /dev/null 2>&1
+  [1]
+  $ "${PBSAMOA}" chunk indexed.bam 1 0 > /dev/null 2>&1
+  [1]
+  $ "${PBSAMOA}" chunk indexed.bam 0 0 > /dev/null 2>&1
+  [1]

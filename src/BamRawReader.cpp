@@ -112,6 +112,13 @@ bool RecordIsPastQuery(const RawRecord& view, std::int32_t refId, std::int32_t e
     return (view.RefId() > refId) || ((view.RefId() == refId) && (view.Pos() >= end));
 }
 
+// Either field set asks for chunking; ApplyChunkConfig then rejects a half-set pair
+// such as ChunkNum 0 with TotalChunks 2, which would otherwise read the whole file.
+bool ChunkingRequested(const BamRawReaderConfig& config)
+{
+    return (config.ChunkNum != 0) || (config.TotalChunks != 0);
+}
+
 bool AdvanceQueryChunk(BamRawReader& reader, const std::vector<Chunk>& chunks,
                        std::size_t& chunkIdx)
 {
@@ -140,7 +147,7 @@ struct BamRawReader::Impl
         explicit CollectionState(BamCollection c, BamRawReaderConfig cfg)
             : collection{std::move(c)}, config{cfg}, recordLimit{ToRecordLimit(cfg.RecordLimit)}
         {
-            if (((cfg.ChunkNum > 0) && (cfg.TotalChunks > 0)) || cfg.Whitelist) {
+            if (ChunkingRequested(cfg) || cfg.Whitelist) {
                 throw std::invalid_argument{
                     "BamRawReaderConfig: chunking and whitelist are single-file only"};
             }
@@ -233,7 +240,7 @@ struct BamRawReader::Impl
     // seek, so scatter always reads synchronously regardless of BgzfWorkers.
     static std::size_t EffectiveBgzfWorkers(const BamRawReaderConfig& config)
     {
-        const bool scatter{(config.ChunkNum > 0) && (config.TotalChunks > 0) &&
+        const bool scatter{ChunkingRequested(config) &&
                            (config.ChunkingMode == ChunkMode::SCATTER)};
         return scatter ? std::size_t{0} : config.BgzfWorkers;
     }
@@ -243,13 +250,13 @@ struct BamRawReader::Impl
         , bgzf{std::make_unique<BgzfReader>(p, EffectiveBgzfWorkers(config))}
         , recordLimit{ToRecordLimit(config.RecordLimit)}
     {
-        if ((config.ChunkNum > 0) && (config.TotalChunks > 0) && config.Whitelist) {
+        if (ChunkingRequested(config) && config.Whitelist) {
             throw std::invalid_argument{
                 "BamRawReaderConfig: Whitelist and ChunkNum/TotalChunks are mutually "
                 "exclusive"};
         }
 
-        if ((config.ChunkNum > 0) && (config.TotalChunks > 0)) {
+        if (ChunkingRequested(config)) {
             ApplyChunkConfig(config);
         }
     }
@@ -410,8 +417,8 @@ struct BamRawReader::Impl
 
     // Batch counterpart of ReadScattered (the BamRecordReader / pre-decode path).
     // Each batch stays within one run: the record budget is capped at the run's
-    // remaining count, so the contiguous read never crosses a run boundary. The
-    // next call seeks to the following run.
+    // remaining count (and at the RecordLimit budget), so the contiguous read never
+    // crosses a run boundary. The next call seeks to the following run.
     std::optional<RawRecordBatch> ReadBatchScattered(ByteLimit limit)
     {
         while (scatterRemaining == 0) {
@@ -419,7 +426,8 @@ struct BamRawReader::Impl
                 return std::nullopt;
             }
         }
-        std::optional<RawRecordBatch> batch{bgzf->ReadBatch(limit.Value(), scatterRemaining)};
+        std::optional<RawRecordBatch> batch{
+            bgzf->ReadBatch(limit.Value(), std::min(scatterRemaining, RemainingRecordBudget()))};
         const std::size_t recordCount{batch ? batch->RecordCount() : 0};
         scatterRemaining -= recordCount;
         recordsRead += recordCount;
@@ -501,12 +509,12 @@ std::optional<RawRecord> BamRawReader::ReadRecord()
 
 std::optional<RawRecordBatch> BamRawReader::ReadBatch(ByteLimit limit)
 {
-    if (impl_->scatterActive) {
-        return impl_->ReadBatchScattered(limit);
-    }
-
     if (impl_->AtRecordLimit()) {
         return std::nullopt;
+    }
+
+    if (impl_->scatterActive) {
+        return impl_->ReadBatchScattered(limit);
     }
 
     const std::size_t remaining{impl_->RemainingRecordBudget()};
