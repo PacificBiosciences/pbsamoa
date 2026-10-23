@@ -3,6 +3,7 @@
 #include <pbsamoa/cram/CramCodec.hpp>
 #include <pbsamoa/cram/CramCompression.hpp>
 #include <pbsamoa/cram/CramStructs.hpp>
+#include <pbsamoa/io/FastaReference.hpp>
 
 #include "BinaryUtils.hpp"
 #include "CramInternal.hpp"
@@ -440,37 +441,6 @@ std::string SliceSpanLabel(const CramSliceHeader& sliceHeader)
     return std::format("start={} span={}", start, span);
 }
 
-// The reference of CramReaderConfig::ReferencePath: the text of each @SQ sequence, in header
-// order. A sequence that is not in the FASTA has length 0.
-class FastaTextReference final : public CramReference
-{
-public:
-    explicit FastaTextReference(std::vector<std::string> sequences)
-        : sequences_{std::move(sequences)}
-    {
-    }
-
-    std::int32_t NumSequences() const override
-    {
-        return static_cast<std::int32_t>(std::size(sequences_));
-    }
-
-    std::int64_t Length(const std::int32_t refId) const override
-    {
-        return static_cast<std::int64_t>(std::size(sequences_[static_cast<std::size_t>(refId)]));
-    }
-
-    std::string_view Bases(const std::int32_t refId, const std::int64_t start,
-                           const std::int64_t length, std::string& /*buffer*/) const override
-    {
-        return std::string_view{sequences_[static_cast<std::size_t>(refId)]}.substr(
-            static_cast<std::size_t>(start), static_cast<std::size_t>(length));
-    }
-
-private:
-    std::vector<std::string> sequences_;
-};
-
 }  // namespace
 
 // A named namespace, not the unnamed one: CramReader::Impl holds a ReferenceWindow, and in a
@@ -758,45 +728,6 @@ bool KeepRecordForQuery(const BamRecord& record, std::int32_t refId, std::int32_
 
 }  // namespace
 
-std::unordered_map<std::string, std::string> LoadFastaSequences(const std::filesystem::path& path)
-{
-    std::ifstream in{path};
-    if (!in) {
-        throw std::runtime_error{
-            std::format("CramReader: cannot open reference FASTA {}", path.string())};
-    }
-
-    std::unordered_map<std::string, std::string> references;
-    std::string currentName;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!std::empty(line) && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (std::empty(line)) {
-            continue;
-        }
-        if (line[0] == '>') {
-            line.erase(0, 1);
-            const auto wsPos = line.find_first_of(" \t");
-            currentName = line.substr(0, wsPos);
-            references.try_emplace(currentName);
-            continue;
-        }
-        if (std::empty(currentName)) {
-            continue;
-        }
-
-        auto& seq = references[currentName];
-        for (const unsigned char c : line) {
-            if (std::isspace(c) == 0) {
-                seq.push_back(static_cast<char>(std::toupper(c)));
-            }
-        }
-    }
-    return references;
-}
-
 // ---------------------------------------------------------------------------
 // Impl
 // ---------------------------------------------------------------------------
@@ -1027,16 +958,7 @@ struct CramReader::Impl
             return;
         }
 
-        auto referencesByName = LoadFastaSequences(referencePath);
-        std::vector<std::string> sequences(std::size(header.ReferenceSequences()));
-        for (std::size_t i = 0; i < std::size(header.ReferenceSequences()); ++i) {
-            const auto& sq = header.ReferenceSequences()[i];
-            auto it = referencesByName.find(std::string{sq.Name()});
-            if (it != std::end(referencesByName)) {
-                sequences[i] = std::move(it->second);
-            }
-        }
-        reference = std::make_shared<const FastaTextReference>(std::move(sequences));
+        reference = FastaFile{referencePath}.Reference(header);
         externalReference.Reset(reference);
     }
 

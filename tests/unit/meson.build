@@ -28,6 +28,7 @@ test_exe = executable(
         'TestCigarOp.cpp',
         'TestCram.cpp',
         'TestCraiIndex.cpp',
+    'TestFastaReference.cpp',
         'TestLosslessClipping.cpp',
         'TestMergeReadAhead.cpp',
         'TestMetrics.cpp',

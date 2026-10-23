@@ -47,6 +47,7 @@ lib = library(
         'CramReader.cpp',
         'CramStructs.cpp',
         'CramWriter.cpp',
+        'FastaReference.cpp',
         'GenomicInterval.cpp',
         'LibraryInfo.cpp',
         'LosslessClipping.cpp',

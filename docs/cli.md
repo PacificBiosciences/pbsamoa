@@ -56,7 +56,7 @@ Options:
 | ---- | ----------- |
 | `--bgzf-threads N` | Decompression worker threads; `-1` = auto, `min(hw, 8)` (default: `-1`). An explicit count is capped at 10 |
 | `--format-threads N` | SAM formatting thread pool size for BAM input; `0` = auto, `max(hw, 4)` (default: `0`) |
-| `--reference ref.fa` | Reference FASTA for reference-based CRAM decoding |
+| `--reference ref.fa` | Reference FASTA for reference-based CRAM decoding. It is memory-mapped and read where needed, at offsets from `ref.fa.fai` (without one, the file is scanned once) |
 | `--region REGION` | CRAM-only region query: `ref`, `ref:start`, or `ref:start-end` (1-based, inclusive), or `*` for the unmapped records |
 | `--index file.crai` | CRAM-only CRAI path override (requires `--region`) |
 | `--no-header` | Do not write the SAM header |
@@ -98,7 +98,7 @@ Options:
 | `--block-compression METHOD` | Default CRAM block method (default: `rans4x8`) |
 | `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable; `SERIES` is not case-sensitive) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
-| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines without `M5` get one (an existing `M5` is kept). Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error |
+| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines without `M5` get one (an existing `M5` is kept). Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error. The FASTA is memory-mapped; with `ref.fa.fai` nothing but the needed bases and the `M5` hashes reads it |
 
 Supported `METHOD` values:
 

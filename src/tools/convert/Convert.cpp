@@ -7,6 +7,7 @@
 #include <pbsamoa/io/BamRawReader.hpp>
 #include <pbsamoa/io/BamRecordReader.hpp>
 #include <pbsamoa/io/CramWriter.hpp>
+#include <pbsamoa/io/FastaReference.hpp>
 #include <pbsamoa/io/SamReader.hpp>
 
 #include <pbcopper/cli2/Interface.h>
@@ -211,30 +212,21 @@ std::expected<std::pair<CramDataSeries, CramBlockMethod>, std::string> ParseSeri
     return std::pair{*parsedSeries, *parsedMethod};
 }
 
-using FastaSequences = std::unordered_map<std::string, std::string>;
-
 // the config with the reference of each @SQ line of the header (none without --reference)
 CramWriterConfig WithReferences(CramWriterConfig config, const SamHeader& header,
-                                const std::optional<FastaSequences>& fasta)
+                                const std::optional<FastaFile>& fasta)
 {
     if (!fasta) {
         return config;
     }
     config.ReferenceSequences.clear();
-    for (const ReferenceSequence& sq : header.ReferenceSequences()) {
-        const auto it{fasta->find(std::string{sq.Name()})};
-        if (it == fasta->end()) {
-            throw std::runtime_error{
-                std::format("reference sequence {} is not in the FASTA file", sq.Name())};
-        }
-        config.ReferenceSequences.push_back(it->second);
-    }
+    config.Reference = fasta->Reference(header, MissingFastaSequence::THROW);
     return config;
 }
 
 void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
                          const std::filesystem::path& outputPath, const CramWriterConfig& config,
-                         std::size_t bgzfWorkers, const std::optional<FastaSequences>& fasta)
+                         std::size_t bgzfWorkers, const std::optional<FastaFile>& fasta)
 {
     BamRawReader reader{inputPath, BamRawReaderConfig{
                                        .BgzfWorkers = bgzfWorkers,
@@ -248,8 +240,7 @@ void ConvertBamToCramRaw(const std::filesystem::path& inputPath,
 void ConvertBamToCramViaBamRecord(const std::filesystem::path& inputPath,
                                   const std::filesystem::path& outputPath,
                                   const CramWriterConfig& config, std::size_t bgzfWorkers,
-                                  std::size_t decodeWorkers,
-                                  const std::optional<FastaSequences>& fasta)
+                                  std::size_t decodeWorkers, const std::optional<FastaFile>& fasta)
 {
     BamRecordReader reader{inputPath, BamRecordReaderConfig{
                                           .RawReaderConfig =
@@ -266,7 +257,7 @@ void ConvertBamToCramViaBamRecord(const std::filesystem::path& inputPath,
 
 void ConvertSamToCram(const std::filesystem::path& inputPath,
                       const std::filesystem::path& outputPath, const CramWriterConfig& config,
-                      const std::optional<FastaSequences>& fasta)
+                      const std::optional<FastaFile>& fasta)
 {
     SamReader reader{inputPath};
     CramWriter writer{outputPath, reader.Header(), WithReferences(config, reader.Header(), fasta)};
@@ -358,10 +349,10 @@ int Runner(const CLI_v2::Results& results)
     // --reference: the sequences stay alive until the writer closes. A file without sequences
     // (empty, or not plain FASTA such as gzip) stops the run: no silent reference-free output.
     const std::string referencePath = results[Reference];
-    std::optional<FastaSequences> fasta;
+    std::optional<FastaFile> fasta;
     if (!referencePath.empty()) {
-        fasta = LoadFastaSequences(referencePath);
-        if (fasta->empty()) {
+        fasta.emplace(referencePath);
+        if (fasta->NumSequences() == 0) {
             throw std::runtime_error{
                 std::format("reference FASTA {} has no sequences", referencePath)};
         }

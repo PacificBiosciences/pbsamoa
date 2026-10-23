@@ -627,8 +627,10 @@ reference. `CramReference` is the interface for the reference. It gives the
 bases of a window of one reference sequence. Several threads can call it at
 the same time, so many readers and writers can share one reference.
 
-- `CramReaderConfig::ReferencePath` loads a whole FASTA file into memory. The
-  reader matches its sequences to the `@SQ` lines by name. Without
+- `CramReaderConfig::ReferencePath` opens a `FastaFile`: the FASTA file is
+  memory-mapped and read in windows, at offsets from its `.fai` (or one scan of
+  the file without one). The reader matches its sequences to the `@SQ` lines by
+  name. `convert --reference` uses it for the writer too. Without
   `ReferencePath` and `Reference`, the reader takes the path from the
   environment variable `PBSAMOA_CRAM_REFERENCE`.
 - `CramReaderConfig::Reference` and `CramWriterConfig::Reference` take a
@@ -639,7 +641,8 @@ the same time, so many readers and writers can share one reference.
   `@SQ` line, in header order.
 
 Set one reference source only. The writer puts the MD5 of the reference bases
-in each slice. It adds an `M5` tag to each `@SQ` line that has none.
+in each slice. It adds an `M5` tag to each `@SQ` line that has none, hashing
+the sequences on the compression pool, the longest first.
 `CramReferenceMd5()` computes the `M5` value. The reader checks the reference
 MD5 of each single-reference slice that needs the reference and has a non-zero
 MD5. A mismatch, or a missing reference, throws `std::runtime_error`. A query checks each slice one time

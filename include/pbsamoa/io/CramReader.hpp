@@ -23,7 +23,8 @@ struct CramReaderConfig
 {
     /// \brief Optional FASTA file for decoding reference-based CRAM slices.
     ///
-    /// The reader loads the whole FASTA into memory. Set ReferencePath or Reference, not both.
+    /// The reader maps the file as a FastaFile: it reads the bases it needs, using `<fasta>.fai`
+    /// when it exists. Set ReferencePath or Reference, not both.
     std::filesystem::path ReferencePath{};
 
     /// \brief Optional reference for decoding reference-based CRAM slices, given in windows.

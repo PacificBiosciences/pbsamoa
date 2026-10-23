@@ -756,8 +756,9 @@ struct CramWriter::Impl
                 std::format("CramWriter: {} reference sequences for {} @SQ lines",
                             reference->NumSequences(), std::size(sequences))};
         }
+        std::vector<std::int32_t> needMd5;
         for (std::size_t i = 0; i < std::size(sequences); ++i) {
-            ReferenceSequence& sq{sequences[i]};
+            const ReferenceSequence& sq{sequences[i]};
             const auto refId = static_cast<std::int32_t>(i);
             const std::int64_t length{reference->Length(refId)};
             if (length != sq.Length()) {
@@ -766,8 +767,32 @@ struct CramWriter::Impl
                                 sq.Name(), length, sq.Length())};
             }
             if (!sq.GetTag("M5")) {
-                sq.SetTag("M5", CramReferenceMd5(*reference, refId));
+                needMd5.push_back(refId);
             }
+        }
+
+        // The MD5s cover the whole genome: hash the sequences on the compression pool, the
+        // longest first so that no long one starts last.
+        std::ranges::sort(needMd5, std::ranges::greater{},
+                          [this](std::int32_t refId) { return reference->Length(refId); });
+        std::vector<std::string> md5s(std::size(needMd5));
+        const auto hash = [&](const std::int32_t i) {
+            md5s[static_cast<std::size_t>(i)] =
+                CramReferenceMd5(*reference, needMd5[static_cast<std::size_t>(i)]);
+        };
+        const auto total = static_cast<std::int32_t>(std::size(needMd5));
+        if (compressionPool && (config.CompressionWorkers > 1) && (total > 1)) {
+            std::atomic<std::int32_t> next{0};
+            Parallel::Dispatch(compressionPool, MakeWorkStealingTask(&next, total, hash),
+                               static_cast<std::int32_t>(std::min<std::size_t>(
+                                   config.CompressionWorkers, std::size(needMd5))));
+        } else {
+            for (std::int32_t i = 0; i < total; ++i) {
+                hash(i);
+            }
+        }
+        for (std::size_t i = 0; i < std::size(needMd5); ++i) {
+            sequences[static_cast<std::size_t>(needMd5[i])].SetTag("M5", std::move(md5s[i]));
         }
     }
 
@@ -788,6 +813,13 @@ struct CramWriter::Impl
             throw std::runtime_error("CramWriter: failed to allocate gzip compressor");
         }
 
+        if (config.CompressionWorkers > 0) {
+            compressionPool =
+                std::make_shared<Parallel::ThreadPool<>>(Parallel::ThreadPool<>::Config{
+                    .NumThreads = config.CompressionWorkers,
+                });
+        }
+
         PrepareReferences();
 
         writePath = detail::ResolveWritePath(path, config.UseTempFile);
@@ -799,13 +831,6 @@ struct CramWriter::Impl
         WriteFileDefinition();
         WriteHeaderContainer();
         nextContainerOffset = CurrentFileOffset();
-
-        if (config.CompressionWorkers > 0) {
-            compressionPool =
-                std::make_shared<Parallel::ThreadPool<>>(Parallel::ThreadPool<>::Config{
-                    .NumThreads = config.CompressionWorkers,
-                });
-        }
 
         pendingRecords.clear();
         pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));

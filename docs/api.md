@@ -313,7 +313,8 @@ CramReader reader{"input.cram", CramReaderConfig{
 | `Reference`            | `{}`    | Optional `CramReference` for reference-based slices, read in windows                                                                                                                 |
 | `DecompressionWorkers` | `0`     | Workers that decode up to 2 containers each ahead of `ReadRecord`/`ReadRawRecord`, in file order; for `Query`/`ReadSlice`, they decompress the blocks of a slice (`0` = synchronous) |
 
-With `ReferencePath`, the reader loads the whole FASTA into memory. With `Reference` (a
+With `ReferencePath`, the reader opens the file as a [`FastaFile`](#fastafile): it maps the file and
+reads only the bases it needs. With `Reference` (a
 `shared_ptr<const CramReference>`, one sequence per @SQ line, in header order), the reader keeps
 the bases of one window only: the span of the current slice, or 64 KiB or more for a record of a
 multi-reference slice. Several readers can share one `Reference`. The reader makes the bases upper
@@ -2092,6 +2093,32 @@ CramWriterConfig config{.Reference = reference};
 
 Give one sequence per `@SQ` line, in header order. `Bases` can return a view of `buffer`,
 which it can change. The case of the bases does not matter.
+
+## FastaFile
+
+```cpp
+#include <pbsamoa/io/FastaReference.hpp>
+```
+
+A FASTA file as a `CramReference`, without the text of the whole genome in memory. The
+constructor maps the file and takes the offset of each sequence from `<fasta>.fai`, or, without
+one, from one scan of the file (a few seconds for GRCh38). A sequence whose lines are uneven
+(different lengths, blank lines, spaces), which an index cannot describe, is read into memory. A
+gzip-compressed or empty file has no sequences. The constructor throws `std::runtime_error` when
+the file cannot be opened or mapped, or when the `.fai` does not fit the file.
+
+```cpp
+const FastaFile fasta{"ref.fa"};
+fasta.NumSequences();  // sequences in the file
+CramWriterConfig config{.Reference = fasta.Reference(header, MissingFastaSequence::THROW)};
+```
+
+`Reference(header, missing)` gives the sequences of the `@SQ` lines, in header order, matched by
+name (the first word of the FASTA header line; the first of two equal names wins). An `@SQ`
+sequence that is not in the file has length 0 (`MissingFastaSequence::EMPTY`, the default) or
+throws `std::runtime_error` (`THROW`). The reference keeps the mapping alive after the
+`FastaFile` is gone. A window on one line of the file is a view of the mapping; others are copied
+to `buffer`.
 
 ---
 
