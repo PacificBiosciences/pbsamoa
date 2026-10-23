@@ -425,6 +425,7 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `BlockCompressionMethod`       | `CramBlockMethod`                                | `GZIP`  | Default block method                                              |
 | `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series method overrides                                  |
 | `RecordsPerSlice`              | `int32_t`                                        | `10000` | Max records per slice                                             |
+| `BasesPerSlice`                | `int64_t`                                        | `5000000` | Max bases per slice: sequence bases plus BAM aux bytes (`0` = no limit) |
 | `SlicesPerContainer`           | `int32_t`                                        | `1`     | Max slices per container (`<= 0` means unlimited until `Close()`) |
 | `MajorVersion`                 | `uint8_t`                                        | `3`     | CRAM major version (must be `3`)                                  |
 | `MinorVersion`                 | `uint8_t`                                        | `0`     | CRAM minor version (`0` or `1`)                                   |
@@ -439,8 +440,10 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
 - `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
+- A slice ends with the record that reaches `RecordsPerSlice` or `BasesPerSlice`, so it holds at
+  least one record. The bases limit and its default are htslib's (`bases_per_slice`).
 - The constructor throws `std::runtime_error` when `MajorVersion != 3`, `RecordsPerSlice <= 0`,
-  `CompressionLevel` is outside `[0, 12]`, or a `ReferenceSequences` entry does not have the
+  `BasesPerSlice < 0`, `CompressionLevel` is outside `[0, 12]`, or a `ReferenceSequences` entry does not have the
   length of its @SQ line.
 
 ### Reference-based CRAM
@@ -464,7 +467,7 @@ slice. `CramReferenceMd5(reference, refId)` gives the M5 from windows of 64 KiB.
 ### Encoding containers on several threads
 
 ```cpp
-// any thread: one container (slices of RecordsPerSlice records)
+// any thread: one container (slices of RecordsPerSlice records or BasesPerSlice bases)
 CramEncodedContainer encoded = writer.EncodeContainer(std::span<const BamRecord>{records});
 // one thread, in output order: record counters and CRAI offsets continue
 writer.WriteContainer(std::move(encoded));
@@ -489,7 +492,7 @@ number of records that the writer wrote before it.
 
 ### Containerization and CRAI behavior
 
-- Records are buffered into slices of up to `RecordsPerSlice`.
+- Records are buffered into slices of up to `RecordsPerSlice` records and `BasesPerSlice` bases.
 - Slices are buffered into containers of up to `SlicesPerContainer`.
 - With `SlicesPerContainer <= 0`, containers are flushed only at `Close()`.
 - With `WriteCrai = true`, CRAI rows are emitted per serialized slice offset.

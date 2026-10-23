@@ -2145,6 +2145,67 @@ TEST_F(CramWriterReaderTest, WriteMultipleRecords)
     EXPECT_EQ(count, 10u);
 }
 
+TEST_F(CramWriterReaderTest, BasesPerSliceEndsSlices)
+{
+    const SamHeader header = MakeMinimalHeader();
+    const std::string seq(100, 'A');
+
+    CramWriterConfig config;
+    config.WriteCrai = true;
+    config.BasesPerSlice = 250;  // 100 bases per record: the third record ends a slice
+    {
+        CramWriter writer{tmpPath, header, config};
+        for (int i = 0; i < 10; ++i) {
+            BamRecord record = MakeMappedRecord(std::format("read{}", i), seq);
+            record.Pos(i * 10);
+            writer.Write(record);
+        }
+        writer.Close();
+    }
+
+    const auto entries = CraiIndex::FromFile(tmpCraiPath).EntriesForReference(0);
+    ASSERT_EQ(std::size(entries), 4u);  // 3 + 3 + 3 + 1 records
+    EXPECT_EQ(entries[0].AlignmentStart, 1);
+    EXPECT_EQ(entries[3].AlignmentStart, 91);
+
+    CramReader reader{tmpPath};
+    std::vector<std::string> names;
+    for (const auto& record : reader.Records()) {
+        names.emplace_back(record.Name());
+    }
+    ASSERT_EQ(std::size(names), 10u);
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_EQ(names[i], std::format("read{}", i));
+    }
+}
+
+TEST_F(CramWriterReaderTest, EncodeContainerSplitsByBases)
+{
+    const SamHeader header = MakeMinimalHeader();
+    const std::string seq(100, 'A');
+
+    CramWriterConfig config;
+    config.BasesPerSlice = 250;
+    const CramWriter writer{tmpPath, header, config};
+    std::vector<BamRecord> records;
+    for (int i = 0; i < 7; ++i) {
+        records.push_back(MakeMappedRecord(std::format("read{}", i), seq));
+    }
+    const CramEncodedContainer encoded = writer.EncodeContainer(records);
+    EXPECT_EQ(std::size(encoded.Container.Slices), 3u);  // 3 + 3 + 1 records
+}
+
+TEST(CramWriterConfig, RejectsNegativeBasesPerSlice)
+{
+    tests::TempDirGuard tempDir;
+    tempDir.Reset("cram_bases_per_slice");
+    SamHeader header;
+    header.SetVersion("1.6");
+    CramWriterConfig config;
+    config.BasesPerSlice = -1;
+    EXPECT_THROW((CramWriter{tempDir.File("out.cram"), header, config}), std::runtime_error);
+}
+
 TEST_F(CramWriterReaderTest, MultiSliceContainerRoundTrip)
 {
     const SamHeader header = MakeMinimalHeader();

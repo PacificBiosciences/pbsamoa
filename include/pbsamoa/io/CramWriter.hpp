@@ -37,6 +37,15 @@ struct CramWriterConfig
     /// \brief Maximum number of records per slice.
     std::int32_t RecordsPerSlice{10000};
 
+    /// \brief Maximum bases per slice, counted as htslib does: sequence bases plus BAM aux
+    /// bytes.
+    ///
+    /// A slice ends with the record that reaches the limit, so it holds at least one record.
+    /// The default, 5,000,000, is htslib's (500 per record of RecordsPerSlice): long reads then
+    /// get slices of a few hundred records, which keeps decode memory and region queries small.
+    /// 0 means no limit.
+    std::int64_t BasesPerSlice{5'000'000};
+
     /// \brief Maximum number of slices per container.
     ///
     /// A value of 1 preserves the original one-slice-per-container behavior.
@@ -145,8 +154,8 @@ public:
     /// \brief Write a batch of raw records.
     void WriteBatch(const RawRecordBatch& batch);
 
-    /// \brief Encode records into one container (slices of RecordsPerSlice records) for
-    /// WriteContainer.
+    /// \brief Encode records into one container (slices of at most RecordsPerSlice records and
+    /// about BasesPerSlice bases) for WriteContainer.
     ///
     /// Several threads can encode at the same time, also while another thread writes: this
     /// uses the calling thread only, not the compression workers.

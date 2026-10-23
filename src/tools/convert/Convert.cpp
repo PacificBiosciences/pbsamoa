@@ -47,6 +47,14 @@ const CLI_v2::Option RecordsPerSlice{
     "default" : 10000
 })"};
 
+const CLI_v2::Option BasesPerSlice{
+    R"({
+    "names" : ["bases-per-slice"],
+    "description" : "Maximum bases (sequence plus aux bytes) per CRAM slice; 0 = no limit.",
+    "type" : "integer",
+    "default" : 5000000
+})"};
+
 // Thread counts use -1 as a sentinel meaning "not user-provided / auto-detect".
 const CLI_v2::Option BgzfThreads{
     R"({
@@ -274,9 +282,9 @@ CLI_v2::Interface CreateInterface()
                                 LibraryFormattedVersion()};
     // convert has no --num-threads flag; disable the built-in to avoid shadowing.
     interface.DisableNumThreadsOption();
-    interface.AddOptions({RecordsPerSlice, BgzfThreads, DecodeThreads, ConvertToBamRecord,
-                          CompressionThreads, BlockCompression, SeriesCompression, WriteCrai,
-                          Reference});
+    interface.AddOptions({RecordsPerSlice, BasesPerSlice, BgzfThreads, DecodeThreads,
+                          ConvertToBamRecord, CompressionThreads, BlockCompression,
+                          SeriesCompression, WriteCrai, Reference});
     interface.AddPositionalArguments({Input, Output});
     return interface;
 }
@@ -293,6 +301,13 @@ int Runner(const CLI_v2::Results& results)
             throw std::runtime_error{"records-per-slice must be > 0"};
         }
         config.RecordsPerSlice = v;
+    }
+    if (results[BasesPerSlice].IsUserProvided()) {
+        const std::int32_t v{results[BasesPerSlice]};
+        if (v < 0) {
+            throw std::runtime_error{"bases-per-slice must be >= 0"};
+        }
+        config.BasesPerSlice = v;
     }
 
     // Thread counts: -1 = auto (also the default), 0 = serial, >=1 = explicit worker count.

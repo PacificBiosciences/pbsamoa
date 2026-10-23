@@ -204,8 +204,9 @@ Key relationships:
 
 - **CramWriter** uses a two-level write buffer:
   `pendingRecords` (records for the current slice) and `pendingSlices`
-  (completed slices for the current container). `RecordsPerSlice` controls
-  slice boundaries; `SlicesPerContainer` controls container flush boundaries.
+  (completed slices for the current container). `RecordsPerSlice` and
+  `BasesPerSlice` control slice boundaries; `SlicesPerContainer` controls
+  container flush boundaries.
   Slice encode/compress can run in parallel, while container writes are kept
   ordered with an async write future. It can emit a samtools-compatible CRAI
   sidecar with per-slice offsets. With reference sequences it writes
@@ -687,8 +688,12 @@ the query decode stops after the region end when no record waits for a mate.
 
 ### Writer threads
 
-`CramWriterConfig` sets the layout: `RecordsPerSlice{10000}` and
-`SlicesPerContainer{1}`. A value of `SlicesPerContainer` <= 0 flushes only at
+`CramWriterConfig` sets the layout: `RecordsPerSlice{10000}`,
+`BasesPerSlice{5000000}` and `SlicesPerContainer{1}`. A slice ends with the record
+that reaches either limit. The bases limit counts sequence bases plus BAM aux
+bytes, as htslib does, and has htslib's default: HiFi reads then get slices of a
+few hundred records instead of 10000, so a reader holds far less decoded data and
+a region query decodes less. A value of `SlicesPerContainer` <= 0 flushes only at
 `Close()`. `CompressionWorkers` (default 0) sets the size of a pbcopper
 `ThreadPool`. With 2 or more workers, `Write()` hands each full container to
 the pool as one task, which owns its records, and goes on with the next

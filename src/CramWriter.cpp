@@ -44,6 +44,14 @@ CramContainerHeader ComputeContainerLandmarks(const CramContainer& container,
 
 namespace CramWriterInternal {
 
+// What a record adds to CramWriterConfig::BasesPerSlice: its bases plus its BAM aux bytes,
+// as htslib counts.
+std::int64_t SliceBases(const BamRecord& record)
+{
+    return static_cast<std::int64_t>(std::size(record.Sequence()) +
+                                     SerializedBamSize(record.Tags()));
+}
+
 struct EncodedTagPayload
 {
     std::int32_t ContentId{};
@@ -632,6 +640,7 @@ struct CramWriter::Impl
     bool closed{false};
 
     std::vector<BamRecord> pendingRecords;
+    std::int64_t pendingBases{0};  // SliceBases of pendingRecords
     std::vector<std::vector<BamRecord>> pendingSlices;
     std::int64_t globalRecordCounter{0};
     std::int64_t nextContainerOffset{0};
@@ -735,6 +744,10 @@ struct CramWriter::Impl
         if (config.RecordsPerSlice <= 0) {
             throw std::runtime_error(std::format(
                 "CramWriter: RecordsPerSlice must be positive, got {}", config.RecordsPerSlice));
+        }
+        if (config.BasesPerSlice < 0) {
+            throw std::runtime_error(std::format(
+                "CramWriter: BasesPerSlice must not be negative, got {}", config.BasesPerSlice));
         }
         if (config.CompressionLevel) {
             const int level = *config.CompressionLevel;
@@ -1596,20 +1609,30 @@ struct CramWriter::Impl
             pendingSlices.push_back(std::move(pendingRecords));
             pendingRecords.clear();
             pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
+            pendingBases = 0;
         }
         FlushContainer();
         WriteEncodedContainers();
     }
 
+    // Ends the slice when it is full: RecordsPerSlice records, or BasesPerSlice bases.
+    bool SliceFull(const std::size_t numRecords, const std::int64_t numBases) const
+    {
+        return (static_cast<std::int64_t>(numRecords) >= config.RecordsPerSlice) ||
+               ((config.BasesPerSlice > 0) && (numBases >= config.BasesPerSlice));
+    }
+
     void MaybeFlush()
     {
-        if (static_cast<std::int32_t>(std::size(pendingRecords)) < config.RecordsPerSlice) {
+        pendingBases += SliceBases(pendingRecords.back());
+        if (!SliceFull(std::size(pendingRecords), pendingBases)) {
             return;
         }
 
         pendingSlices.push_back(std::move(pendingRecords));
         pendingRecords.clear();
         pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
+        pendingBases = 0;
 
         if (config.SlicesPerContainer > 0 &&
             static_cast<std::int32_t>(std::size(pendingSlices)) >= config.SlicesPerContainer) {
@@ -1792,6 +1815,7 @@ struct CramWriter::Impl
         if (!std::empty(pendingRecords)) {
             pendingSlices.push_back(std::move(pendingRecords));
             pendingRecords.clear();
+            pendingBases = 0;
         }
 
         FlushContainer();
@@ -1869,9 +1893,18 @@ void CramWriter::Close() { impl_->Close(); }
 CramEncodedContainer CramWriter::EncodeContainer(const std::span<const BamRecord> records) const
 {
     std::vector<std::span<const BamRecord>> slices;
-    const auto perSlice = static_cast<std::size_t>(impl_->config.RecordsPerSlice);
-    for (std::size_t first = 0; first < std::size(records); first += perSlice) {
-        slices.push_back(records.subspan(first, std::min(perSlice, std::size(records) - first)));
+    std::size_t first{0};
+    std::int64_t bases{0};
+    for (std::size_t i = 0; i < std::size(records); ++i) {
+        bases += SliceBases(records[i]);
+        if (impl_->SliceFull(i + 1 - first, bases)) {
+            slices.push_back(records.subspan(first, i + 1 - first));
+            first = i + 1;
+            bases = 0;
+        }
+    }
+    if (first < std::size(records)) {
+        slices.push_back(records.subspan(first));
     }
     return impl_->EncodeSlices(slices, /*useWorkers=*/false);
 }
