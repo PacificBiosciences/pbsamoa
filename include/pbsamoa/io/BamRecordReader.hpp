@@ -53,7 +53,7 @@ public:
     [[nodiscard]] std::int32_t NumZmws() const;
 
     /// \brief Read next pre-decoded record. Returns nullopt at EOF.
-    /// \throws std::runtime_error if the producer thread encountered an error.
+    /// \throws the producer thread's exception, rethrown with its original type.
     std::optional<BamRecord> ReadRecord();
 
     /// \brief Range interface: for (const auto& rec : reader.Records()) { ... }

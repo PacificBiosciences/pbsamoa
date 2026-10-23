@@ -65,7 +65,12 @@ The constructor also accepts a `BamCollection` or a `std::vector<BamFile>` (see
 `Whitelist` does not filter `ReadRecord()`, `Records()`, or `ReadBatch()`. Use
 `reader.Whitelist(wl)` to select ZMWs. The constructor throws `std::invalid_argument`
 if `Whitelist` is set together with chunking or with several input files.
-Chunking also needs one input file.
+Chunking also needs one input file. Set both `ChunkNum` and `TotalChunks` or neither:
+if either is set, the constructor throws `std::invalid_argument` unless
+`1 <= ChunkNum <= TotalChunks`.
+
+With `CONTIGUOUS` chunking, the chunk's record count replaces `RecordLimit`. In
+`SCATTER` mode, `RecordLimit` caps the records of the chunk.
 
 Both chunk modes are ZMW-keyed (a ZMW's records stay together) and partition the
 file exactly: all `TotalChunks` chunks together visit every record once.
@@ -150,7 +155,8 @@ for (const auto& view : reader.Whitelist(wl)) {
 
 The `WhitelistRange` owns a dedicated sync reader internally (pipeline mode
 would restart per seek). `Whitelist()` needs a single input file. It throws
-`std::logic_error` for a multi-file reader.
+`std::logic_error` for a multi-file reader, and `std::runtime_error` when the BAM has
+no `.zmi` or `.pbi`. Records come in file order, not whitelist order.
 
 ### ZMW count
 
@@ -158,8 +164,9 @@ would restart per seek). `Whitelist()` needs a single input file. It throws
 const std::int32_t numZmws = reader.NumZmws();  // -1 if not available
 ```
 
-With chunking, `NumZmws()` gives the ZMW count of the chunk. Otherwise it opens the
-`.zmi` or `.pbi` of the BAM. It gives `-1` for multi-file input or when no index loads.
+With chunking, `NumZmws()` gives the ZMW count of the chunk (for an empty
+`CONTIGUOUS` chunk, the count of the whole file). Otherwise it opens the `.zmi` or
+`.pbi` of the BAM. It gives `-1` for multi-file input or when no index loads.
 
 ### Random access
 
@@ -168,6 +175,8 @@ VirtualOffset pos = reader.Tell();
 // ... read some records ...
 reader.Seek(pos);  // jump back
 ```
+
+`Seek`, `Tell`, and `Query(index, ...)` throw `std::logic_error` for multi-file input.
 
 ### Metrics
 
@@ -234,7 +243,8 @@ while (auto record = reader.ReadRecord()) {
 }
 ```
 
-`ReadRecord()` throws `std::runtime_error` when the producer thread failed.
+When the producer thread fails, `ReadRecord()` rethrows its exception with the original
+type.
 
 ### Range iteration
 
@@ -261,7 +271,8 @@ for (const BamRecord& record : reader.Query(interval)) {
 It does not change the sequential iteration. With several inputs, it merges the
 records of each file in coordinate order. It throws `std::runtime_error` when the
 reference name is not in the header or a `.bai` file is missing. The tag filter of the
-reader applies.
+reader applies; the rest of `RawReaderConfig` (BGZF workers, chunking, `RecordLimit`)
+does not, since the query readers use the default config.
 
 ### Metrics
 
@@ -308,6 +319,8 @@ the bases of one window only: the span of the current slice, or 64 KiB or more f
 multi-reference slice. Several readers can share one `Reference`. The reader makes the bases upper
 case. Set `ReferencePath` or `Reference`, not both: the constructor throws
 `std::invalid_argument`, and also when `Reference` does not have one sequence per @SQ line.
+With neither set, the reader uses the FASTA named by the environment variable
+`PBSAMOA_CRAM_REFERENCE`, if set. FASTA sequences are matched to @SQ lines by name.
 
 ### Header access
 
@@ -412,7 +425,7 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series method overrides                                  |
 | `RecordsPerSlice`              | `int32_t`                                        | `10000` | Max records per slice                                             |
 | `SlicesPerContainer`           | `int32_t`                                        | `1`     | Max slices per container (`<= 0` means unlimited until `Close()`) |
-| `MajorVersion`                 | `uint8_t`                                        | `3`     | CRAM major version (`3` only)                                     |
+| `MajorVersion`                 | `uint8_t`                                        | `3`     | CRAM major version (must be `3`)                                  |
 | `MinorVersion`                 | `uint8_t`                                        | `0`     | CRAM minor version (`0` or `1`)                                   |
 | `WriteCrai`                    | `bool`                                           | `false` | Write `<output>.crai` sidecar                                     |
 | `CraiPath`                     | `optional<path>`                                 | `{}`    | CRAI output path override                                         |
@@ -425,6 +438,9 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
 - `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
+- The constructor throws `std::runtime_error` when `MajorVersion != 3`, `RecordsPerSlice <= 0`,
+  `CompressionLevel` is outside `[0, 12]`, or a `ReferenceSequences` entry does not have the
+  length of its @SQ line.
 
 ### Reference-based CRAM
 
@@ -537,7 +553,8 @@ and the CRAI rows of each slice (`SliceIndex`).
 
 - `CompressCramBlock(block, method, level)` and `DecompressCramBlock(block)` change a
   `CramBlock` in place.
-- `CompressionRegistry::Instance()` holds the codecs of the block methods 0 to 8. `Register`
+- `CompressionRegistry::Instance()` holds the codecs of the block methods 0 to 8 (`BZIP2`
+  and `LZMA` only when the library is built with bzip2 and liblzma). `Register`
   adds a custom method ID above 8. It throws `std::runtime_error` for a built-in ID.
   Do not register a method while other threads use the registry.
 - `CramGzipCompress`, `CramGzipDecompress`, and `CramFqzcompCompress` call one codec directly.
@@ -546,8 +563,10 @@ This header includes `<libdeflate.h>`, because some overloads take a reusable
 `libdeflate_compressor*` or `libdeflate_decompressor*`.
 
 `<pbsamoa/cram/CramCodec.hpp>` holds the CRAM data-series codecs (`CramCodec`, `CreateCodec`,
-`ExternalCodec`, `HuffmanCodec`, `BetaCodec`, `GammaCodec`, `SubexpCodec`, `ByteArrayLenCodec`,
-`ByteArrayStopCodec`) and the bit and external-block streams that they use. The reader and the
+`NullCodec`, `ExternalCodec`, `HuffmanCodec`, `BetaCodec`, `GammaCodec`, `SubexpCodec`,
+`ByteArrayLenCodec`, `ByteArrayStopCodec`), their `CramCodecDecodeKind` (`SCALAR` or
+`BYTE_ARRAY`), and the streams that they use (`CramBitReader`, `CramBitWriter`,
+`CramExternalBlockStore`). The reader and the
 writer use these types. Most programs do not need them.
 
 ---
@@ -612,7 +631,8 @@ BamWriter indexedWriter{"output.bam", header, cfg, [](std::int64_t vOffset,
 Index callback notes:
 - Callback runs asynchronously on the BGZF IO writer thread.
 - Callback can be invoked after `Write()` returns (often during `Close()`).
-- Call `Close()` explicitly to surface write/close errors (destructor close suppresses errors).
+- Call `Close()` explicitly to surface write/close errors. The destructors of all writers
+  (`BamWriter`, `SamWriter`, `CramWriter`, `BgzfWriter`) close and suppress errors.
 - The callback supplies each record's begin virtual offset; after `Close()`,
   `writer.EndVirtualOffset()` gives the offset just past the last record (the end offset
   of the final record). Feed both to `BaiStreamBuilder` to build a BAI on the fly — see
@@ -627,6 +647,9 @@ writer.Write(rawData); // raw span<const byte>
 writer.WriteBatch(batch);  // batch of records
 writer.Close();        // flush and finalize (also called by destructor)
 ```
+
+`rawData` holds the record bytes without the 4-byte `block_size`; the writer prepends it.
+`Write()` throws `std::invalid_argument` for a record of more than `INT32_MAX` bytes.
 
 ### Metrics
 
@@ -734,10 +757,14 @@ operations), the record expands it, and `ParseTags()` leaves out `CG`.
 |    Method    |      Return type      |               Description                |
 | ------------ | --------------------- | ---------------------------------------- |
 | `Name()`     | `string_view`         | Read name (NUL-terminated in buffer)     |
-| `CigarOps()` | `CigarView`           | Span of CIGAR operations                 |
+| `CigarOps()` | `CigarView`           | Span of CIGAR operations (see below)     |
 | `Seq()`      | `SequenceView`        | 4-bit packed sequence (decode on access) |
 | `Qual()`     | `span<const uint8_t>` | Base qualities                           |
 | `AuxData()`  | `span<const byte>`    | Raw auxiliary tag bytes                  |
+
+The span from `CigarOps()` points into the view's own storage, so it becomes invalid when
+the view or `RawRecord` is moved or destroyed. Call `CigarOps()` where you use it. The
+other spans of a `RawRecord` survive a move.
 
 ### Derived fields
 
@@ -758,6 +785,7 @@ BamRecord record = view.ToOwned();
 BamRecord noKinetics = view.ToOwned(DropTags{TagKey{'i','p'}, TagKey{'p','w'}});
 BamRecord rgOnly = view.ToOwned(KeepTags{TagKey{'R','G'}});
 TagMap tags = view.ParseTags();
+TagMap some = view.ParseTagsFiltered(filter, keep);  // keep(filter, key) selects the tags
 RawRecord raw = RawRecord::FromBamRecord(record);  // serialized in place, no second copy
 ```
 
@@ -791,6 +819,7 @@ accessors differ:
 `Sequence()` gives a `string_view` of the bases. `Qualities()` gives a
 `span<const uint8_t>` and is empty when the record has no qualities. `Tags()` gives a
 `const TagMap&`. A default-constructed record has `RefId() == -1` and `Pos() == -1`.
+`Name(name)` throws `std::invalid_argument` for a name of more than 254 characters.
 
 ### Fluent mutators
 
@@ -848,7 +877,11 @@ std::optional<PacBio::Data::Frames> pw = record.PulseWidth();  // nullopt if abs
 ```
 
 `HoleNumber()`, `ReadGroupId()`, `SignalToNoise()`, and `ReadAccuracy()` throw
-`std::runtime_error` when the name or the tag is missing or malformed.
+`std::runtime_error` when the name or the tag is missing or malformed. The optional
+accessors give `nullopt` for a missing tag but throw `std::runtime_error` for a tag of the
+wrong type: `QueryStart()`, `QueryEnd()`, `WallStart()`, `WallEnd()`, and
+`LocalContextFlags()` for a non-integer tag, `PulseWidth()` and `IPD()` for a tag that is not
+an array of a supported element type.
 
 | Method                  | Return type                    | Tag  |
 | ----------------------- | ------------------------------ | ---- |
@@ -861,7 +894,8 @@ std::optional<PacBio::Data::Frames> pw = record.PulseWidth();  // nullopt if abs
 | `WallStart()`, `WallEnd()` | `optional<int32_t>`         | `ws`, `we` |
 
 The `Data::` types come from pbcopper (`<pbcopper/data/...>`). Thus programs that include
-`BamRecord.hpp` also need the pbcopper headers.
+`BamRecord.hpp`, `SamHeader.hpp` (`Data::Strand`), or headers that include them, such as
+`Bgzf.hpp`, also need the pbcopper headers.
 
 ### Clipping
 
@@ -896,7 +930,9 @@ std::vector<std::byte> raw = record.SerializeToBam();  // without the block_size
 ```
 
 Normally you don't call this directly — `BamWriter::Write(record)` handles
-it.
+it. `SerializeToBam()` and `RawRecord::FromBamRecord` throw `std::invalid_argument` when the
+qualities are not empty and differ in length from the sequence, or when a CIGAR of more than
+65535 operations spans 2^28 reference bases or more.
 
 ---
 
@@ -916,7 +952,8 @@ Owns a decompressed buffer and provides views into it. Construct it from a buffe
 | `RecordCount()` | `size_t`           | Number of records                 |
 | `BufferSize()`  | `size_t`           | Decompressed buffer size in bytes |
 
-Views are invalidated when the batch is destroyed.
+Views are invalidated when the batch is destroyed. The constructor does not check the
+extents, and `View(i)` and `RecordData(i)` do not check `i`.
 
 ---
 
@@ -935,7 +972,7 @@ std::expected<SamHeader, std::string> parsed = SamHeader::FromText(samText);
 if (!parsed) {
     // parsed.error() describes the problem
 }
-const SamHeader header = *parsed;
+SamHeader header = *parsed;
 
 std::expected<SamHeader, std::string> fromBam = SamHeader::FromBamHeaderBlock(rawBytes);
 ```
@@ -976,7 +1013,7 @@ for (const ReferenceSequence& sq : header.ReferenceSequences()) {
 }
 ```
 
-`ReferenceId` gives -1 for an unknown name. `ReferenceName(-1)` gives `"*"`.
+`ReferenceSequence` has `Name()` and `Length()`. `ReferenceId` gives -1 for an unknown name. `ReferenceName(-1)` gives `"*"`.
 `ReferenceName` throws `std::out_of_range` for other invalid IDs.
 
 ### Read groups, programs, comments
@@ -994,7 +1031,9 @@ AppendProgramRecord(header, "pbsamoa", std::optional<std::string>{"pbsamoa sort 
 `ReferenceSequences()`, `ReadGroups()`, and `ProgramRecords()` give the vectors for change.
 `ReferenceSequence`, `ReadGroup`, and `ProgramRecord` keep optional fields as text tags:
 `GetTag(key)` (nullptr if absent), `SetTag(key, value)`, and `CustomTags()`.
-`ProgramRecord` also has `RemoveTag(key)`.
+`ProgramRecord` also has `RemoveTag(key)`. `ReadGroup::Id()` and `ProgramRecord::Id()` give
+the ID. `AppendProgramRecord` sets `PN=pbsamoa`, `VN` to the library release, `CL` when a
+command line is given, and `PP` to the ID of the last @PG.
 
 ### Read group IDs
 
@@ -1046,6 +1085,7 @@ auto faster = BaiIndex::Build("sorted.bam", /*numWorkers=*/4);  // same bytes
 `Query(refId, beg, end)` gives the `Chunk`s (`Begin`, `End` virtual offsets) that overlap
 `[beg, end)`, sorted and merged. It gives an empty vector for an unknown `refId`.
 `Reference(refId)` gives the `ReferenceIndex` (`bins` and `linearIndex`) of one reference.
+It throws `std::out_of_range` for an invalid `refId`.
 
 ### Build on the fly (streaming)
 
@@ -1076,11 +1116,11 @@ throws if the records are not coordinate-sorted.
 
 ### Statistics
 
-|      Method       |                Description                 |
-| ----------------- | ------------------------------------------ |
-| `NumReferences()` | Number of reference sequences in the index |
-| `MappedCount()`   | Total mapped reads (from metadata bin)     |
-| `UnmappedCount()` | Total unmapped reads (from metadata bin)   |
+|      Method       |                 Description                 |
+| ----------------- | ------------------------------------------- |
+| `NumReferences()` | Number of reference sequences in the index  |
+| `MappedCount()`   | Total mapped reads (from metadata bin)      |
+| `UnmappedCount()` | Unmapped reads: metadata bins + `n_no_coor` |
 
 ---
 
@@ -1118,7 +1158,10 @@ CigarOp op{CigarOpType::M, 100};  // 100M
 CigarOpType type = op.Type();     // CigarOpType::M
 std::uint32_t length = op.Length();
 std::uint32_t raw = op.RawValue();  // length << 4 | op, as in BAM
+CigarOp fromRaw{raw};               // explicit, from the BAM value
 ```
+
+A default `CigarOp` is `0M`. `CigarOp` supports `==`.
 
 `CigarView` is `std::span<const CigarOp>`.
 
@@ -1194,6 +1237,12 @@ std::uint32_t count = qualities.Count();
 std::span<const std::byte> bytes = qualities.Data();  // little-endian elements
 ```
 
+`ElementType()` and `ElementSize()` give the type code and its size. There is an `Append`
+function for each type (`AppendInt8`, `AppendUInt8`, `AppendInt16`, `AppendUInt16`,
+`AppendInt32`, `AppendUInt32`, `AppendFloat`). `Resize(count)` and `MutableData()` fill the
+elements in place. The constructor does not check the type code: for an invalid one,
+`ElementSize()` and `Count()` give 0.
+
 ### TagMap
 
 ```cpp
@@ -1242,7 +1291,8 @@ auto withoutKinetics = view.ToOwned(drop);  // copy everything except ip, pw
 auto rgAndNm = view.ToOwned(keep);          // copy only RG, NM
 ```
 
-`DropTags::ShouldDrop(key)` and `KeepTags::ShouldKeep(key)` test one key.
+`DropTags::ShouldDrop(key)` and `KeepTags::ShouldKeep(key)` test one key. Both hold a
+`SortedTagKeySet` (binary search, `Contains(key)`).
 
 ---
 
@@ -1263,7 +1313,7 @@ VirtualOffset fromRaw{std::uint64_t{0x10000}};  // explicit, from the packed 64-
 std::uint64_t packed = fromRaw.Value();
 ```
 
-Supports `<=>` comparison. No arithmetic — this is by design.
+A default `VirtualOffset` is 0. Supports `<=>` comparison. No arithmetic — this is by design.
 
 ---
 
@@ -1294,7 +1344,9 @@ The one-argument constructor gives block-only mode. The two-argument constructor
 `Header()`, `ReadRecord()`, and `ReadBatch(maxBytes, maxRecords)`. With `numWorkers > 0`,
 it decompresses on a thread pool. These BAM-mode functions throw `std::runtime_error`
 in block-only mode. Both modes have `Seek()`, `Tell()`, `HasEofMarker()`, and `GetMetrics()`.
-The constructors throw `std::runtime_error` if the file does not open.
+The constructors throw `std::runtime_error` if the file does not open. The two-argument
+constructor also throws it for an invalid or empty BAM header. `Tell()` gives the start of
+the last block read in block-only mode, and the exact offset of the next record in BAM mode.
 
 ```cpp
 BgzfReader bam{"file.bam", /*numWorkers=*/0};
@@ -1330,7 +1382,9 @@ bytes, compresses with libdeflate.
 | `Pool`               | `{}`    | `shared_ptr<BgzfWriterPool>`; shared mode when not null  |
 
 The constructor throws `std::invalid_argument` for a value out of range.
-`Write` also accepts a `std::vector<std::byte>&&` and does not copy it then.
+`Write` also accepts a `std::vector<std::byte>&&` and does not copy it then. Both overloads
+take an optional `PendingCallback` (within-block offset, record bytes, `rgId`, `zmw`) for the
+index callback; `BamWriter` uses it.
 `SetCallback(fn)` sets an index callback, and `EndVirtualOffset()` gives the end offset
 after `Close()`. `GetMetrics()` gives `BgzfWriteMetrics`.
 
@@ -1465,12 +1519,15 @@ move-only.
 
 ZMI 1.1 records the ordered forward/reverse barcode IDs from `bc:B:S` or
 `bc:B:s`. `ZmiBamWriter`, `zmi-build`, and `zmi-index` capture them automatically.
+`BarcodePair` has `Forward` and `Reverse`, both `-1` by default.
 An absent tag is `BarcodePair{-1, -1}`; signed -1 components remain unassigned.
 Unsigned IDs, including 65535, are preserved. Malformed barcode tags are rejected.
 
 ```cpp
+#include <bit>
 #include <pbsamoa/io/BamRawReader.hpp>  // reader, VirtualOffset
 
+BamRawReader reader{"movie.bam"};
 const ZmwIndex index = ZmwIndex::Open("movie.bam");
 for (const BarcodePair pair : index.BarcodePairs()) {
     for (const std::int64_t offset : index.FindBarcodes(pair)) {
@@ -1498,21 +1555,6 @@ Legacy 16-byte ZMI entries remain readable for ZMW queries. Barcode queries thro
 when fields are unavailable, including through `FromPbi()`, which still reads
 only PBI's ZMW columns; rebuild the ZMI to enable barcode lookup.
 
-## ZmwGroup
-
-```cpp
-#include <pbsamoa/io/BamZmwReader.hpp>
-```
-
-A single ZMW's worth of owned records.
-
-```cpp
-struct ZmwGroup {
-    ZmwIdentity zmw;
-    std::vector<BamRecord> records;
-};
-```
-
 ---
 
 ## BamZmwReader
@@ -1525,7 +1567,8 @@ Groups consecutive records by ZMW identity. Wraps a `BamRecordReader` and
 uses a background producer thread to prefetch complete ZMW groups into a
 bounded queue. Assumes the source yields records grouped by ZMW
 (standard PacBio BAM ordering). The `rgId` of the identity comes from the base read-group
-ID in the `RG` tag. It is `0` when the record has no such tag.
+ID in the `RG` tag. It is `0` when the record has no such tag. The `ZmwGroup` struct in
+the header is internal; no public function takes or returns it.
 
 ### Configuration
 
@@ -1634,7 +1677,7 @@ SortConfig byTag{.Order = SortOrder::TAG, .Tag = {'H', 'P'}};
 | `MaxMemory`           | `768 MiB`    | Peak record-run buffer (one run at a time)                              |
 | `NumThreads`          | `0`          | BGZF threads; `0` = `min(hardware_concurrency, 8)`                      |
 | `CompressionLevel`    | `6`          | Output level `[1, 12]`; temporary runs use level 1                      |
-| `TempDir`             | `{}`         | Directory of the run files; default: the directory of the output        |
+| `TempDir`             | `{}`         | Directory of the run files; default: the directory of the output, or the current directory for stream output |
 | `Minimise`            | `false`      | Cluster unmapped reads by minimiser (`samtools sort -M -R`); coordinate only |
 | `CommandLine`         | `{}`         | `CL` value of the added `@PG` line                                      |
 | `DirectToOutput`      | `false`      | Write to the output directly, not through a temporary file and rename   |
@@ -1644,7 +1687,9 @@ SortConfig byTag{.Order = SortOrder::TAG, .Tag = {'H', 'P'}};
 Set `DirectToOutput` for `/dev/stdout`, `/dev/fd/*`, or a FIFO. The sort also detects an
 existing output that is not a regular file. `OutputIndexCallback` runs on the IO thread of
 the output writer, only for the final file. All calls finish before `SortBam` returns.
-`SortBam` throws `std::runtime_error` on I/O errors.
+`SortBam` throws `std::runtime_error` on I/O errors, a missing input, or `Minimise` with an
+order other than `COORDINATE`. It throws `std::invalid_argument` if `MergeFanIn < 2` or the
+record source is empty.
 
 ### Selected records
 
@@ -1683,8 +1728,8 @@ MergeStats stats = MergeBam(inputs, "merged.bam", MergeConfig{
 
 Modes:
 - Sorted merge: a k-way merge of inputs sorted in the same order. Equal keys keep the input
-  order. If coordinate-sorted inputs do not overlap and are in sequence, the merge copies
-  the BGZF blocks (`MergeStats::Passthrough`).
+  order. If coordinate-sorted inputs do not overlap, the merge orders them by their first
+  record and copies the BGZF blocks (`MergeStats::Passthrough`).
 - Concat (`Concat = true`, or all inputs unsorted): copies the BGZF blocks and marks the
   output `SO:unsorted`.
 
@@ -1726,7 +1771,7 @@ thread pool decompresses the blocks. One budget limits the decompressed bytes in
 ```cpp
 using namespace PacBio::Samoa::Literals;
 
-MergeReadAhead readAhead{inputs, /*decodeWorkers=*/4, 256_MiB};
+MergeReadAhead readAhead{inputs, /*decodeWorkers=*/4, 256_MiB, /*batchBytes=*/0};
 for (std::size_t i{0}; i < readAhead.NumSources(); ++i) {
     while (std::optional<std::span<const std::byte>> bytes = readAhead.Next(i)) {
         // record bytes after block_size; valid until the next Next(i)
@@ -1735,6 +1780,8 @@ for (std::size_t i{0}; i < readAhead.NumSources(); ++i) {
 MergeReadAheadStats stats = readAhead.Stats();  // after all sources reach their end
 ```
 
+`decodeWorkers` is at least 1. `batchBytes` is the record bytes of one batch per input
+(`0` = 256 KiB); each input holds one batch outside the budget.
 `Next(i)` gives the records of input `i` in file order. It throws the exception of the
 producer on a read error. The constructor throws `std::runtime_error` if an input does
 not open. `MergeReadAhead` cannot be copied or moved.
@@ -1756,8 +1803,9 @@ writer.Close();
 ZmiBamWriter tuned{"tuned.bam", header, BamWriterConfig{.UseTempFile = true}};
 ```
 
-`Write` also accepts a `RawRecordView` or a `RawRecord`. The writer reads `RG`, the hole
-number, and `bc` of each record for its ZMI entry.
+`Write` also accepts a `RawRecordView` or a `RawRecord`. For its ZMI entry the writer takes
+the base read-group ID from `RG`, the hole number from the read name (`movie/<zmw>/...`, 0
+if the name does not match), and the barcodes from `bc`.
 
 ---
 
@@ -1799,7 +1847,8 @@ writer.AddRecord(rgId, zmw, virtualOffset, BarcodePair{12, 12});  // forward, re
 writer.Close();
 ```
 
-Add the entries in BAM write order.
+Add the entries in BAM write order. `AddRecord` throws `std::invalid_argument` for a
+barcode ID outside `[-1, 65535]`.
 
 ---
 
@@ -1851,7 +1900,7 @@ to `TagClipStrategy` subclasses.
 
 |            Strategy            |                                     Tags                                     |          Behavior          |
 | ------------------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| `SubstringClipStrategy`        | `dq`, `iq`, `mq`, `sq`, `dt`, `st`, `ip`, `pw`, `fi`, `fp`                   | Simple substring           |
+| `SubstringClipStrategy`        | `dq`, `iq`, `mq`, `sq`, `dt`, `st`, `ip`, `pw`, `fi`, `fp`, `sm`, `sx`       | Simple substring           |
 | `ReverseSubstringClipStrategy` | `ri`, `rp`                                                                   | Mirrored offset substring  |
 | `PulseClipStrategy`            | `pc`, `pt`, `pq`, `pv`, `pg`, `pa`, `pm`, `ps`, `pi`, `pd`, `px`, `pe`, `sf` | Pulse-space via `pc` tag   |
 | `BasemodClipStrategy`          | `MM`, `ML`                                                                   | SAMv1.6 base modifications |
@@ -1869,8 +1918,9 @@ clipper.Register({TagKey{'x', 'q'}}, substring);
 ```
 
 `clipOffset` and `clipLength` give the kept query window. `sequence` is the sequence
-before the clip. Without it, the clipper does not clip `MM` and `ML`. Set `isReverse` for a
-reverse-strand record. `ClipTags` does not change tags that have no strategy. A
+before the clip. Without it, the clipper removes `MM` and `ML`. Set `isReverse` for a
+reverse-strand record. `ClipTags` does not change tags that have no strategy, except that
+it sets an existing `MN` to `clipLength`. A
 strategy derives from `TagClipStrategy` and implements `Clip(value, clipOffset,
 clipLength, seqLength, ctx)`. It returns `false` to remove a malformed tag. `ClipContext`
 gives a strategy access to the other tags.
@@ -1948,6 +1998,7 @@ Underlying reader: `Reader` (`ReaderMetrics`).
 const BamFile file{"movie.bam"};
 const SamHeader& header = file.Header();
 const bool complete = file.HasEOF();             // ends with the BGZF EOF marker
+const std::filesystem::path& path = file.Filename();
 const std::filesystem::path bai = file.StandardIndexFilename();  // "movie.bam.bai"
 file.EnsureStandardIndexExists();                // builds the .bai if it is missing or old
 const std::uint32_t chr1Length = file.ReferenceLength("chr1");  // 0 if unknown
@@ -1965,12 +2016,13 @@ it in place of one path.
 
 const BamCollection collection{std::vector<std::filesystem::path>{"a.bam", "b.bam"}};
 const SamHeader& merged = collection.Header();
-for (const BamFile& member : collection.Files()) {
+for (const BamFile& member : collection.Files()) {  // collection.Size() files
 }
 BamRecordReader reader{collection};
 ```
 
-The files must have the same `@SQ` names and lengths, in the same order. The merged header
+The constructor also takes one path or one `BamFile`. The files must have the same `@SQ`
+names and lengths, in the same order. The merged header
 joins the `@RG`, `@PG`, and `@CO` lines. With more than one file, its sort order is
 `unknown`. The constructor throws `std::runtime_error` for conflicting headers and
 `std::invalid_argument` for an empty list.
@@ -2111,8 +2163,8 @@ BasemodClipWindow window = ClipBasemodRecord(mods[0], "ACCCCCCCGT", /*clipOffset
 
 `ClipBasemodRecord` splits the sites of one record into three groups. `FrontRemoved` counts
 the sites before the window. `Retained` counts the sites in it, and `RetainedSkips` holds
-their new skips. The other sites are after the window. `PrefixLost` is the count of canonical bases that the clip removes before the
-first kept site. For a reverse-strand record, set `reverse`, because `MM` uses the original
+their new skips. The other sites are after the window. `PrefixLost` is the count of canonical bases between the last front-removed site and the
+clip start; undo adds it back to the first kept skip. For a reverse-strand record, set `reverse`, because `MM` uses the original
 read orientation.
 
 ---

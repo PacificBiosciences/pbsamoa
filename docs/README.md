@@ -13,8 +13,8 @@ Required dependencies:
 Optional dependencies:
 
 - bzip2 and liblzma (system packages). They enable the BZIP2 and LZMA block methods of CRAM.
-- [ISA-L](https://github.com/intel/isa-l) (Meson wrap, x86-64 only, needs NASM). It makes BGZF
-  compression faster. Use the option `-Disal=enabled|disabled|auto` (default `auto`).
+- [ISA-L](https://github.com/intel/isa-l) (Meson wrap, x86-64 only, needs NASM). It speeds up BGZF
+  compression at level 0 (`BgzfBlockEncoder`); all other levels use libdeflate. Use the option `-Disal=enabled|disabled|auto` (default `auto`).
 - pbtestutils and googletest (Meson wraps) for the tests. Use `-Dtests=false` to skip them.
 
 The source tree includes [htscodecs](https://github.com/samtools/htscodecs) and the rigtorp

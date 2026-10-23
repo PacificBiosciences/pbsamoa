@@ -13,3 +13,6 @@ __pycache__
 /subprojects/*
 !/subprojects/*.wrap
 !/subprojects/packagefiles/
+
+# Local htslib clone for reference (see CLAUDE.md)
+/reference/htslib/

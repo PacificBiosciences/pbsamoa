@@ -205,7 +205,7 @@ using namespace PacBio::Samoa::Literals;
 
 BamRecordReaderConfig cfg;
 cfg.RawReaderConfig.BgzfWorkers = 8;  // layer 1: decompression threads
-cfg.BatchBudget = 4_MiB;              // layer 2: batch size
+cfg.BatchBudget = 4_MiB;              // layer 3: bytes per decode round
 cfg.DecodeWorkers = 4;                // layer 3: decode threads
 cfg.TagFilter = DropTags{TagKey{'i', 'p'}, TagKey{'p', 'w'}};
 BamRecordReader reader{"input.bam", cfg};

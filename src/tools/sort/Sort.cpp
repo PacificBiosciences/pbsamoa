@@ -43,7 +43,7 @@ const CLI_v2::Option Tag{
 const CLI_v2::Option Memory{
     R"({
     "names" : ["memory"],
-    "description" : "Total RAM budget, with an optional K/M/G suffix.",
+    "description" : "Peak run-buffer budget (not a total RAM cap), with an optional K/M/G suffix.",
     "type" : "string",
     "default" : "768M"
 })"};

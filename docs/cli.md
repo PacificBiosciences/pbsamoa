@@ -30,8 +30,9 @@ All tools have these options:
 Tool options have only long names. `-h` is the only short flag.
 
 A tool exits with status `0` on success. On an error, it writes the message
-to stderr and exits with status `1`. An unknown tool name also gives status
-`1`.
+to stderr and exits with status `1`. An unknown tool name, an unknown option,
+or too many arguments also give status `1`. A tool run without its arguments
+(`pbsamoa sort`), and `pbsamoa` alone, print the help and exit with status `0`.
 
 Memory sizes (`--memory`, `--batch-bytes`) accept a `K`, `M`, or `G` suffix
 in upper or lower case. These suffixes are powers of 1024. The `--yield` of
@@ -56,7 +57,7 @@ Options:
 | `--bgzf-threads N` | Decompression worker threads; `-1` = auto, `min(hw, 8)` (default: `-1`). An explicit count is capped at 10 |
 | `--format-threads N` | SAM formatting thread pool size for BAM input; `0` = auto, `max(hw, 4)` (default: `0`) |
 | `--reference ref.fa` | Reference FASTA for reference-based CRAM decoding |
-| `--region ref:start-end|*` | CRAM-only region query (`*` selects unmapped) |
+| `--region REGION` | CRAM-only region query: `ref`, `ref:start`, or `ref:start-end` (1-based, inclusive), or `*` for the unmapped records |
 | `--index file.crai` | CRAM-only CRAI path override (requires `--region`) |
 | `--no-header` | Do not write the SAM header |
 | `--header-only` | Write only the SAM header |
@@ -65,6 +66,8 @@ Notes:
 
 - `--region` and `--index` are only supported for CRAM input.
 - If `--region` is set and `--index` is omitted, `dump` loads `<input>.crai`.
+- A region splits on its rightmost colon, so reference names may contain `:`.
+  `ref` is the whole reference and `ref:start` runs to its end.
 - `--no-header` and `--header-only` are mutually exclusive.
 - The tool selects the input format from the file extension: `.sam`, `.cram`,
   or else BAM.
@@ -95,7 +98,7 @@ Options:
 | `--block-compression METHOD` | Default CRAM block method (default: `rans4x8`) |
 | `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable; `SERIES` is not case-sensitive) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
-| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines get `M5`. Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error |
+| `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines without `M5` get one (an existing `M5` is kept). Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error |
 
 Supported `METHOD` values:
 
@@ -123,7 +126,9 @@ Reverse demultiplexing done by lima or horizon: re-attach the clipped barcode
 flanks (sequence, qualities, kinetics, MM/ML, subread pileup) from the `ls` undo
 stack, unwinding nested clips, and drop the demultiplexing tags
 (`bc bq bx bl bt ql qt ls`, CCS `qs`/`qe`, barcode bits in `cx`). Barcoded read
-groups collapse onto their base ID and lima `@PG` records are removed.
+groups collapse onto their base ID and lima `@PG` records are removed. A record
+without an `ls` stack is not restored: only its `RG` collapses, and it keeps its
+other demultiplexing tags.
 
 ```sh
 pbsamoa undo demux.bam original.bam
@@ -246,7 +251,8 @@ and unmapped counts of all references and the unplaced reads). A `.bai` older
 than the BAM gives no total. The metrics are `records`, `counted_records`,
 `depth_bases` (the sum of the depth over all positions), `bins`, `bin_size`,
 and `index_records` when the `.bai` gives the total. `final` lists the TSV
-file in `outputs`.
+file in `outputs`. On stderr the tool prints
+`pbsamoa depth: N of M records counted, D depth bases in B bins of S bp`.
 
 ### sort — sort a BAM file
 
@@ -341,11 +347,15 @@ The thread/memory knobs (except `--compression`) apply to the sorted-merge path
 only; `--concat` is single-threaded BGZF passthrough.
 
 `--concat` has priority over `--order`. With both options, the tool
-concatenates the inputs and does not show an error.
+concatenates the inputs and does not show an error. The `--order` value is
+still checked first: an invalid order, or `--order tag` without `--tag`, is an
+error.
 
 On stderr, the tool prints a summary line, then a runtime report. The report
 shows the wall time, the peak RSS, the CPU time, and the time of each pipeline
-stage. It ends with a `verdict` line that names the probable bottleneck.
+stage. It ends with a `verdict` line that names the probable bottleneck. The
+`--concat` and disjoint-chain passthrough paths have no stages: their report
+says `pipeline: BGZF block passthrough` and `verdict: I/O-COPY bound`.
 
 ### bai-query — region query
 
@@ -356,10 +366,13 @@ Expects a `.bai` file alongside the BAM (auto-detected as `<bam>.bai`).
 pbsamoa bai-query sorted.bam chr1:1000-2000
 ```
 
-Arguments: BAM path, region (`ref:start-end`, 1-based inclusive).
+Arguments: BAM path, region (`ref`, `ref:start`, or `ref:start-end`, 1-based
+inclusive; split on the rightmost colon, as in `dump --region`).
 
 The output is SAM text on stdout: the header, then the records. If
-`<bam>.bai` does not exist, the tool stops with an error.
+`<bam>.bai` does not exist, the tool stops with an error. A reference that is
+not in the header is an error too, but the tool has already written the header
+to stdout by then.
 
 ### bai-build — build BAI
 
@@ -377,6 +390,8 @@ Options:
 | ---- | ----------- |
 | `--threads N` | BGZF decompression workers; `0` = auto, `min(hw, 8)` (default: `0`) |
 
+On stderr the tool prints `Index written to <path>`.
+
 ### zmi-build — build ZMW index
 
 Copy a BAM file and build a `.zmi` ZMW index alongside it.
@@ -385,6 +400,8 @@ Copy a BAM file and build a `.zmi` ZMW index alongside it.
 pbsamoa zmi-build input.bam output.bam
 # creates output.bam and output.bam.zmi
 ```
+
+On stderr the tool prints `ZMI index written to <path>`.
 
 Both ZMI builders capture ordered barcode IDs from the BAM `bc` tag in ZMI 1.1.
 The library's `ZmwIndex::FindBarcodes()` can retrieve matching record offsets;
@@ -432,6 +449,9 @@ visits every record exactly once.
 pbsamoa chunk movie.bam 1 4   # chunk 1 of 4 (1-based)
 pbsamoa chunk movie.bam 4 4   # chunk 4 of 4 (last)
 ```
+
+`CHUNK` must be in `[1, TOTAL]` and `TOTAL` at least 1; other values are an
+error (status `1`).
 
 By default each chunk is one contiguous ZMW range. Use `--mode scatter` for a
 chaotic-but-deterministic partition that samples ZMWs across the whole file —

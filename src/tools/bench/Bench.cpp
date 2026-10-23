@@ -32,11 +32,11 @@ namespace {
 
 // --bgzf-threads is long-only: `-j` belongs to the built-in --num-threads (disabled
 // below via DisableNumThreadsOption()), whose auto-resolution differs from bench's
-// -1 = auto (min of hardware concurrency and 10).
+// -1 = auto (min of hardware concurrency and 8); an explicit count is capped at 10.
 const CLI_v2::Option BgzfThreads{
     R"({
     "names" : ["bgzf-threads"],
-    "description" : "BGZF decompression worker threads; -1 = auto (min of hardware concurrency and 10).",
+    "description" : "BGZF decompression worker threads; -1 = auto (min of hardware concurrency and 8). An explicit count is capped at 10.",
     "type" : "integer",
     "default" : -1
 })"};
