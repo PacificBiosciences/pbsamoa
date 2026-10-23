@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <format>
 #include <fstream>
 #include <future>
@@ -639,6 +641,22 @@ struct CramWriter::Impl
     // the compressor of the writer thread; EncodeContainer uses thread-local ones
     mutable LibdeflateCompressorPtr gzipCompressor;
     std::shared_ptr<Parallel::ThreadPool<>> compressionPool;
+    // Containers of Write() that the pool encodes, in file order: each task owns its records.
+    std::deque<std::future<CramEncodedContainer>> encodingContainers;
+
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+
+    // The encoding tasks use this object: wait for them, also after an error.
+    ~Impl()
+    {
+        for (std::future<CramEncodedContainer>& f : encodingContainers) {
+            if (f.valid()) {
+                f.wait();
+            }
+        }
+    }
 
     CramBlockMethod DefaultDataSeriesMethod(CramDataSeries ds) const
     {
@@ -1523,15 +1541,52 @@ struct CramWriter::Impl
         WriteSerialized(SerializeEncoded(std::move(encoded), globalRecordCounter));
     }
 
+    // With 2 or more workers, a container is one task on the pool, so the caller goes on with
+    // the next records; up to CompressionWorkers containers are encoded at once, and they are
+    // written in order. Otherwise the caller encodes it, with the pool on its blocks.
     void FlushContainer()
     {
         if (std::empty(pendingSlices)) {
             return;
         }
-        const std::vector<std::span<const BamRecord>> slices(std::begin(pendingSlices),
-                                                             std::end(pendingSlices));
-        WriteEncoded(EncodeSlices(slices, /*useWorkers=*/true));
+        if (!compressionPool || (config.CompressionWorkers < 2)) {
+            const std::vector<std::span<const BamRecord>> slices(std::begin(pendingSlices),
+                                                                 std::end(pendingSlices));
+            WriteEncoded(EncodeSlices(slices, /*useWorkers=*/true));
+            pendingSlices.clear();
+            return;
+        }
+
+        auto task{std::make_shared<std::packaged_task<CramEncodedContainer()>>(
+            [this, records = std::move(pendingSlices)]() {
+                const std::vector<std::span<const BamRecord>> slices(std::begin(records),
+                                                                     std::end(records));
+                return EncodeSlices(slices, /*useWorkers=*/false);
+            })};
         pendingSlices.clear();
+        encodingContainers.push_back(task->get_future());
+        compressionPool->Submit([task]() { (*task)(); });
+
+        while (!std::empty(encodingContainers) &&
+               ((std::size(encodingContainers) > config.CompressionWorkers) ||
+                (encodingContainers.front().wait_for(std::chrono::seconds{0}) ==
+                 std::future_status::ready))) {
+            WriteNextEncodedContainer();
+        }
+    }
+
+    void WriteNextEncodedContainer()
+    {
+        std::future<CramEncodedContainer> next{std::move(encodingContainers.front())};
+        encodingContainers.pop_front();
+        WriteEncoded(next.get());
+    }
+
+    void WriteEncodedContainers()
+    {
+        while (!std::empty(encodingContainers)) {
+            WriteNextEncodedContainer();
+        }
     }
 
     // the records written one by one go before a container of EncodeContainer
@@ -1543,6 +1598,7 @@ struct CramWriter::Impl
             pendingRecords.reserve(static_cast<std::size_t>(config.RecordsPerSlice));
         }
         FlushContainer();
+        WriteEncodedContainers();
     }
 
     void MaybeFlush()
@@ -1739,6 +1795,7 @@ struct CramWriter::Impl
         }
 
         FlushContainer();
+        WriteEncodedContainers();
         WaitForPendingWrite();
 
         WriteEofContainer();

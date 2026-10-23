@@ -430,7 +430,7 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 | `MinorVersion`                 | `uint8_t`                                        | `0`     | CRAM minor version (`0` or `1`)                                   |
 | `WriteCrai`                    | `bool`                                           | `false` | Write `<output>.crai` sidecar                                     |
 | `CraiPath`                     | `optional<path>`                                 | `{}`    | CRAI output path override                                         |
-| `CompressionWorkers`           | `size_t`                                         | `0`     | CRAM block compression threads (`0` = synchronous)                |
+| `CompressionWorkers`           | `size_t`                                         | `0`     | CRAM encode threads: with 2 or more, up to this many containers encode at once, in file order (`0` = synchronous) |
 | `CompressionLevel`             | `optional<int>`                                  | `{}`    | Optional gzip compression level (`[0,12]`)                        |
 | `UseTempFile`                  | `bool`                                           | `false` | Write to a temporary path and rename atomically on `Close()`      |
 | `ReferenceSequences`           | `vector<string_view>`                            | `{}`    | The sequence of each @SQ line: reference-based CRAM (see below)   |

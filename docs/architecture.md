@@ -690,12 +690,15 @@ the query decode stops after the region end when no record waits for a mate.
 `CramWriterConfig` sets the layout: `RecordsPerSlice{10000}` and
 `SlicesPerContainer{1}`. A value of `SlicesPerContainer` <= 0 flushes only at
 `Close()`. `CompressionWorkers` (default 0) sets the size of a pbcopper
-`ThreadPool`. With 2 or more workers, the pool compresses the slices of a
-container in parallel when it has more than one slice. Otherwise (the default
-`SlicesPerContainer{1}`), it compresses the blocks of a slice in parallel when
-the slice has 8 or more blocks. With workers, `std::async` writes each
-container, so the next container can encode while the previous one writes.
-With exactly 1 worker, only this write runs in parallel.
+`ThreadPool`. With 2 or more workers, `Write()` hands each full container to
+the pool as one task, which owns its records, and goes on with the next
+records. Up to `CompressionWorkers` containers encode at once; the caller
+writes them in file order, so the file is the same as without workers.
+`Close()`, `WriteContainer()` and `WriteSerialized()` first write the
+containers in flight. With 1 worker, the caller encodes each container itself;
+it compresses the blocks of a slice in parallel when the slice has 8 or more
+blocks. With workers, `std::async` writes each container, so the next
+container can encode while the previous one writes.
 
 `EncodeContainer()` and `Serialize()` are `const` and run on any thread.
 `WriteContainer()` and `WriteSerialized()` write the result in order. An

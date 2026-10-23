@@ -2256,6 +2256,42 @@ TEST_F(CramWriterReaderTest, MultiContainerPipelineRoundTrip)
     }
 }
 
+TEST_F(CramWriterReaderTest, EncodingContainersOnThePoolGivesTheSerialBytes)
+{
+    // With 2 or more workers, Write() encodes whole containers on the pool, several at once.
+    // The file, and its CRAI, must be the same as the one the caller encodes alone.
+    const SamHeader header = MakeMinimalHeader();
+    const auto write = [&](const std::filesystem::path& path, const std::size_t workers) {
+        CramWriterConfig config;
+        config.RecordsPerSlice = 3;
+        config.SlicesPerContainer = 2;
+        config.CompressionWorkers = workers;
+        config.WriteCrai = true;
+        CramWriter writer{path, header, config};
+        for (int i = 0; i < 200; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("pool{}", i), "ACGTTGCA"));
+        }
+        writer.Close();
+    };
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    };
+    const auto serial{tmpPath.parent_path() / "serial.cram"};
+    write(serial, 0);
+    write(tmpPath, 4);
+    EXPECT_EQ(read(tmpPath), read(serial));
+    EXPECT_EQ(read(tmpPath.string() + ".crai"), read(serial.string() + ".crai"));
+
+    CramReader reader{tmpPath};
+    int i = 0;
+    for (const auto& record : reader.Records()) {
+        EXPECT_EQ(record.Name(), std::format("pool{}", i));
+        ++i;
+    }
+    EXPECT_EQ(i, 200);
+}
+
 TEST_F(CramWriterReaderTest, MultiSliceCraiHasPerSliceEntries)
 {
     const SamHeader header = MakeMinimalHeader();
