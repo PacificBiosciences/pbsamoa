@@ -6,7 +6,6 @@
 #include <pbsamoa/core/Bgzf.hpp>
 #include <pbsamoa/core/CigarOp.hpp>
 #include <pbsamoa/core/SamHeader.hpp>
-#include <pbsamoa/io/BamRawReader.hpp>
 
 #include <pbcopper/parallel/FireAndForgetIndexed.h>
 

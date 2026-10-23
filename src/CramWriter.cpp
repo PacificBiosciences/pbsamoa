@@ -710,6 +710,10 @@ struct CramWriter::Impl
 
     void ValidateConfig() const
     {
+        if (config.MajorVersion != 3) {
+            throw std::runtime_error(
+                std::format("CramWriter: MajorVersion must be 3, got {}", config.MajorVersion));
+        }
         if (config.RecordsPerSlice <= 0) {
             throw std::runtime_error(std::format(
                 "CramWriter: RecordsPerSlice must be positive, got {}", config.RecordsPerSlice));

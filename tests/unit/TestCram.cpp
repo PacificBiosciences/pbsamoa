@@ -1609,6 +1609,13 @@ TEST(CramWriterConfig, NewFieldsHaveCorrectDefaults)
     EXPECT_FALSE(config.UseTempFile);
 }
 
+TEST_F(CramWriterReaderTest, RejectsMajorVersionOtherThan3)
+{
+    CramWriterConfig config;
+    config.MajorVersion = 2;
+    EXPECT_THROW((CramWriter{tmpPath, MakeMinimalHeader(), config}), std::runtime_error);
+}
+
 TEST_F(CramWriterReaderTest, WriteHeaderOnly)
 {
     const SamHeader header = MakeMinimalHeader();
