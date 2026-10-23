@@ -264,6 +264,15 @@ void WarmLibdeflateDispatch(libdeflate_decompressor* decompressor, std::span<con
 
 }  // namespace
 
+std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data, const int order)
+{
+    return CheckedCompress<unsigned int>(
+        data, "CramRans4x8Compress",
+        [order](unsigned char* input, unsigned int inputSize, unsigned int* outSize) {
+            return rans_compress(input, inputSize, outSize, (order == 0) ? 0 : 1);
+        });
+}
+
 void CompressRansQualityBlock(CramBlock& block)
 {
     constexpr std::string_view CONTEXT{"CompressRansQualityBlock"};
@@ -504,7 +513,8 @@ CompressionRegistry::CompressionRegistry()
     };
 
     methods_[4] = {
-        .Compress = CramRans4x8Compress,
+        .Compress = static_cast<std::vector<std::byte> (*)(std::span<const std::byte>)>(
+            &CramRans4x8Compress),
         .Decompress = CramRans4x8Decompress,
     };
 

@@ -2317,6 +2317,112 @@ TEST_F(CramWriterReaderTest, MultiContainerPipelineRoundTrip)
     }
 }
 
+namespace {
+
+// Bases from a fixed linear congruential sequence: incompressible beyond 2 bits per base.
+std::string PseudoRandomBases(const std::size_t n, std::uint32_t seed)
+{
+    std::string bases(n, 'A');
+    for (char& b : bases) {
+        seed = (seed * 1664525U) + 1013904223U;
+        b = "ACGT"[seed >> 30];
+    }
+    return bases;
+}
+
+}  // namespace
+
+TEST_F(CramWriterReaderTest, AdaptiveBlockMethodsNeverGrowABlockAndCompressRepeats)
+{
+    const SamHeader header = MakeMinimalHeader();
+    CramWriterConfig config;  // GZIP and AdaptiveBlockMethods by default
+    const CramWriter writer{tmpPath, header, config};
+    std::vector<BamRecord> records;
+    for (int i = 0; i < 300; ++i) {
+        records.push_back(MakeUnmappedRecord(std::format("read{}", i), std::string(200, 'A')));
+    }
+    const CramEncodedContainer encoded{writer.EncodeContainer(records)};
+    std::size_t compressed = 0;
+    for (const CramSlice& slice : encoded.Container.Slices) {
+        for (const CramBlock& block : slice.ExternalBlocks) {
+            EXPECT_LE(block.CompressedSize, block.RawSize) << "block " << block.ContentId;
+            if (block.Method == CramBlockMethod::RAW) {
+                EXPECT_EQ(block.CompressedSize, block.RawSize);
+            } else {
+                ++compressed;
+            }
+        }
+    }
+    EXPECT_GT(compressed, 0U);  // the bases, qualities and names repeat
+}
+
+TEST_F(CramWriterReaderTest, PinnedSeriesAndFixedMethodsAreNotTried)
+{
+    const SamHeader header = MakeMinimalHeader();
+    std::vector<BamRecord> records;
+    for (int i = 0; i < 500; ++i) {
+        records.push_back(MakeUnmappedRecord(std::format("read{:05}", i), "ACGTACGT"));
+    }
+    // RN pinned to RAW: its block (about 5 KB of names) stays RAW though gzip would shrink it.
+    CramWriterConfig pinned;
+    pinned.DataSeriesCompressionMethods[CramDataSeries::RN] = CramBlockMethod::RAW;
+    bool sawRawNames = false;
+    for (const CramSlice& slice :
+         CramWriter{tmpPath, header, pinned}.EncodeContainer(records).Container.Slices) {
+        for (const CramBlock& block : slice.ExternalBlocks) {
+            sawRawNames =
+                sawRawNames || ((block.Method == CramBlockMethod::RAW) && (block.RawSize > 4000));
+        }
+    }
+    EXPECT_TRUE(sawRawNames);
+
+    // Without trials every non-empty external block keeps the configured method.
+    CramWriterConfig fixed;
+    fixed.BlockCompressionMethod = CramBlockMethod::RANS4X8;
+    fixed.AdaptiveBlockMethods = false;
+    for (const CramSlice& slice :
+         CramWriter{tmpPath, header, fixed}.EncodeContainer(records).Container.Slices) {
+        for (const CramBlock& block : slice.ExternalBlocks) {
+            if (block.RawSize > 0) {
+                EXPECT_EQ(block.Method, CramBlockMethod::RANS4X8) << "block " << block.ContentId;
+            }
+        }
+    }
+}
+
+TEST_F(CramWriterReaderTest, SampledMethodTrialsDoNotDependOnWorkers)
+{
+    // 64 records of 6 kb: the base and quality blocks pass 256 KiB, so the trials sample them.
+    const SamHeader header = MakeMinimalHeader();
+    const auto write = [&](const std::filesystem::path& path, const std::size_t workers) {
+        CramWriterConfig config;
+        config.BlockCompressionMethod = CramBlockMethod::RANS4X8;
+        config.RecordsPerSlice = 64;
+        config.CompressionWorkers = workers;
+        CramWriter writer{path, header, config};
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            writer.Write(MakeUnmappedRecord(std::format("long{}", i), PseudoRandomBases(6000, i)));
+        }
+        writer.Close();
+    };
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    };
+    const auto serial{tmpPath.parent_path() / "serial.cram"};
+    write(serial, 0);
+    write(tmpPath, 4);
+    EXPECT_EQ(read(tmpPath), read(serial));
+
+    CramReader reader{tmpPath};
+    std::uint32_t i = 0;
+    for (const auto& record : reader.Records()) {
+        EXPECT_EQ(record.Sequence(), PseudoRandomBases(6000, i));
+        ++i;
+    }
+    EXPECT_EQ(i, 256U);
+}
+
 TEST_F(CramWriterReaderTest, EncodingContainersOnThePoolGivesTheSerialBytes)
 {
     // With 2 or more workers, Write() encodes whole containers on the pool, several at once.

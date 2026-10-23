@@ -104,6 +104,12 @@ const CLI_v2::Option SeriesCompression{
     "repeatable" : true
 })"};
 
+const CLI_v2::Option FixedBlockCompression{
+    R"({
+    "names" : ["fixed-block-compression"],
+    "description" : "Compress every block with --block-compression. By default each block also tries gzip and rans4x8 of order 0 and 1, and keeps the smallest (or raw)."
+})"};
+
 const CLI_v2::Option WriteCrai{
     R"({
     "names" : ["write-crai"],
@@ -284,7 +290,7 @@ CLI_v2::Interface CreateInterface()
     interface.DisableNumThreadsOption();
     interface.AddOptions({RecordsPerSlice, BasesPerSlice, BgzfThreads, DecodeThreads,
                           ConvertToBamRecord, CompressionThreads, BlockCompression,
-                          SeriesCompression, WriteCrai, Reference});
+                          SeriesCompression, FixedBlockCompression, WriteCrai, Reference});
     interface.AddPositionalArguments({Input, Output});
     return interface;
 }
@@ -360,6 +366,7 @@ int Runner(const CLI_v2::Results& results)
     }
 
     config.WriteCrai = results[WriteCrai];
+    config.AdaptiveBlockMethods = !results[FixedBlockCompression];
 
     // --reference: the sequences stay alive until the writer closes. A file without sequences
     // (empty, or not plain FASTA such as gzip) stops the run: no silent reference-free output.

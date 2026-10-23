@@ -621,6 +621,20 @@ other than `RN`, or `FQZCOMP` on one other than `QS`/`QQ`, throws
 `CompressionLevel` can stay empty, and gzip then uses level 6; when set, it is a
 libdeflate level in [0, 12]. `Open()` throws for a level outside that range.
 
+With `AdaptiveBlockMethods` (default `true`), the configured method is the first
+candidate of an external block, not a fixed choice, as in htslib: the block also
+tries `GZIP` and `RANS4X8` of order 1 and 0, and keeps the smallest, or `RAW`
+when none is smaller than the data. A block over 256 KiB tries them on 8 chunks
+of 32 KiB spread over it and compresses the whole with the winner only. The
+choice depends on the bytes of the block alone, so the file is the same for any
+`CompressionWorkers`, and these candidates are all CRAM 3.0 methods. A series
+in `DataSeriesCompressionMethods` keeps its method, as do `RAW`,
+`NAME_TOKENISER`, `FQZCOMP`, and `RANS4X16` on `QS`/`QQ`. On HG002 chr20
+(HiFi) the trials cut a reference-based CRAM from 223.9 to 186.0 MB (htslib
+3.0: 198.6 MB) for 22% more encode CPU; without a reference, gzip's matches
+between overlapping reads in a sorted slice take the bases from 352 to 200 MB,
+and the file from 574.6 to 386.8 MB, for twice the encode CPU.
+
 ### Reference
 
 A reference-based CRAM stores only the differences of a mapped record to the

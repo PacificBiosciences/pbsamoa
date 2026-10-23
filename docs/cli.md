@@ -96,7 +96,8 @@ Options:
 | `--convert-to-bam-record` | Opt in to decoding BAM input into `BamRecord` before CRAM write |
 | `--decode-threads N` | BAM decode workers for `--convert-to-bam-record` mode (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 16). A value of `0` or more also enables that mode |
 | `--compression-threads N` | CRAM block compression workers (default: `-1` = auto, max 8; `0` = serial; explicit counts capped at 8) |
-| `--block-compression METHOD` | Default CRAM block method (default: `rans4x8`) |
+| `--block-compression METHOD` | Default CRAM block method (default: `rans4x8`). Each block also tries `gzip` and `rans4x8` of order 1 and 0 and keeps the smallest, or `raw` |
+| `--fixed-block-compression` | Compress every block with `--block-compression`, without trials: faster, larger files |
 | `--series-compression SERIES=METHOD` | Override method for a CRAM data series (repeatable; `SERIES` is not case-sensitive) |
 | `--write-crai` | Write samtools-compatible `<output>.crai` |
 | `--reference ref.fa` | Write reference-based CRAM: mapped records store only their differences to the reference, and @SQ lines without `M5` get one (an existing `M5` is kept). Readers then need the reference. A file without sequences (empty, or gzip-compressed) is an error. The FASTA is memory-mapped; with `ref.fa.fai` nothing but the needed bases and the `M5` hashes reads it |
@@ -114,7 +115,8 @@ Notes:
 
 - Output must use `.cram` extension.
 - Input must use `.bam` or `.sam` extension.
-- Default block compression method is `rans4x8`.
+- Default block compression method is `rans4x8`, the first of the methods each block
+  tries; `--series-compression` fixes the method of a series.
 - BAM input defaults to `RawRecord` passthrough into `CramWriter`; use
   `--convert-to-bam-record` to use the decoded `BamRecord` path.
 - Advanced `CramWriterConfig` fields (`SlicesPerContainer`,

@@ -26,7 +26,20 @@ namespace Samoa {
 struct CramWriterConfig
 {
     /// \brief Block compression method to use for data blocks.
+    ///
+    /// With AdaptiveBlockMethods, it is the first candidate of each block, not a fixed choice.
     CramBlockMethod BlockCompressionMethod{CramBlockMethod::GZIP};
+
+    /// \brief Choose the method of each data block by trial, as htslib does.
+    ///
+    /// A block tries BlockCompressionMethod, GZIP, and RANS4X8 of order 1 and 0, and keeps the
+    /// smallest, or RAW when none is smaller than the data. A block over 256 KiB tries them on
+    /// 8 samples of 32 KiB spread over it and compresses the whole with the winner only. The
+    /// choice depends on the bytes of the block alone, so the file does not depend on
+    /// CompressionWorkers. Fixed: series in DataSeriesCompressionMethods, and the methods that
+    /// only fit some series (NAME_TOKENISER for RN; FQZCOMP and RANS4X16 for QS and QQ), and
+    /// RAW. false compresses every block with its configured method.
+    bool AdaptiveBlockMethods{true};
 
     /// \brief Optional per-data-series block compression overrides.
     ///

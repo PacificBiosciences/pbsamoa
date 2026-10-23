@@ -422,8 +422,9 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 
 |             Field              |                       Type                       | Default |                            Description                            |
 | ------------------------------ | ------------------------------------------------ | ------- | ----------------------------------------------------------------- |
-| `BlockCompressionMethod`       | `CramBlockMethod`                                | `GZIP`  | Default block method                                              |
-| `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series method overrides                                  |
+| `BlockCompressionMethod`       | `CramBlockMethod`                                | `GZIP`  | Default block method; with `AdaptiveBlockMethods`, the first candidate of each block |
+| `AdaptiveBlockMethods`         | `bool`                                           | `true`  | Each external block also tries `GZIP` and `RANS4X8` of order 1 and 0, and keeps the smallest (or `RAW`); see below |
+| `DataSeriesCompressionMethods` | `unordered_map<CramDataSeries, CramBlockMethod>` | `{}`    | Per-data-series methods; these series are not tried               |
 | `RecordsPerSlice`              | `int32_t`                                        | `10000` | Max records per slice                                             |
 | `BasesPerSlice`                | `int64_t`                                        | `20000000` | Max bases per slice: sequence bases plus BAM aux bytes (`0` = no limit) |
 | `SlicesPerContainer`           | `int32_t`                                        | `1`     | Max slices per container (`<= 0` means unlimited until `Close()`) |
@@ -440,6 +441,13 @@ CramWriter writer{"output.cram", header, CramWriterConfig{
 Notes:
 - `MinorVersion` is automatically raised to `1` when selected codecs require CRAM 3.1.
 - `CompressionLevel` is currently applied to gzip-compressed blocks; non-gzip codecs ignore it.
+- With `AdaptiveBlockMethods`, an external block keeps the smallest of `BlockCompressionMethod`,
+  `GZIP`, `RANS4X8` order 1 and order 0, or `RAW` when none shrinks it. A block over 256 KiB
+  tries them on 8 chunks of 32 KiB and compresses the whole with the winner only. The choice
+  depends on the block's bytes alone, so the file does not depend on `CompressionWorkers`, and
+  it is the same in `EncodeContainer`. Not tried: the series in `DataSeriesCompressionMethods`,
+  `RAW`, `NAME_TOKENISER`, `FQZCOMP`, and `RANS4X16` on `QS`/`QQ`. `false` restores one method
+  for every block (`convert --fixed-block-compression`).
 - A slice ends with the record that reaches `RecordsPerSlice` or `BasesPerSlice`, so it holds at
   least one record. The bases limit counts as htslib's `bases_per_slice` does; htslib's default is 5000000.
 - The constructor throws `std::runtime_error` when `MajorVersion != 3`, `RecordsPerSlice <= 0`,
@@ -561,7 +569,8 @@ and the CRAI rows of each slice (`SliceIndex`).
   and `LZMA` only when the library is built with bzip2 and liblzma). `Register`
   adds a custom method ID above 8. It throws `std::runtime_error` for a built-in ID.
   Do not register a method while other threads use the registry.
-- `CramGzipCompress`, `CramGzipDecompress`, and `CramFqzcompCompress` call one codec directly.
+- `CramGzipCompress`, `CramGzipDecompress`, `CramRans4x8Compress(data, order)` (order 0 or 1)
+  and `CramFqzcompCompress` call one codec directly.
 
 This header includes `<libdeflate.h>`, because some overloads take a reusable
 `libdeflate_compressor*` or `libdeflate_decompressor*`.

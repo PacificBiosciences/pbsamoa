@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -368,12 +369,130 @@ void CompressFqzDataBlock(CramBlock& block, std::uint64_t totalQualityBytes,
     block.CompressedSize = static_cast<std::int32_t>(std::size(block.Data));
 }
 
-void CompressDataBlock(CramBlock& block, CramBlockMethod method, bool useThreadLocalCompressor,
-                       LibdeflateCompressorPtr& gzipCompressor, std::optional<int> compressionLevel,
-                       std::uint64_t totalQualityBytes,
+// One trial of AdaptiveBlockMethods: a method, and the order for RANS4X8.
+struct BlockMethodCandidate
+{
+    CramBlockMethod Method;
+    int Order{1};
+
+    bool operator==(const BlockMethodCandidate&) const = default;
+};
+
+std::vector<std::byte> CompressWithCandidate(const BlockMethodCandidate candidate,
+                                             const std::span<const std::byte> data,
+                                             libdeflate_compressor* gzipCompressor,
+                                             const std::optional<int> compressionLevel)
+{
+    switch (candidate.Method) {
+        case CramBlockMethod::GZIP:
+            return CramGzipCompress(data, gzipCompressor, compressionLevel);
+        case CramBlockMethod::RANS4X8:
+            return CramRans4x8Compress(data, candidate.Order);
+        default:
+            return CompressionRegistry::Instance().Compress(candidate.Method, data);
+    }
+}
+
+// A block of at most this many bytes tries each candidate on all of it; a larger one tries
+// them on SAMPLE_CHUNKS chunks of SAMPLE_CHUNK_BYTES spread evenly over it.
+constexpr std::size_t FULL_TRIAL_BYTES{256 * 1024};
+constexpr std::size_t SAMPLE_CHUNK_BYTES{32 * 1024};
+constexpr std::size_t SAMPLE_CHUNKS{8};
+
+std::vector<std::byte> TrialSample(const std::span<const std::byte> data)
+{
+    std::vector<std::byte> sample;
+    sample.reserve(SAMPLE_CHUNKS * SAMPLE_CHUNK_BYTES);
+    const std::size_t last{std::size(data) - SAMPLE_CHUNK_BYTES};
+    for (std::size_t i = 0; i < SAMPLE_CHUNKS; ++i) {
+        const auto chunk{data.subspan((last * i) / (SAMPLE_CHUNKS - 1), SAMPLE_CHUNK_BYTES)};
+        sample.insert(std::end(sample), std::begin(chunk), std::end(chunk));
+    }
+    return sample;
+}
+
+// Compresses block with the smallest of the candidates, or keeps it RAW when none is smaller.
+void CompressAdaptiveBlock(CramBlock& block, const CramBlockMethod configured,
+                           libdeflate_compressor* gzipCompressor,
+                           const std::optional<int> compressionLevel)
+{
+    const std::span<const std::byte> data{block.Data};
+    block.RawSize = static_cast<std::int32_t>(std::size(data));
+    block.Method = CramBlockMethod::RAW;
+    block.CompressedSize = block.RawSize;
+    if (std::empty(data)) {
+        return;
+    }
+
+    std::vector<BlockMethodCandidate> candidates{{.Method = configured}};
+    for (const BlockMethodCandidate c :
+         {BlockMethodCandidate{.Method = CramBlockMethod::GZIP},
+          BlockMethodCandidate{.Method = CramBlockMethod::RANS4X8},
+          BlockMethodCandidate{.Method = CramBlockMethod::RANS4X8, .Order = 0}}) {
+        if (!std::ranges::contains(candidates, c)) {
+            candidates.push_back(c);
+        }
+    }
+
+    const bool sampled{std::size(data) > FULL_TRIAL_BYTES};
+    const std::vector<std::byte> sample{sampled ? TrialSample(data) : std::vector<std::byte>{}};
+    const std::span<const std::byte> trialData{sampled ? std::span<const std::byte>{sample} : data};
+    std::optional<BlockMethodCandidate> best;
+    std::vector<std::byte> bestData;
+    std::size_t bestSize{std::size(trialData)};  // RAW
+    for (const BlockMethodCandidate c : candidates) {
+        std::vector<std::byte> compressed{
+            CompressWithCandidate(c, trialData, gzipCompressor, compressionLevel)};
+        if (std::size(compressed) < bestSize) {
+            bestSize = std::size(compressed);
+            best = c;
+            bestData = std::move(compressed);
+        }
+    }
+    if (!best) {
+        return;
+    }
+    if (sampled) {
+        bestData = CompressWithCandidate(*best, data, gzipCompressor, compressionLevel);
+        if (std::size(bestData) >= std::size(data)) {
+            return;
+        }
+    }
+    block.Data = std::move(bestData);
+    block.Method = best->Method;
+    block.CompressedSize = static_cast<std::int32_t>(std::size(block.Data));
+}
+
+// Whether AdaptiveBlockMethods may replace the configured method of a block.
+bool IsAdaptableBlockMethod(const CramBlockMethod method, const std::int32_t contentId)
+{
+    switch (method) {
+        case CramBlockMethod::GZIP:
+        case CramBlockMethod::BZIP2:
+        case CramBlockMethod::LZMA:
+        case CramBlockMethod::RANS4X8:
+        case CramBlockMethod::ADAPTIVE_ARITH:
+            return true;
+        case CramBlockMethod::RANS4X16:
+            return (contentId != QS_BLOCK_ID) && (contentId != QQ_BLOCK_ID);
+        default:
+            return false;
+    }
+}
+
+void CompressDataBlock(CramBlock& block, CramBlockMethod method, bool adaptive,
+                       bool useThreadLocalCompressor, LibdeflateCompressorPtr& gzipCompressor,
+                       std::optional<int> compressionLevel, std::uint64_t totalQualityBytes,
                        std::span<const std::uint32_t> qualityRecordLengths,
                        std::span<const std::uint32_t> qualityRecordFlags)
 {
+    if (adaptive && IsAdaptableBlockMethod(method, block.ContentId)) {
+        CompressAdaptiveBlock(
+            block, method,
+            SelectGzipCompressor(useThreadLocalCompressor, gzipCompressor, compressionLevel),
+            compressionLevel);
+        return;
+    }
     if ((method == CramBlockMethod::RANS4X16) &&
         ((block.ContentId == QS_BLOCK_ID) || (block.ContentId == QQ_BLOCK_ID))) {
         CompressRansQualityBlock(block);
@@ -650,6 +769,8 @@ struct CramWriter::Impl
     // the compressor of the writer thread; EncodeContainer uses thread-local ones
     mutable LibdeflateCompressorPtr gzipCompressor;
     std::shared_ptr<Parallel::ThreadPool<>> compressionPool;
+    // the blocks of the series in DataSeriesCompressionMethods: no trial of methods
+    std::unordered_set<std::int32_t> pinnedBlockIds;
     // Containers of Write() that the pool encodes, in file order: each task owns its records.
     std::deque<std::future<CramEncodedContainer>> encodingContainers;
 
@@ -837,6 +958,11 @@ struct CramWriter::Impl
     void Open()
     {
         ValidateConfig();
+        for (const auto& [series, blockId] : DATA_SERIES) {
+            if (config.DataSeriesCompressionMethods.contains(series)) {
+                pinnedBlockIds.insert(blockId);
+            }
+        }
 
         const int level = config.CompressionLevel.value_or(DEFAULT_GZIP_COMPRESSION_LEVEL);
         gzipCompressor.reset(libdeflate_alloc_compressor(level));
@@ -1343,6 +1469,15 @@ struct CramWriter::Impl
                                             std::size(dataBlocks) >= MIN_BLOCKS_FOR_PARALLEL;
         const bool useThreadLocalCompressor = useThreadLocalGzip || useParallelCompression;
 
+        // External blocks whose series the config does not pin choose their method by trial.
+        std::vector<char> adaptiveBlocks(std::size(dataBlocks), 0);
+        for (std::size_t i = 0; i < std::size(dataBlocks); ++i) {
+            adaptiveBlocks[i] = static_cast<char>(
+                config.AdaptiveBlockMethods &&
+                (dataBlocks[i].ContentType == CramBlockContentType::EXTERNAL_DATA) &&
+                !pinnedBlockIds.contains(dataBlocks[i].ContentId));
+        }
+
         if (useParallelCompression) {
             std::atomic<std::int32_t> nextBlock{0};
             const std::int32_t totalBlocks = static_cast<std::int32_t>(std::size(dataBlocks));
@@ -1352,11 +1487,12 @@ struct CramWriter::Impl
                 compressionPool,
                 MakeWorkStealingTask(
                     &nextBlock, totalBlocks,
-                    [&dataBlocks, &dataBlockMethods, useThreadLocalCompressor,
+                    [&dataBlocks, &dataBlockMethods, &adaptiveBlocks, useThreadLocalCompressor,
                      &gzipCompressor = gzipCompressor, compressionLevel = config.CompressionLevel,
                      totalQualityBytes, qualityRecordLengths, qualityRecordFlags](std::int32_t i) {
                         CompressDataBlock(dataBlocks[static_cast<std::size_t>(i)],
                                           dataBlockMethods[static_cast<std::size_t>(i)],
+                                          adaptiveBlocks[static_cast<std::size_t>(i)] != 0,
                                           useThreadLocalCompressor, gzipCompressor,
                                           compressionLevel, totalQualityBytes, qualityRecordLengths,
                                           qualityRecordFlags);
@@ -1366,6 +1502,7 @@ struct CramWriter::Impl
             for (std::int32_t i = 0; i < static_cast<std::int32_t>(std::size(dataBlocks)); ++i) {
                 CompressDataBlock(dataBlocks[static_cast<std::size_t>(i)],
                                   dataBlockMethods[static_cast<std::size_t>(i)],
+                                  adaptiveBlocks[static_cast<std::size_t>(i)] != 0,
                                   useThreadLocalCompressor, gzipCompressor, config.CompressionLevel,
                                   totalQualityBytes, qualityRecordLengths, qualityRecordFlags);
             }

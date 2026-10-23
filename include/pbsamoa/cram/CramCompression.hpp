@@ -99,6 +99,10 @@ std::vector<std::byte> CramGzipCompress(std::span<const std::byte> data,
                                         libdeflate_compressor* compressor,
                                         std::optional<int> compressionLevel = std::nullopt);
 
+/// \brief Compress data using rANS 4x8 of order 0 or 1 (CRAM 3.0 method RANS4X8; the
+/// stream records its order).
+std::vector<std::byte> CramRans4x8Compress(std::span<const std::byte> data, int order);
+
 /// \brief Compress quality data using fqzcomp with explicit per-record
 /// metadata.
 std::vector<std::byte> CramFqzcompCompress(std::span<const std::byte> data,
